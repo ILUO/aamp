@@ -56,6 +56,24 @@ test('network errors are classified for DNS, timeout, reset, TLS, and HTTP failu
   }
 })
 
+test('SMTP 535 bridge output triggers an immediate retry instead of a readiness timeout', () => {
+  assert.equal(typeof runtimeNetwork?.bridgeAuthenticationRetryError, 'function')
+
+  const error = runtimeNetwork.bridgeAuthenticationRetryError([
+    '[stdout] starting task runtime',
+    '[stderr] Invalid login: 535 5.7.8 Authentication credentials invalid',
+  ])
+
+  assert.equal(error?.code, 'EAAMPMAILAUTH')
+  assert.equal(runtimeNetwork.classifyNetworkError(error), 'mail_auth')
+  assert.equal(runtimeNetwork.isRetryableNetworkError(error), true)
+  assert.equal(runtimeNetwork.bridgeAuthenticationRetryError(['[stdout] bridge is starting']), undefined)
+
+  assert.match(controller, /record\.emitter\.emit\('output'/)
+  assert.match(controller, /bridgeAuthenticationRetryError\(record\.outputTail\)/)
+  assert.match(controller, /检测到 AAMP 邮箱凭据失效，正在重新注册并重试/)
+})
+
 test('retry helper retries transient failures and reports every attempt', async () => {
   assert.equal(typeof runtimeNetwork?.withNetworkRetry, 'function')
 

@@ -24,6 +24,7 @@ const TLS_CODES = new Set([
   'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
 ]);
+const MAIL_AUTH_CODES = new Set(['EAAMPMAILAUTH']);
 
 function asErrorDetails(error) {
   return error && typeof error === 'object' ? error : {};
@@ -95,6 +96,7 @@ export function classifyNetworkError(error) {
   if (status !== undefined) return status >= 500 ? 'http_5xx' : 'http_4xx';
 
   const codes = errorCodes(error);
+  if (codes.some((code) => MAIL_AUTH_CODES.has(code))) return 'mail_auth';
   if (codes.some((code) => DNS_CODES.has(code))) return 'dns';
   if (codes.some((code) => CONNECT_TIMEOUT_CODES.has(code))) return 'connect_timeout';
   if (codes.some((code) => TIMEOUT_CODES.has(code))) return 'timeout';
@@ -121,8 +123,16 @@ export function isRetryableHttpStatus(status) {
 export function isRetryableNetworkError(error) {
   const status = errorStatus(error);
   if (status !== undefined) return isRetryableHttpStatus(status);
-  return ['dns', 'connect_timeout', 'timeout', 'connection_reset', 'unreachable', 'network']
+  return ['mail_auth', 'dns', 'connect_timeout', 'timeout', 'connection_reset', 'unreachable', 'network']
     .includes(classifyNetworkError(error));
+}
+
+export function bridgeAuthenticationRetryError(outputLines) {
+  const output = (outputLines || []).slice(-30).join('\n');
+  if (!/\b535(?:\s+5\.7\.8)?\b[^\n]*authentication credentials invalid/i.test(output)) return undefined;
+  const error = new Error('AAMP 邮箱认证凭据已失效');
+  error.code = 'EAAMPMAILAUTH';
+  return error;
 }
 
 function defaultSleep(ms) {

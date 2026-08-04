@@ -47,6 +47,7 @@ CODEM_INSTALLER_URL="${CODEM_INSTALLER_URL:-https://sf-unpkg-src.bytedance.net/@
 CODEM_INSTALLER_CONFIRM="${CODEM_INSTALLER_CONFIRM:-}"
 CODEM_PROVIDER_PREFLIGHT="${CODEM_PROVIDER_PREFLIGHT:-true}"
 CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SECONDS="${CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SECONDS:-60}"
+CODEX_CHATGPT_APP_CLI="/Applications/ChatGPT.app/Contents/Resources/codex"
 CODEX_APP_CLI="/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTO_UPDATE="${CODEX_AUTO_UPDATE:-true}"
 CODEX_NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex}"
@@ -63,8 +64,9 @@ FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.20}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
-AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.0-dev.170"
+AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
+AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
+AAMP_TASK_AGENT_VERSION="0.1.0-dev.174"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -740,8 +742,32 @@ script_file_task_agent_version() {
   sed -n 's/^AAMP_TASK_AGENT_VERSION="\([^"]*\)".*/\1/p' "$file" | head -n 1
 }
 
+script_file_task_agent_name() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  sed -n 's/^AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-\([^}]*\)}"$/\1/p' "$file" | head -n 1
+}
+
 task_agent_global_package_dir() {
   printf '%s/lib/node_modules/%s' "$NPM_GLOBAL_PREFIX" "$AAMP_TASK_AGENT_NAME"
+}
+
+legacy_task_agent_global_package_dir() {
+  printf '%s/lib/node_modules/%s' "$NPM_GLOBAL_PREFIX" "$AAMP_TASK_AGENT_LEGACY_NAME"
+}
+
+remove_legacy_task_agent_global_install() {
+  [ "$AAMP_TASK_AGENT_NAME" != "$AAMP_TASK_AGENT_LEGACY_NAME" ] || return 0
+  [ -d "$(legacy_task_agent_global_package_dir)" ] || return 0
+
+  agent_detail "removing legacy task-agent npm package: $AAMP_TASK_AGENT_LEGACY_NAME"
+  sanitize_inherited_npm_exec_env
+  "$NPM_BIN" uninstall -g \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    --prefix "$NPM_GLOBAL_PREFIX" \
+    "$AAMP_TASK_AGENT_LEGACY_NAME" >>"$ONE_CLICK_LOG" 2>&1
+  hash -r 2>/dev/null || true
 }
 
 task_agent_global_package_version() {
@@ -788,6 +814,7 @@ ensure_task_agent_global_install_locked() {
     agent_detail "keeping newer task-agent npm package: installed=$installed_version requested=$expected_version"
     return 0
   fi
+  remove_legacy_task_agent_global_install || return 1
   agent_detail "synchronizing task-agent npm package: current=${installed_version:-missing} expected=$expected_version"
   npm_install_global "$AAMP_TASK_AGENT_NAME@$expected_version" >>"$ONE_CLICK_LOG" 2>&1 || return 1
   task_agent_global_install_is_current "$expected_version"
@@ -803,9 +830,11 @@ ensure_task_agent_global_install() {
 
 short_command_is_current() {
   local target="$1"
-  local installed_version
+  local installed_name installed_version
   [ -x "$target" ] || return 1
+  installed_name="$(script_file_task_agent_name "$target" || true)"
   installed_version="$(script_file_task_agent_version "$target" || true)"
+  [ "$installed_name" = "$AAMP_TASK_AGENT_NAME" ] || return 1
   [ "$installed_version" = "$AAMP_TASK_AGENT_VERSION" ]
 }
 
@@ -2899,17 +2928,54 @@ acquire_codex_update_lock() {
   return 1
 }
 
+codex_update_output_file() {
+  if [ -n "${AAMP_RUN_LOG_DIR:-}" ]; then
+    printf '%s\n' "$AAMP_RUN_LOG_DIR/codex-update.log"
+  elif [ -n "${ONE_CLICK_LOG:-}" ]; then
+    printf '%s\n' "${ONE_CLICK_LOG}.codex-update"
+  else
+    mktemp "${TMPDIR:-/tmp}/aamp-codex-update.XXXXXX"
+  fi
+}
+
 run_codex_cli_update() {
   local codex_bin="$1"
+  local output_file="$2"
   local status
-  acquire_codex_update_lock || return 75
-  if "$codex_bin" update >>"$ONE_CLICK_LOG" 2>&1; then
-    status=0
+
+  : >"$output_file"
+  if acquire_codex_update_lock; then
+    if "$codex_bin" update >"$output_file" 2>&1; then
+      status=0
+    else
+      status=$?
+    fi
+    release_dir_lock "$CODEX_UPDATE_LOCK_DIR"
   else
-    status=$?
+    status=75
+    printf '%s\n' '无法获取 Codex CLI 升级锁。' >"$output_file"
   fi
-  release_dir_lock "$CODEX_UPDATE_LOCK_DIR"
+
+  if [ -n "${ONE_CLICK_LOG:-}" ]; then
+    cat "$output_file" >>"$ONE_CLICK_LOG" 2>/dev/null || true
+  fi
   return "$status"
+}
+
+report_codex_update_warning() {
+  local reason="$1"
+  local output_file="${2:-}"
+
+  agent_detail "warning: $reason"
+  printf '\n🔴 %s\n' "$reason" >&2
+  if [ -n "$output_file" ] && [ -s "$output_file" ]; then
+    printf '%s\n' '--- Codex CLI 升级输出 ---' >&2
+    if ! cat "$output_file" >&2; then
+      printf '%s\n' '无法读取 Codex CLI 升级输出。' >&2
+    fi
+    printf '%s\n' '--- Codex CLI 升级输出结束 ---' >&2
+  fi
+  printf '%s\n\n' '已忽略本次升级失败，继续后续启动流程。' >&2
 }
 
 confirm_codex_cli_update() {
@@ -2935,7 +3001,7 @@ ensure_codex_cli_updated() {
   [ "$AGENT" = "codex" ] || return 0
   [ "$CODEX_AUTO_UPDATE" = "true" ] || return 0
 
-  local codex_bin version_before latest_version version_line comparison_status confirmation_status refreshed_bin version_after status
+  local codex_bin version_before latest_version version_line comparison_status confirmation_status refreshed_bin version_after status update_log
   codex_bin="$(resolve_codex_cli_for_acp || true)"
   [ -n "$codex_bin" ] || return 0
   version_before="$(codex_cli_version_number "$codex_bin" || true)"
@@ -2960,27 +3026,31 @@ ensure_codex_cli_updated() {
   fi
 
   printf '%s\n' "$version_line"
-  printf '%s\n' '检测到 Codex CLI 有可用更新。不升级可能导致后续任务执行失败，本次启动前需升级 Codex CLI。'
+  printf '%s\n' '检测到 Codex CLI 有可用更新。不升级可能导致后续任务执行失败。'
   if confirm_codex_cli_update; then
     confirmation_status=0
   else
     confirmation_status=$?
   fi
   if [ "$confirmation_status" -eq 2 ]; then
-    agent_fail "Codex CLI 升级需要用户确认。请在交互终端中重新运行本次启动。"
+    agent_log "无法读取 Codex CLI 升级确认，已跳过升级并继续使用当前版本。"
+    return 0
   fi
   if [ "$confirmation_status" -ne 0 ]; then
-    agent_fail "已取消 Codex CLI 升级，本次启动已终止。"
+    agent_log "已跳过 Codex CLI 升级，继续使用当前版本。"
+    return 0
   fi
 
   agent_log "正在更新 Codex CLI..."
-  if run_codex_cli_update "$codex_bin"; then
+  update_log="$(codex_update_output_file)"
+  if run_codex_cli_update "$codex_bin" "$update_log"; then
     status=0
   else
     status=$?
   fi
   if [ "$status" -ne 0 ]; then
-    agent_fail "Codex CLI 升级失败（状态码：${status}），本次启动已终止。"
+    report_codex_update_warning "Codex CLI 升级失败（状态码：${status}）。" "$update_log"
+    return 0
   fi
 
   refreshed_bin="$(resolve_codex_cli_for_acp || true)"
@@ -2988,12 +3058,14 @@ ensure_codex_cli_updated() {
   version_after="$(codex_cli_version_number "$refreshed_bin" || true)"
   agent_detail "Codex CLI update completed: path=$refreshed_bin version=${version_after:-unknown}"
   if codex_cli_update_available "$version_after" "$latest_version"; then
-    agent_fail "Codex CLI 升级未生效（当前版本：${version_after:-未知}，目标版本：${latest_version}），本次启动已终止。"
+    report_codex_update_warning "Codex CLI 升级未生效（当前版本：${version_after:-未知}，目标版本：${latest_version}）。" "$update_log"
+    return 0
   else
     comparison_status=$?
   fi
   if [ "$comparison_status" -ne 1 ]; then
-    agent_fail "无法验证 Codex CLI 升级结果（当前版本：${version_after:-未知}，目标版本：${latest_version}），本次启动已终止。"
+    report_codex_update_warning "无法验证 Codex CLI 升级结果（当前版本：${version_after:-未知}，目标版本：${latest_version}）。" "$update_log"
+    return 0
   fi
 }
 
@@ -3382,6 +3454,11 @@ resolve_codex_cli_for_acp() {
     return 0
   fi
 
+  if is_macos && [ -x "$CODEX_CHATGPT_APP_CLI" ]; then
+    printf '%s\n' "$CODEX_CHATGPT_APP_CLI"
+    return 0
+  fi
+
   if is_macos && [ -x "$CODEX_APP_CLI" ]; then
     printf '%s\n' "$CODEX_APP_CLI"
     return 0
@@ -3413,7 +3490,7 @@ validate_codex_acp_command() {
   if [ "$status" -ne 0 ]; then
     agent_log "Codex ACP command validation failed:"
     printf '%s\n' "$output" >&2
-    agent_fail "codex ACP command is unavailable; check Codex.app or reinstall codex CLI"
+    agent_fail "codex ACP command is unavailable; check ChatGPT.app, Codex.app, or reinstall codex CLI"
   fi
 }
 

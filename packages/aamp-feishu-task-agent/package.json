@@ -1,12 +1,12 @@
 {
-  "name": "@zengxingyuan/aamp-feishu-task-agent",
+  "name": "@larktask/aamp-feishu-task-agent",
   "files": [
     "bootstrap/aamp-feishu-task-agent-bootstrap.sh",
     "bin",
     "README.md"
   ],
   "license": "MIT",
-  "version": "0.1.0-dev.170",
+  "version": "0.1.0-dev.174",
   "description": "One-click manager for local Agent and Feishu Bot bindings.",
   "type": "module",
   "bin": {

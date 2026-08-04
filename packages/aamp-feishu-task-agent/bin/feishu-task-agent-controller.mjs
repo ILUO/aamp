@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   agentStartRetryError,
+  bridgeAuthenticationRetryError,
   classifyNetworkError,
   createSerializedLineWriter,
   describeNetworkError,
@@ -45,7 +46,7 @@ const NPM_CACHE_DIR = process.env.AAMP_TASK_NPM_CACHE_DIR || path.join(os.tmpdir
 const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.20';
 const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || '@zengxingyuan/aamp-feishu-bridge@0.1.51';
 const INSTALL_COMMAND = process.env.AAMP_TASK_INSTALL_COMMAND
-  || 'npx -y --package @zengxingyuan/aamp-feishu-task-agent@dev feishu-task-agent install';
+  || 'npx -y --package @larktask/aamp-feishu-task-agent@dev feishu-task-agent install';
 const DEFAULT_AGENT = process.env.AAMP_TASK_DEFAULT_AGENT || '';
 const DEFAULT_AAMP_HOST = process.env.AAMP_TASK_AAMP_HOST || 'https://meshmail.ai';
 const DEBUG_MODE = process.env.AAMP_TASK_DEBUG_MODE === 'true';
@@ -236,7 +237,11 @@ async function runNetworkStage(operation, {
     shouldRetry,
     onRetry: async (event) => {
       await appendDiagnostic(logFile, { type: 'network.retry', stage, label, host: safeDiagnosticUrl(host), ...event });
-      console.log(`[aamp-one-click] ${label}遇到网络波动，正在重试（${event.attempt + 1}/${event.maxAttempts}）...`);
+      if (event.category === 'mail_auth') {
+        console.log(`[aamp-one-click] ${label}检测到 AAMP 邮箱凭据失效，正在重新注册并重试（${event.attempt + 1}/${event.maxAttempts}）...`);
+      } else {
+        console.log(`[aamp-one-click] ${label}遇到网络波动，正在重试（${event.attempt + 1}/${event.maxAttempts}）...`);
+      }
       launchDetachedDiagnostic(() => probeFailureEndpoints(host, logFile, environment, `${stage}-retry-probe`));
     },
   });
@@ -867,6 +872,7 @@ async function startManagedProcess({ label, packageSpec, executable, args, env, 
     const safeLine = redact(line);
     record.outputTail.push(`[${streamName}] ${safeLine}`);
     if (record.outputTail.length > 30) record.outputTail.shift();
+    record.emitter.emit('output', safeLine);
     if (streamName === 'stdout' && line.trim()) {
       try {
         const event = JSON.parse(line.trim());
@@ -948,6 +954,8 @@ async function stopManagedProcess(record) {
 }
 
 async function waitForEvent(record, predicate, timeoutMs = READY_TIMEOUT_MS) {
+  const authenticationError = bridgeAuthenticationRetryError(record.outputTail);
+  if (authenticationError) throw authenticationError;
   const existing = record.events.find(predicate);
   if (existing) return existing;
   if (record.exited) {
@@ -970,13 +978,21 @@ async function waitForEvent(record, predicate, timeoutMs = READY_TIMEOUT_MS) {
       const tail = record.outputTail.slice(-10).join('\n');
       reject(new Error(`${record.label} exited before ready (${exit.signal || exit.code})${tail ? `:\n${tail}` : ''}\n日志：${record.logFile}`));
     };
+    const onOutput = () => {
+      const error = bridgeAuthenticationRetryError(record.outputTail);
+      if (!error) return;
+      cleanup();
+      reject(error);
+    };
     const cleanup = () => {
       clearTimeout(timeout);
       record.emitter.off('event', onEvent);
       record.emitter.off('exit', onExit);
+      record.emitter.off('output', onOutput);
     };
     record.emitter.on('event', onEvent);
     record.emitter.on('exit', onExit);
+    record.emitter.on('output', onOutput);
   });
 }
 
@@ -1333,6 +1349,8 @@ async function pairingConsumed(pairingFile) {
 async function waitForInitialBinding(record, pairingFile) {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    const authenticationError = bridgeAuthenticationRetryError(record.outputTail);
+    if (authenticationError) throw authenticationError;
     if (record.exited) {
       const tail = record.outputTail.slice(-10).join('\n');
       throw new Error(`${record.label} exited before binding completed${tail ? `:\n${tail}` : ''}\n日志：${record.logFile}`);
