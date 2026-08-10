@@ -70,8 +70,8 @@ const MAX_FEISHU_WRITE_FAILURE_ERROR_LENGTH = 1200
 const MAX_SHORT_FAILURE_REASON_LENGTH = 240
 const MAX_TASK_STEP_CONTENT_LENGTH = 500
 const MAX_TASK_STEP_QUOTE_LENGTH = 4000
-const WRITE_STATUS_STREAM_TASK_STEPS = false
-// Keep tool stream events as text-boundary markers, but temporarily hide them from Feishu task execution records.
+// Feishu task execution records should be stable, user-readable progress. Keep low-signal status pings
+// and tool telemetry out, but preserve content-bearing todo items and cleaned text deltas.
 const WRITE_TOOL_STREAM_TASK_STEPS = false
 const MAX_INCOMING_FEISHU_ATTACHMENTS = 20
 const MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES = MAX_DELIVERY_FILE_SIZE_BYTES
@@ -1037,6 +1037,11 @@ const IGNORED_STREAM_STEP_TEXTS = new Set([
   'ACP agent is thinking',
   'ACP agent is composing the reply',
   'ACP response received',
+  'Agent is working',
+  'CLI task started',
+  'CLI session started',
+  'CLI stream completed',
+  'Token usage updated',
   'Tool running: Read file',
   'Tool running: tool',
   'Tool completed: tool',
@@ -1266,38 +1271,28 @@ function streamEventToTaskSteps(event: AampStreamEvent): StreamTaskStep[] {
     if (/^Tool\s+(?:running|completed|failed|pending):/i.test(label ?? '')) {
       return uniqueTaskSteps([buildToolTaskStep(event.payload)])
     }
-    return WRITE_STATUS_STREAM_TASK_STEPS ? uniqueTaskSteps([{
-      kind: 'status',
-      content: getPayloadText(event.payload, ['label', 'stage', 'status', 'message', 'text']) ?? '',
-      quote: formatTaskStepQuote(event.payload, ['label', 'stage', 'status', 'message', 'text']),
-    }]) : []
+    return []
   }
   if (eventType === 'progress') {
     const label = getPayloadText(event.payload, ['label', 'title', 'summary', 'message', 'text'])
     if (/^Tool\s+(?:running|completed|failed|pending):/i.test(label ?? '')) {
       return uniqueTaskSteps([buildToolTaskStep(event.payload)])
     }
-    return WRITE_STATUS_STREAM_TASK_STEPS ? uniqueTaskSteps([{
-      kind: 'status',
-      content: getPayloadText(event.payload, ['label', 'stage', 'message', 'text']) ?? '',
-      quote: formatTaskStepQuote(event.payload, ['label', 'stage', 'message', 'text']),
-    }]) : []
+    return []
   }
   if (eventType === 'todo') {
-    if (!WRITE_STATUS_STREAM_TASK_STEPS) return []
     const itemTexts = Array.isArray(event.payload.items)
       ? event.payload.items.map(getTodoItemText)
       : []
+    const fallbackText = getPayloadText(event.payload, ['summary', 'label', 'message', 'text'])
     return uniqueTaskSteps([
       ...itemTexts.map((content) => content ? {
         kind: 'todo' as const,
         content,
-        quote: formatTaskStepQuote(event.payload, ['items', 'summary', 'label', 'message', 'text']),
       } : undefined),
       itemTexts.length === 0 ? {
         kind: 'todo',
-        content: getPayloadText(event.payload, ['summary', 'label', 'message', 'text']) ?? '',
-        quote: formatTaskStepQuote(event.payload, ['items', 'summary', 'label', 'message', 'text']),
+        content: fallbackText ?? '',
       } : undefined,
     ])
   }
@@ -1305,13 +1300,7 @@ function streamEventToTaskSteps(event: AampStreamEvent): StreamTaskStep[] {
     return uniqueTaskSteps([buildToolTaskStep(event.payload)])
   }
   if (eventType === 'error') {
-    if (!WRITE_STATUS_STREAM_TASK_STEPS) return []
-    const message = getPayloadText(event.payload, ['message', 'error', 'reason'])
-    return uniqueTaskSteps([{
-      kind: 'status',
-      content: '执行遇到错误',
-      quote: message ? formatTaskStepQuote(event.payload, ['message', 'error', 'reason']) : undefined,
-    }])
+    return []
   }
   return []
 }

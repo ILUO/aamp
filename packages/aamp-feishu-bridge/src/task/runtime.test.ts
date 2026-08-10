@@ -501,7 +501,7 @@ test('runtime does not write adjacent tool calls as task steps', async () => {
   }
 })
 
-test('runtime writes adjacent text deltas as human task steps', async () => {
+test('runtime writes content-bearing text deltas as task steps', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
   const fakeAamp = new FakeAampClient()
   const fakeFeishu = new FakeFeishuTaskClient()
@@ -572,6 +572,63 @@ test('runtime writes adjacent text deltas as human task steps', async () => {
       {
         taskGuid: 'task_guid_text_stream',
         content: '我已经确认任务需要参考 IM 的过程展示策略。',
+      },
+    ])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime writes semantic todo stream items and ignores lifecycle labels', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 60_000,
+  })
+  const aampTaskId = 'feishu-task-task_guid_todo_stream-evt_todo_stream'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_todo_stream',
+      taskGuid: 'task_guid_todo_stream',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_todo')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_todo)
+    })
+
+    fakeAamp.emitStreamEvent('stream_todo', {
+      id: 'stream_event_todo_1',
+      taskId: aampTaskId,
+      seq: 1,
+      type: 'todo' as AampStreamEvent['type'],
+      payload: {
+        items: [
+          { id: 'prompt', content: 'Prompt sent to ACP agent', status: 'completed' },
+          { id: 'plan', content: '正在生成 AI 测试工程师 JD 文档', status: 'completed' },
+          { id: 'reply', content: 'ACP agent is composing the reply', status: 'in_progress' },
+          { id: 'usage', content: 'Token usage updated', status: 'in_progress' },
+        ],
+        summary: 'Agent is working',
+      },
+    })
+
+    await runtime.stop()
+
+    assert.deepEqual(fakeFeishu.steps, [
+      {
+        taskGuid: 'task_guid_todo_stream',
+        step: { content: '正在生成 AI 测试工程师 JD 文档' },
       },
     ])
   } finally {

@@ -450,13 +450,18 @@ export function buildFeishuTaskDispatch(
 ): FeishuTaskDispatch {
   const taskId = buildFeishuTaskId(event)
   const sessionKey = `feishu-task:${task.guid}`
+  const {
+    feishuLarkCliProfile: _feishuLarkCliProfile,
+    feishuLarkCliBin: _feishuLarkCliBin,
+    ...dispatchContextOptions
+  } = options ?? {}
   return {
     taskId,
     sessionKey,
     title: `Feishu Task: ${task.summary || task.guid}`,
     bodyText: buildFeishuTaskContext(event, task, eventKind, options),
     dispatchContext: {
-      ...buildFeishuTaskDispatchContext(event, task, eventKind, options),
+      ...buildFeishuTaskDispatchContext(event, task, eventKind, dispatchContextOptions),
       [SESSION_KEY_DISPATCH_CONTEXT_KEY]: sessionKey,
     },
     promptRules: buildFeishuTaskPromptRules(options),
