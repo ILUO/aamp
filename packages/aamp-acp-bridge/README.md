@@ -16,7 +16,7 @@ Initialize the bridge:
 npx aamp-acp-bridge init
 ```
 
-The init wizard scans installed ACP-capable agents, including Hermes, then lets you select multiple entries with arrow keys, Space, and Enter. For each selected agent, choose one authorization setup method:
+The init wizard scans installed ACP-capable agents, including Hermes and Trae, then lets you select multiple entries with arrow keys, Space, and Enter. For each selected agent, choose one authorization setup method:
 
 - Pair with a five-minute terminal QR code plus the matching `aamp://connect?...` URL.
 - Manually enter `senderPolicies`.
@@ -161,3 +161,32 @@ Hermes exposes ACP through `hermes acp`, so its bridge config uses a raw ACP com
 ```
 
 `init --agent hermes` writes this command automatically when Hermes is installed.
+
+### Trae 2.0
+
+Trae 2.0 exposes a native ACP server. Sign in with TraeCLI first, then initialize the canonical `trae` agent:
+
+```bash
+traecli login
+npx aamp-acp-bridge init --agent trae
+```
+
+Discovery prefers `traecli` and falls back to `traex`. The generated config uses one of these raw ACP commands:
+
+```json
+{
+  "name": "trae",
+  "acpCommand": "traecli acp serve",
+  "slug": "trae-bridge"
+}
+```
+
+```json
+{
+  "name": "trae",
+  "acpCommand": "traex acp serve",
+  "slug": "trae-bridge"
+}
+```
+
+The default deliberately omits `--yolo`. ACP Bridge already auto-approves ACP permission requests through `acpx`, while Trae's `--yolo` also disables sandboxing. Only add `--yolo` through an explicit custom `acpCommand` when the surrounding environment provides an external sandbox.

@@ -1,6 +1,6 @@
 # aamp-feishu-task-agent
 
-One-click manager for binding local Codex/Cursor agents to user-owned Feishu
+One-click manager for binding local Codex/Cursor/Trae agents to user-owned Feishu
 Bots and running the corresponding Task bridges.
 
 ## Install and bind
@@ -26,10 +26,19 @@ The package installs the short command `feishu-task-agent`. Running that short
 command without arguments shows help. Running the standalone Bootstrap without
 arguments is equivalent to `install`.
 
-Only `codex` and `cursor` are supported by this flow. `--agent codex|cursor`
-fixes the Agent for every new binding in that command instead of prompting.
+The supported canonical agent names are `codex`, `cursor`, and `trae`.
+`--agent codex|cursor|trae` fixes the Agent for every new binding in that command instead of
+prompting.
 The Task Agent flow only supports the Online environment. Environment-switch
 arguments are not supported.
+
+For Trae 2.0, use the canonical binding name `trae`. The launcher detects
+`traecli` first and falls back to `traex`, then starts the native ACP server with
+exactly `traecli acp serve` or `traex acp serve`. Complete Trae login through its
+own CLI; the one-click flow checks `login status`, opens its `login` flow when
+necessary, and does not read or store Trae credentials. The generated command
+intentionally omits `--yolo` and never adds a bypass or approval flag. Trae does
+not fall back to the separate Coco CLI profile.
 
 ## Commands
 
@@ -111,7 +120,7 @@ App ID/App Secret and resumes user authorization. If the persisted Agent or
 Feishu Bridge mailbox identity is missing or has changed, startup rejects that
 pair and asks the user to bind it again instead of reporting a false success.
 The same Online `LARKSUITE_CLI_CONFIG_DIR` is passed to Feishu Bridge, Agent
-Bridge, and the local Codex/Cursor process so task execution resolves the exact
+Bridge, and the local Codex/Cursor/Trae process so task execution resolves the exact
 profile created during binding.
 
 ## Local logs and diagnostics

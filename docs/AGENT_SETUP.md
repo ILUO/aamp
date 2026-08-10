@@ -43,6 +43,7 @@ Use this order:
 | --- | --- | --- |
 | `codex` | `aamp-acp-bridge` | `aamp-cli-bridge` with built-in `codex` profile |
 | `claude` | `aamp-acp-bridge` | `aamp-cli-bridge` with built-in `claude` profile |
+| `trae` (Trae 2.0) | `aamp-acp-bridge` with native `traecli acp serve` or `traex acp serve` | explicit custom ACP command |
 | `openclaw` | `aamp-openclaw-plugin` | `aamp-acp-bridge`, then `aamp-cli-bridge` |
 | known ACP-compatible agent | `aamp-acp-bridge` | `aamp-cli-bridge` |
 | custom ACP-compatible agent | `aamp-acp-bridge` with explicit `acpCommand` | `aamp-cli-bridge` |
@@ -68,6 +69,9 @@ Known ACP agent names:
 | `kimi` | `kimi` |
 | `kiro` | `kiro` |
 | `hermes` | `hermes acp` |
+| `trae` | `traecli acp serve`, falling back to `traex acp serve` |
+
+For Trae 2.0, use the canonical agent name `trae`. The executable aliases are detected automatically, and the generated command omits `--yolo`. The `coco` entry below remains a separate CLI Bridge profile; ACP Bridge does not migrate or fall back to it.
 
 If one of these is requested and installed, configure it with ACP Bridge unless
 the table above says a more native connector is preferred, as with OpenClaw.

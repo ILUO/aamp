@@ -61,12 +61,12 @@ FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v
 FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs,im,mail,mindnotes,minutes,note,sheets,slides,task,vc,wiki}"
 FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
-ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.20}"
+ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.21}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.0-dev.174"
+AAMP_TASK_AGENT_VERSION="0.1.0-dev.175"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -132,7 +132,7 @@ Running the standalone one-click script without a subcommand is the same as
 "feishu-task-agent install".
 
 Options:
-  --agent codex|cursor        Use this Agent for every new binding in the command.
+  --agent codex|cursor|trae   Use this Agent for every new binding in the command.
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
   -h, --help                 Show this help
@@ -1179,8 +1179,8 @@ npm_install_register_helper() {
 
 validate_agent_name() {
   case "$1" in
-    codex|cursor) ;;
-    *) agent_fail "--agent must be codex or cursor" ;;
+    codex|cursor|trae) ;;
+    *) agent_fail "--agent must be codex, cursor, or trae" ;;
   esac
 }
 
@@ -1203,6 +1203,9 @@ agent_cli_detected() {
     cursor)
       find_cursor_agent_cli >/dev/null 2>&1
       ;;
+    trae)
+      find_trae_cli >/dev/null 2>&1
+      ;;
     *)
       return 1
       ;;
@@ -1217,9 +1220,12 @@ discover_interactive_agents() {
   if agent_cli_detected cursor; then
     DETECTED_AGENTS+=("cursor")
   fi
+  if agent_cli_detected trae; then
+    DETECTED_AGENTS+=("trae")
+  fi
 
   if [ "${#DETECTED_AGENTS[@]}" -eq 0 ]; then
-    agent_fail "暂未检测到本地智能体。请先安装并登录 Codex 或 Cursor CLI 后重试。"
+    agent_fail "暂未检测到本地智能体。请先安装并登录 Codex、Cursor 或 Trae CLI 后重试。"
   fi
 }
 
@@ -1254,7 +1260,7 @@ select_agent_interactively() {
   discover_interactive_agents
 
   if ! exec 3<>/dev/tty; then
-    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor"
+    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|trae"
   fi
 
   tty_state="$(stty -g <&3)"
@@ -2678,6 +2684,21 @@ find_cursor_agent_cli() {
   return 1
 }
 
+find_trae_cli() {
+  local candidate
+  for candidate in traecli traex; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_trae_cli() {
+  find_trae_cli
+}
+
 resolve_cursor_cli_for_acp() {
   command -v cursor
 }
@@ -2717,6 +2738,11 @@ ensure_agent_cli() {
 
   if [ "$AGENT" = "codex" ]; then
     resolve_codex_cli_for_acp >/dev/null 2>&1 || agent_fail "未检测到 codex CLI。请先安装 Codex CLI 后重新运行脚本。"
+    return 0
+  fi
+
+  if [ "$AGENT" = "trae" ]; then
+    find_trae_cli >/dev/null 2>&1 || agent_fail "未检测到 traecli 或 traex CLI。请先安装 Trae CLI 后重新运行脚本。"
     return 0
   fi
 
@@ -3105,6 +3131,20 @@ run_codex_login() {
   return "$status"
 }
 
+run_trae_login_status() {
+  local trae_bin
+  trae_bin="$(resolve_trae_cli || true)"
+  [ -n "$trae_bin" ] || return 127
+  "$trae_bin" login status >/dev/null 2>&1
+}
+
+run_trae_login() {
+  local trae_bin
+  trae_bin="$(resolve_trae_cli || true)"
+  [ -n "$trae_bin" ] || return 127
+  "$trae_bin" login
+}
+
 print_cursor_gatekeeper_help() {
   local cursor_bin
   local cursor_real
@@ -3386,6 +3426,13 @@ ensure_agent_login() {
         run_cursor_login_status || agent_fail "cursor CLI 仍未登录。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
       fi
       ;;
+    trae)
+      if ! run_trae_login_status; then
+        agent_log "Trae CLI 未登录，正在启动登录流程。"
+        run_trae_login || agent_fail "Trae CLI 登录失败。请先执行 'traecli login' 或 'traex login' 完成登录后重新运行脚本。"
+        run_trae_login_status || agent_fail "Trae CLI 仍未登录。请先执行 'traecli login' 或 'traex login' 完成登录后重新运行脚本。"
+      fi
+      ;;
     codem)
       ensure_codem_local_bin_on_path
       codem --version >/dev/null
@@ -3469,6 +3516,14 @@ resolve_codex_cli_for_acp() {
 
 build_acp_agent_command() {
   ACP_AGENT_COMMAND="$AGENT"
+  if [ "$AGENT" = "trae" ]; then
+    local trae_bin
+    trae_bin="$(resolve_trae_cli)" || agent_fail "Trae CLI is unavailable after discovery"
+    ACP_AGENT_COMMAND="$trae_bin acp serve"
+    agent_detail "using native Trae ACP command: $ACP_AGENT_COMMAND"
+    return 0
+  fi
+
   if [ "$AGENT" != "codex" ]; then
     return 0
   fi
@@ -3688,6 +3743,9 @@ run_internal_discover_agents() {
   fi
   if agent_cli_detected cursor; then
     agents+=("cursor")
+  fi
+  if agent_cli_detected trae; then
+    agents+=("trae")
   fi
   local joined=""
   if [ "${#agents[@]}" -gt 0 ]; then

@@ -43,7 +43,7 @@ const NPM_BIN = process.env.AAMP_TASK_NPM_BIN || 'npm';
 const NPM_REGISTRY = process.env.AAMP_TASK_NPM_REGISTRY || 'https://registry.npmjs.org/';
 const FEISHU_API_PROBE_URL = 'https://open.feishu.cn/';
 const NPM_CACHE_DIR = process.env.AAMP_TASK_NPM_CACHE_DIR || path.join(os.tmpdir(), 'aamp-one-click-npm-cache');
-const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.20';
+const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.21';
 const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || '@zengxingyuan/aamp-feishu-bridge@0.1.51';
 const INSTALL_COMMAND = process.env.AAMP_TASK_INSTALL_COMMAND
   || 'npx -y --package @larktask/aamp-feishu-task-agent@dev feishu-task-agent install';
@@ -56,7 +56,7 @@ const NETWORK_RETRY_BASE_DELAY_MS = Math.max(0, Number(process.env.AAMP_TASK_NET
 const NETWORK_PROBE_TIMEOUT_MS = Math.max(1_000, Number(process.env.AAMP_TASK_NETWORK_PROBE_TIMEOUT_MS || 10_000));
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
-const AGENT_TYPES = ['codex', 'cursor'];
+const AGENT_TYPES = ['codex', 'cursor', 'trae'];
 const PROFILE_DOMAINS = [
   'base', 'calendar', 'contact', 'docs', 'im', 'mail', 'mindnotes', 'minutes',
   'note', 'sheets', 'slides', 'task', 'vc', 'wiki',
@@ -434,7 +434,7 @@ function validateBinding(binding, index) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(binding.binding_id)) {
     throw new Error(`bindings[${index}].binding_id 必须是 UUID`);
   }
-  if (!AGENT_TYPES.includes(binding.agent_type)) throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor`);
+  if (!AGENT_TYPES.includes(binding.agent_type)) throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor/trae`);
   assertString(binding.aamp_host, `bindings[${index}].aamp_host`);
   assertString(binding.environment?.name, `bindings[${index}].environment.name`);
   assertString(binding.bot?.app_id, `bindings[${index}].bot.app_id`);
@@ -1663,7 +1663,7 @@ function displayBindings(bindings) {
 async function discoverAgents() {
   const result = await runBootstrapHelper('__discover-agents', '');
   const agents = (result.agents || []).filter((agent) => AGENT_TYPES.includes(agent));
-  if (!agents.length) throw new Error('暂未检测到本地智能体。请先安装并登录 Codex 或 Cursor CLI 后重试。');
+  if (!agents.length) throw new Error('暂未检测到本地智能体。请先安装并登录 Codex、Cursor 或 Trae CLI 后重试。');
   return agents;
 }
 

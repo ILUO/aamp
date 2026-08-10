@@ -6,9 +6,14 @@ const senderPolicySchema = z.object({
   dispatchContextRules: z.record(z.array(z.string().min(1))).optional(),
 })
 
+const acpCommandSchema = z.string().min(1).refine(
+  (command) => command.trim().length > 0,
+  { message: 'ACP command must contain a non-whitespace character' },
+)
+
 const agentConfigSchema = z.object({
   name: z.string().min(1),
-  acpCommand: z.string().min(1),
+  acpCommand: acpCommandSchema,
   slug: z.string().regex(/^[a-z0-9-]+$/).optional(),
   description: z.string().optional(),
   summary: z.string().optional(),

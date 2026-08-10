@@ -4,7 +4,11 @@ import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import * as qrcode from 'qrcode-terminal'
 import type { AgentConfig, BridgeConfig, SenderPolicy } from '../config.js'
-import { defaultAcpCommand, detectKnownAgent } from '../agent-resolver.js'
+import {
+  KNOWN_AGENTS,
+  defaultAcpCommand,
+  detectKnownAgent,
+} from '../agent-resolver.js'
 import { getDefaultCredentialsPath } from '../storage.js'
 import {
   createPairingCode,
@@ -12,12 +16,6 @@ import {
   defaultSenderPoliciesFile,
   pairingUrlToWebUrl,
 } from '../pairing.js'
-
-const KNOWN_AGENTS = [
-  'claude', 'codex', 'gemini', 'goose', 'openclaw',
-  'opencode', 'cursor', 'copilot', 'kimi', 'kiro',
-  'hermes',
-]
 
 function ask(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
   if ((rl as unknown as { closed?: boolean }).closed) return Promise.resolve('')
@@ -481,6 +479,31 @@ export function renderPairingCode(name: string, mailbox: string, pairingFile: st
   console.log(`  Pairing URL: ${pairing.connectUrl}`)
 }
 
+export function resolveInitAcpCommand(configPath: string, name: string): string {
+  let previousCommand: string | undefined
+
+  if (existsSync(configPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(configPath, 'utf-8')) as { agents?: unknown }
+      if (Array.isArray(raw.agents)) {
+        const previousAgent = raw.agents.find((agent) => (
+          agent !== null
+          && typeof agent === 'object'
+          && (agent as Record<string, unknown>).name === name
+        )) as Record<string, unknown> | undefined
+        const candidate = previousAgent?.acpCommand
+        if (typeof candidate === 'string' && candidate.trim().length > 0) {
+          previousCommand = candidate
+        }
+      }
+    } catch {
+      // A malformed legacy config is not authoritative for command resolution.
+    }
+  }
+
+  return defaultAcpCommand(name, previousCommand)
+}
+
 export async function runInit(configPath: string, opts: RunInitOptions = {}): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
 
@@ -560,7 +583,7 @@ export async function runInit(configPath: string, opts: RunInitOptions = {}): Pr
 
   for (const name of selected) {
     const slug = `${name}-bridge`
-    const acpCommand = defaultAcpCommand(name)
+    const acpCommand = resolveInitAcpCommand(configPath, name)
     const credFile = getDefaultCredentialsPath(name)
     const pairingFile = defaultPairingFile(name)
     const senderPoliciesFile = defaultSenderPoliciesFile(name)
