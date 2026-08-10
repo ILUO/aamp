@@ -816,7 +816,7 @@ ensure_task_agent_global_install_locked() {
   fi
   remove_legacy_task_agent_global_install || return 1
   agent_detail "synchronizing task-agent npm package: current=${installed_version:-missing} expected=$expected_version"
-  npm_install_global "$AAMP_TASK_AGENT_NAME@$expected_version" >>"$ONE_CLICK_LOG" 2>&1 || return 1
+  npm_install_global "$AAMP_TASK_AGENT_NAME@$expected_version" --force >>"$ONE_CLICK_LOG" 2>&1 || return 1
   task_agent_global_install_is_current "$expected_version"
 }
 
