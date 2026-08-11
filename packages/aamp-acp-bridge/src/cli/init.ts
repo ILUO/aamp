@@ -4,7 +4,7 @@ import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import * as qrcode from 'qrcode-terminal'
 import type { AgentConfig, BridgeConfig, SenderPolicy } from '../config.js'
-import { defaultAcpCommand, detectKnownAgent } from '../agent-resolver.js'
+import { KNOWN_AGENTS, defaultAcpCommand, detectKnownAgent } from '../agent-resolver.js'
 import { getDefaultCredentialsPath } from '../storage.js'
 import {
   createPairingCode,
@@ -12,12 +12,6 @@ import {
   defaultSenderPoliciesFile,
   pairingUrlToWebUrl,
 } from '../pairing.js'
-
-const KNOWN_AGENTS = [
-  'claude', 'codex', 'gemini', 'goose', 'openclaw',
-  'opencode', 'cursor', 'copilot', 'kimi', 'kiro',
-  'hermes',
-]
 
 function ask(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
   if ((rl as unknown as { closed?: boolean }).closed) return Promise.resolve('')
