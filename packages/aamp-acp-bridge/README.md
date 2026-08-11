@@ -148,3 +148,27 @@ Hermes exposes ACP through `hermes acp`, so its bridge config uses a raw ACP com
 ```
 
 `init --agent hermes` writes this command automatically when Hermes is installed.
+
+### Traex
+
+Trae CLI 2.0 exposes a native ACP server through `traex`. Sign in first, then
+initialize the native Traex profile:
+
+```bash
+traex login
+npx aamp-acp-bridge init --agent traex
+```
+
+The generated agent config uses:
+
+```json
+{
+  "name": "traex",
+  "acpCommand": "traex acp serve",
+  "slug": "traex-bridge"
+}
+```
+
+ACP Bridge detects only the `traex` executable for this profile. It does not
+fall back to Coco, `trae`, or `traecli`. The generated command deliberately
+omits `--yolo`.

@@ -4,6 +4,12 @@ import { existsSync } from 'node:fs'
 const CODEX_APP_CLI = '/Applications/Codex.app/Contents/Resources/codex'
 const CODEX_APP_ACP_COMMAND = `env CODEX_PATH=${CODEX_APP_CLI} npx -y @agentclientprotocol/codex-acp`
 
+export const KNOWN_AGENTS: readonly string[] = [
+  'claude', 'codex', 'gemini', 'goose', 'openclaw',
+  'opencode', 'cursor', 'copilot', 'kimi', 'kiro',
+  'hermes', 'traex',
+]
+
 export interface AgentResolution {
   command: string
   acpCommand: string
@@ -11,7 +17,9 @@ export interface AgentResolution {
 }
 
 function baseAcpCommand(name: string): string {
-  return name === 'hermes' ? 'hermes acp' : name
+  if (name === 'hermes') return 'hermes acp'
+  if (name === 'traex') return 'traex acp serve'
+  return name
 }
 
 function detectVersion(command: string): string {
