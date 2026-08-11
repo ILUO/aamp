@@ -56,7 +56,7 @@ const NETWORK_RETRY_BASE_DELAY_MS = Math.max(0, Number(process.env.AAMP_TASK_NET
 const NETWORK_PROBE_TIMEOUT_MS = Math.max(1_000, Number(process.env.AAMP_TASK_NETWORK_PROBE_TIMEOUT_MS || 10_000));
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
-const AGENT_TYPES = ['codex', 'cursor', 'trae'];
+const AGENT_TYPES = ['codex', 'cursor', 'trae', 'traex'];
 const PROFILE_DOMAINS = [
   'base', 'calendar', 'contact', 'docs', 'im', 'mail', 'mindnotes', 'minutes',
   'note', 'sheets', 'slides', 'task', 'vc', 'wiki',
@@ -434,7 +434,7 @@ function validateBinding(binding, index) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(binding.binding_id)) {
     throw new Error(`bindings[${index}].binding_id 必须是 UUID`);
   }
-  if (!AGENT_TYPES.includes(binding.agent_type)) throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor/trae`);
+  if (!AGENT_TYPES.includes(binding.agent_type)) throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor/trae/traex`);
   assertString(binding.aamp_host, `bindings[${index}].aamp_host`);
   assertString(binding.environment?.name, `bindings[${index}].environment.name`);
   assertString(binding.bot?.app_id, `bindings[${index}].bot.app_id`);
@@ -520,13 +520,51 @@ async function updateBinding(binding) {
   });
 }
 
-function bindingLabel(binding) {
-  const botName = binding.bot?.display_name || binding.bot?.app_id || 'unknown Bot';
-  return `${binding.agent_type} ↔ ${botName} (${binding.bot?.app_id || 'unknown'})`;
+function agentSelectionDisplayName(agent) {
+  return agent === 'trae' ? 'trae（旧版 Coco）' : agent;
 }
 
-function printBindingStarted(binding) {
-  console.log(`[aamp-one-click] 启动成功：${bindingLabel(binding)}`);
+function agentBindingDisplayName(agent) {
+  return agent === 'trae' ? 'Trae CLI' : agent;
+}
+
+function bindingLabel(binding, resolvedAgentType = binding.agent_type) {
+  const botName = binding.bot?.display_name || binding.bot?.app_id || 'unknown Bot';
+  return `${agentBindingDisplayName(resolvedAgentType)} ↔ ${botName} (${binding.bot?.app_id || 'unknown'})`;
+}
+
+function normalizePendingAgentBindings(bindings, host, requestedAgentType, preparedAgentType) {
+  const resolvedAgentType = preparedAgentType || requestedAgentType;
+  if (!AGENT_TYPES.includes(resolvedAgentType)) {
+    throw new Error(`unexpected prepared Agent type: ${resolvedAgentType}`);
+  }
+  if (resolvedAgentType === requestedAgentType) return requestedAgentType;
+  if (requestedAgentType !== 'trae' || resolvedAgentType !== 'traex') {
+    throw new Error(`unexpected prepared Agent type: ${requestedAgentType} -> ${resolvedAgentType}`);
+  }
+  const matching = bindings.filter((binding) => (
+    binding.aamp_host === host && binding.agent_type === requestedAgentType
+  ));
+  if (!matching.length || matching.some((binding) => (
+    binding.state !== 'pending' || Boolean(binding.agent_target_email)
+  ))) {
+    return requestedAgentType;
+  }
+  for (const binding of matching) binding.agent_type = resolvedAgentType;
+  return resolvedAgentType;
+}
+
+function printBindingStarted(binding, runtimeAgentType = binding.agent_type) {
+  console.log(`[aamp-one-click] 启动成功：${bindingLabel(binding, runtimeAgentType)}`);
+}
+
+function bindingCancellationReason(groups, binding) {
+  return groups.get(binding.aamp_host)?.cancellations?.get(binding.agent_type) || '';
+}
+
+function printBindingCancelled(binding, reason) {
+  console.log(`\n🟡 已取消：${bindingLabel(binding)}`);
+  console.log(`   原因：${reason}`);
 }
 
 async function recordError(component, message, binding) {
@@ -1074,6 +1112,8 @@ async function setupAgentGroups(bindings) {
       identities: new Map(),
       availableAgents: new Set(),
       failures: new Map(),
+      cancellations: new Map(),
+      runtimeAgentTypes: new Map(),
       leases: new Map(),
       process: undefined,
     };
@@ -1081,23 +1121,49 @@ async function setupAgentGroups(bindings) {
     const agents = [];
     for (const [agentType, sampleBinding] of agentBindings) {
       throwIfStopping();
+      let effectiveAgentType = agentType;
       try {
         const lease = await acquireAgentLease(host, agentType);
         throwIfStopping();
         group.leases.set(agentType, lease);
-        console.log(`[aamp-one-click] 正在检查 ${agentType} 本地智能体...`);
+        console.log(`[aamp-one-click] 正在检查 ${agentSelectionDisplayName(agentType)} 本地智能体...`);
         const prepared = await runBootstrapHelper('__prepare-agent', sampleBinding);
         throwIfStopping();
+        if (prepared.cancelled === true) {
+          const reason = redact(prepared.reason || '用户取消了 Agent 准备流程');
+          group.cancellations.set(agentType, reason);
+          await releaseLease(group.leases.get(agentType));
+          group.leases.delete(agentType);
+          continue;
+        }
+        if (prepared.agent_type && prepared.agent_type !== agentType && agentBindings.has(prepared.agent_type)) {
+          throw new Error(`Agent 类型归一化后发生重复：${agentType} -> ${prepared.agent_type}`);
+        }
+        const preparedAgentType = prepared.agent_type || agentType;
+        group.runtimeAgentTypes.set(agentType, preparedAgentType);
+        effectiveAgentType = normalizePendingAgentBindings(
+          bindings,
+          host,
+          agentType,
+          preparedAgentType,
+        );
+        group.runtimeAgentTypes.set(effectiveAgentType, preparedAgentType);
+        if (effectiveAgentType !== agentType) {
+          const effectiveLease = await acquireAgentLease(host, effectiveAgentType);
+          await releaseLease(group.leases.get(agentType));
+          group.leases.delete(agentType);
+          group.leases.set(effectiveAgentType, effectiveLease);
+        }
         if (path.resolve(prepared.lark_cli_config_dir || '') !== path.resolve(bridgeEnv.LARKSUITE_CLI_CONFIG_DIR)) {
           throw new Error(`Agent 使用的 lark-cli 配置目录与 Online 配置不一致：${prepared.lark_cli_config_dir || 'unknown'}`);
         }
-        const agentHome = path.join(home, 'agents', agentType);
+        const agentHome = path.join(home, 'agents', effectiveAgentType);
         await assertNoSymlinkPath(RUNTIME_HOME, agentHome);
         throwIfStopping();
         await ensurePrivateDir(agentHome);
         throwIfStopping();
         agents.push({
-          name: agentType,
+          name: effectiveAgentType,
           acpCommand: prepared.acp_command,
           credentialsFile: path.join(agentHome, 'credentials.json'),
           pairingFile: path.join(agentHome, 'pairing.json'),
@@ -1106,7 +1172,10 @@ async function setupAgentGroups(bindings) {
         });
       } catch (error) {
         const reason = redact(error.message || error);
-        group.failures.set(agentType, reason);
+        group.failures.set(effectiveAgentType, reason);
+        if (effectiveAgentType !== agentType) group.failures.set(agentType, reason);
+        await releaseLease(group.leases.get(effectiveAgentType));
+        group.leases.delete(effectiveAgentType);
         await releaseLease(group.leases.get(agentType));
         group.leases.delete(agentType);
         if (stopRequested) throw error;
@@ -1132,7 +1201,8 @@ async function setupAgentGroups(bindings) {
       throwIfStopping();
       const initialized = parseJsonDocument(initResult.stdout, 'ACP init');
       for (const agent of initialized.agents || []) group.identities.set(agent.name, agent.email);
-      console.log(`[aamp-one-click] 正在启动本地 Agent Bridge (${agents.map((agent) => agent.name).join(', ')})...`);
+      const runtimeAgentNames = agents.map((agent) => group.runtimeAgentTypes.get(agent.name) || agent.name);
+      console.log(`[aamp-one-click] 正在启动本地 Agent Bridge (${runtimeAgentNames.join(', ')})...`);
       const started = await runNetworkStage(async ({ attempt, maxAttempts }) => {
         const process = await startManagedProcess({
           label: `ACP Bridge ${host}`,
@@ -1193,6 +1263,8 @@ async function setupAgentGroups(bindings) {
 function resolveGroup(groups, binding) {
   const group = groups.get(binding.aamp_host);
   if (!group) throw new Error(`Agent Bridge group is unavailable for ${binding.aamp_host}`);
+  const agentCancellation = group.cancellations.get(binding.agent_type);
+  if (agentCancellation) throw new Error(agentCancellation);
   const agentFailure = group.failures.get(binding.agent_type);
   if ((!group.process || group.process.exited) && agentFailure) throw new Error(agentFailure);
   if (!group.process || group.process.exited) {
@@ -1207,7 +1279,8 @@ function resolveGroup(groups, binding) {
   if (binding.agent_target_email && binding.agent_target_email !== email) {
     throw new Error(`Agent mailbox 已变化（配置=${binding.agent_target_email}，当前=${email}），请使用 add 或 install 重新绑定`);
   }
-  return { group, email };
+  const runtimeAgentType = group.runtimeAgentTypes.get(binding.agent_type) || binding.agent_type;
+  return { group, email, runtimeAgentType };
 }
 
 async function writeFeishuRuntimeProfile(binding) {
@@ -1256,7 +1329,7 @@ function feishuArgs(binding, larkCliBin, target) {
   ];
 }
 
-async function prepareFeishuProcess(binding, phase) {
+async function prepareFeishuProcess(binding, phase, runtimeAgentType = binding.agent_type) {
   throwIfStopping();
   await writeFeishuRuntimeProfile(binding);
   throwIfStopping();
@@ -1266,6 +1339,7 @@ async function prepareFeishuProcess(binding, phase) {
   return {
     binding,
     phase,
+    runtimeAgentType,
     larkCliBin: profile.lark_cli_bin,
     logFile: path.join(RUN_LOG_DIR, `feishu-bridge-${safeId(binding.binding_id)}-${phase}.jsonl`),
   };
@@ -1273,15 +1347,15 @@ async function prepareFeishuProcess(binding, phase) {
 
 async function startPreparedFeishuProcess(prepared, target, environment = onlineEnvironment(prepared.binding)) {
   throwIfStopping();
-  const { binding, phase, larkCliBin, logFile } = prepared;
+  const { binding, phase, runtimeAgentType, larkCliBin, logFile } = prepared;
   const phaseMessage = phase === 'install'
     ? '正在建立绑定并启动飞书任务 Bridge'
     : phase === 'add'
       ? '正在验证飞书任务绑定'
       : '正在启动飞书任务 Bridge';
-  console.log(`[aamp-one-click] ${phaseMessage}：${bindingLabel(binding)}...`);
+  console.log(`[aamp-one-click] ${phaseMessage}：${bindingLabel(binding, runtimeAgentType)}...`);
   return startManagedProcess({
-    label: `Feishu Bridge ${bindingLabel(binding)}`,
+    label: `Feishu Bridge ${bindingLabel(binding, runtimeAgentType)}`,
     packageSpec: FEISHU_PACKAGE,
     executable: 'aamp-feishu-bridge',
     args: feishuArgs(binding, larkCliBin, target),
@@ -1420,9 +1494,9 @@ async function validateSavedRuntime(binding) {
 async function bindOneDraft(draft, groups, mode) {
   await setBindingStatus(draft, 'bind', 'starting');
   throwIfStopping();
-  const { group, email } = resolveGroup(groups, draft);
+  const { group, email, runtimeAgentType } = resolveGroup(groups, draft);
   const binding = { ...draft, state: 'ready', agent_target_email: email, updated_at: nowIso() };
-  const preparedFeishu = await prepareFeishuProcess(binding, mode);
+  const preparedFeishu = await prepareFeishuProcess(binding, mode, runtimeAgentType);
   throwIfStopping();
   const pairResult = await runCapture(
     ACP_PACKAGE,
@@ -1452,7 +1526,7 @@ async function bindOneDraft(draft, groups, mode) {
     await setBindingStatus(binding, startsBridge ? 'start' : 'bind', startsBridge ? 'running' : 'succeeded');
     throwIfStopping();
     keepRunning = startsBridge;
-    return { binding, process: keepRunning ? feishu : undefined, group };
+    return { binding, process: keepRunning ? feishu : undefined, group, runtimeAgentType };
   } finally {
     if (!keepRunning) await stopManagedProcess(feishu);
   }
@@ -1461,11 +1535,11 @@ async function bindOneDraft(draft, groups, mode) {
 async function startOneBinding(binding, groups) {
   await setBindingStatus(binding, 'start', 'starting');
   throwIfStopping();
-  const { email } = resolveGroup(groups, binding);
+  const { email, runtimeAgentType } = resolveGroup(groups, binding);
   if (email !== binding.agent_target_email) throw new Error('当前 Agent mailbox 与绑定记录不一致，请重新绑定');
   await validateSavedRuntime(binding);
   throwIfStopping();
-  const preparedFeishu = await prepareFeishuProcess(binding, 'start');
+  const preparedFeishu = await prepareFeishuProcess(binding, 'start', runtimeAgentType);
   const feishu = await startPreparedFeishuUntilReady(
     preparedFeishu,
     { agentTargetEmail: binding.agent_target_email },
@@ -1474,13 +1548,14 @@ async function startOneBinding(binding, groups) {
   throwIfStopping();
   await setBindingStatus(binding, 'start', 'running');
   throwIfStopping();
-  printBindingStarted(binding);
+  printBindingStarted(binding, runtimeAgentType);
   return feishu;
 }
 
 async function startSelectedBindings(bindings, existingGroups) {
   const running = [];
   const failed = [];
+  const cancelled = [];
   const onlineBindings = [];
   for (const binding of bindings) {
     try {
@@ -1498,6 +1573,13 @@ async function startSelectedBindings(bindings, existingGroups) {
   const groups = existingGroups || await setupAgentGroups(onlineBindings);
   for (const binding of onlineBindings) {
     throwIfStopping();
+    const cancellationReason = bindingCancellationReason(groups, binding);
+    if (cancellationReason) {
+      cancelled.push({ binding, reason: cancellationReason });
+      await setBindingStatus(binding, 'start', 'cancelled', cancellationReason);
+      printBindingCancelled(binding, cancellationReason);
+      continue;
+    }
     try {
       let activeBinding = binding;
       let group = groups.get(binding.aamp_host);
@@ -1514,7 +1596,7 @@ async function startSelectedBindings(bindings, existingGroups) {
         activeBinding = paired.binding;
         group = paired.group;
         processRecord = paired.process;
-        printBindingStarted(activeBinding);
+        printBindingStarted(activeBinding, paired.runtimeAgentType);
       } else {
         processRecord = await startOneBinding(binding, groups);
       }
@@ -1535,11 +1617,16 @@ async function startSelectedBindings(bindings, existingGroups) {
   failed.push(...reconciled.failed);
   if (!running.length) {
     await shutdownGroups(groups);
+    if (cancelled.length && !failed.length) {
+      console.log(`\n🟡 已取消 ${cancelled.length} 个配置的启动；现有绑定保持不变。`);
+      return;
+    }
     throw new Error('全部配置启动失败');
   }
   console.log(`\n已成功启动 ${running.length}/${bindings.length} 个配置。`);
   console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
   if (failed.length) console.log(`另有 ${failed.length} 个配置启动失败，详情见上方信息和本地日志。`);
+  if (cancelled.length) console.log(`另有 ${cancelled.length} 个配置由用户取消，现有绑定保持不变。`);
   await supervise(running, groups);
 }
 
@@ -1644,7 +1731,7 @@ function displayBindings(bindings) {
   }
   const rows = bindings.map((binding, index) => ({
     index: String(index + 1),
-    agent: binding.agent_type,
+    agent: agentBindingDisplayName(binding.agent_type),
     bot: binding.bot.display_name || binding.bot.app_id,
     appId: binding.bot.app_id,
     environment: binding.environment.name,
@@ -1668,7 +1755,7 @@ async function discoverAgents() {
 }
 
 async function createDraft(agents, unavailableAppIds) {
-  const agent = DEFAULT_AGENT || await chooseOne('请选择要绑定的本地智能体：', agents, (item) => item);
+  const agent = DEFAULT_AGENT || await chooseOne('请选择要绑定的本地智能体：', agents, agentSelectionDisplayName);
   const registered = await runBootstrapHelper('__register-binding', agent);
   addSecret(registered.app_secret);
   if (!registered.app_id || !registered.app_secret || !registered.lark_cli_profile) {
@@ -1707,6 +1794,7 @@ async function runBindingSession(mode) {
   const sessionDrafts = [];
   const succeeded = [];
   const failed = [];
+  const cancelled = [];
   const selectionFailures = [];
   const running = [];
 
@@ -1732,7 +1820,7 @@ async function runBindingSession(mode) {
   }
 
   if (!sessionDrafts.length) {
-    return { groups: new Map(), succeeded, failed, selectionFailures, running, selectedCount: 0 };
+    return { groups: new Map(), succeeded, failed, cancelled, selectionFailures, running, selectedCount: 0 };
   }
 
   if (mode === 'add') {
@@ -1754,7 +1842,7 @@ async function runBindingSession(mode) {
         console.error('   已跳过该项，继续处理下一项。');
       }
     }
-    return { groups: new Map(), succeeded, failed, selectionFailures, running, selectedCount: sessionDrafts.length };
+    return { groups: new Map(), succeeded, failed, cancelled, selectionFailures, running, selectedCount: sessionDrafts.length };
   }
 
   console.log('\n=== 建立绑定并启动 ===');
@@ -1763,6 +1851,13 @@ async function runBindingSession(mode) {
   throwIfStopping();
   for (const draft of sessionDrafts) {
     throwIfStopping();
+    const cancellationReason = bindingCancellationReason(groups, draft);
+    if (cancellationReason) {
+      cancelled.push({ binding: draft, reason: cancellationReason });
+      await setBindingStatus(draft, 'bind', 'cancelled', cancellationReason);
+      printBindingCancelled(draft, cancellationReason);
+      continue;
+    }
     try {
       const paired = await bindOneDraft(draft, groups, mode);
       throwIfStopping();
@@ -1781,7 +1876,7 @@ async function runBindingSession(mode) {
       console.error('   已跳过该项，继续处理下一项。');
     }
   }
-  return { groups, succeeded, failed, selectionFailures, running, selectedCount: sessionDrafts.length };
+  return { groups, succeeded, failed, cancelled, selectionFailures, running, selectedCount: sessionDrafts.length };
 }
 
 async function runInstall() {
@@ -1790,6 +1885,7 @@ async function runInstall() {
     throwIfStopping();
     if (!bound.succeeded.length) {
       await shutdownGroups(bound.groups);
+      if (bound.cancelled.length && !bound.failed.length && !bound.selectionFailures.length) return bound;
       throw new Error('没有配置完成绑定，现有新流程配置保持不变');
     }
     const reconciled = await reconcileRetainedBindings(bound.running);
@@ -1804,10 +1900,15 @@ async function runInstall() {
     }
     return bound;
   });
+  if (!result.succeeded.length) {
+    console.log(`\n🟡 已取消 ${result.cancelled.length} 个配置的绑定；未写入新配置。`);
+    return;
+  }
   console.log(`\n已成功建立绑定并启动 ${result.running.length}/${result.selectedCount} 个配置。`);
   console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
   const failureCount = result.failed.length + result.selectionFailures.length + result.runtimeFailures.length;
   if (failureCount) console.log(`另有 ${failureCount} 次选择或绑定失败，详情见上方信息和本地日志。`);
+  if (result.cancelled.length) console.log(`另有 ${result.cancelled.length} 个配置由用户取消，未写入对应绑定。`);
   await supervise(result.running, result.groups);
 }
 

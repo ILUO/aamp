@@ -26,19 +26,26 @@ The package installs the short command `feishu-task-agent`. Running that short
 command without arguments shows help. Running the standalone Bootstrap without
 arguments is equivalent to `install`.
 
-The supported canonical agent names are `codex`, `cursor`, and `trae`.
-`--agent codex|cursor|trae` fixes the Agent for every new binding in that command instead of
-prompting.
+The supported canonical agent names are `codex`, `cursor`, `trae`, and `traex`.
+`--agent codex|cursor|trae|traex` fixes the Agent for every new binding in that
+command instead of prompting. `trae` represents the legacy Coco/Trae CLI, while
+`traex` represents Trae CLI 2.0.
 The Task Agent flow only supports the Online environment. Environment-switch
 arguments are not supported.
 
-For Trae 2.0, use the canonical binding name `trae`. The launcher detects
-`traecli` first and falls back to `traex`, then starts the native ACP server with
-exactly `traecli acp serve` or `traex acp serve`. Complete Trae login through its
-own CLI; the one-click flow checks `login status`, opens its `login` flow when
-necessary, and does not read or store Trae credentials. The generated command
-intentionally omits `--yolo` and never adds a bypass or approval flag. Trae does
-not fall back to the separate Coco CLI profile.
+When `traex` is installed, the launcher offers `traex`; otherwise it offers
+`trae（旧版 Coco）` when `traecli` or `coco` is available. Selecting the legacy
+Agent shows an optional upgrade prompt. Accepting it runs the Trae CLI 2.0
+installer and continues with `traex`. A new pending binding is normalized and
+saved as `traex`, so subsequent startup output uses the 2.0 name. Existing
+completed `trae` bindings keep their internal identity and mailbox for
+compatibility; saved-binding menus label them neutrally as `Trae CLI`, while
+post-check runtime output reports the resolved `traex` binary. Declining the
+upgrade cancels the current binding or startup without invoking legacy `login`,
+`login status`, or ACP commands, and leaves saved bindings unchanged. Only
+`traex` uses the supported login and native ACP flow. Native ACP startup is
+exactly `traex acp serve`; the generated command intentionally omits `--yolo`
+and never adds a bypass or approval flag.
 
 ## Commands
 
@@ -72,7 +79,8 @@ and Enter to confirm the selection.
 
 Bridge startup is serial. A failure is printed and recorded, then the next pair
 is attempted. The command exits as a startup failure only when every selected
-pair fails. Within one command invocation, all Bots for the same Agent/AAMP
+pair fails. User-cancelled legacy Trae selections are reported separately and
+are not recorded as system failures. Within one command invocation, all Bots for the same Agent/AAMP
 host reuse one ACP Bridge process. Independent invocations do not attach to an
 existing process; an Agent lease prevents competing runtimes from being
 started for the same Agent identity.

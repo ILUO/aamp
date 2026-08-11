@@ -119,6 +119,215 @@ find_cursor_agent_cli
   assert.equal(output.trim(), path.join(binDir, 'cursor-agent'))
 })
 
+test('bootstrap separates Trae 2.0 and legacy Coco/Trae CLI discovery', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('resolve_trae_cli_candidate()')
+  const end = source.indexOf('\nresolve_cursor_cli_for_acp()', start)
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const helpers = source.slice(start, end)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-trae-cli-split-'))
+  const binDir = path.join(home, 'bin')
+  mkdirSync(binDir)
+  for (const name of ['traecli', 'coco', 'traex']) {
+    writeFileSync(path.join(binDir, name), '#!/usr/bin/env bash\nexit 0\n')
+    chmodSync(path.join(binDir, name), 0o755)
+  }
+
+  const output = execFileSync('bash', ['-c', `
+set -euo pipefail
+PATH="$1/bin:/usr/bin:/bin"
+AAMP_TRAE_CLI_BIN=""
+TRAE_CLI_BIN=""
+${helpers}
+find_traex_cli
+find_legacy_trae_cli
+AGENT=traex
+TRAE_CLI_BIN=""
+resolve_trae_cli
+AGENT=trae
+TRAE_CLI_BIN=""
+resolve_trae_cli
+`, 'bash', home], { encoding: 'utf8' })
+
+  assert.deepEqual(output.trim().split('\n'), [
+    path.join(binDir, 'traex'),
+    path.join(binDir, 'traecli'),
+    path.join(binDir, 'traex'),
+    path.join(binDir, 'traecli'),
+  ])
+})
+
+test('bootstrap keeps a stuck Trae 2.0 login status bounded without falling back to legacy CLI', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('resolve_trae_cli_candidate()')
+  const end = source.indexOf('\nprint_cursor_gatekeeper_help()', start)
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const helpers = source.slice(start, end)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-traex-status-stuck-'))
+  const binDir = path.join(home, 'bin')
+  const calls = path.join(home, 'legacy-calls.log')
+  mkdirSync(binDir)
+  writeFileSync(path.join(binDir, 'traex'), `#!${process.execPath}
+setTimeout(() => {}, 60_000)
+`)
+  writeFileSync(path.join(binDir, 'traecli'), `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(calls)}
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+exit 1
+`)
+  chmodSync(path.join(binDir, 'traex'), 0o755)
+  chmodSync(path.join(binDir, 'traecli'), 0o755)
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+PATH="$1/bin:${path.dirname(process.execPath)}:/usr/bin:/bin"
+AAMP_TRAE_CLI_BIN=""
+AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS=1
+AGENT=traex
+TRAE_CLI_BIN=""
+agent_detail() { printf '[detail] %s\\n' "$*"; }
+agent_log() { printf '[log] %s\\n' "$*"; }
+${helpers}
+set +e
+run_traex_login_status
+status=$?
+set -e
+printf 'status=%s\\nselected=%s\\n' "$status" "$(resolve_trae_cli)"
+`, 'bash', home], { encoding: 'utf8', timeout: 5000 })
+
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /status=124/)
+  assert.match(result.stdout, new RegExp(`selected=${path.join(binDir, 'traex').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+  assert.equal(existsSync(calls), false)
+})
+
+test('bootstrap returns structured cancellation when legacy Coco/Trae upgrade is declined', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('resolve_trae_cli_candidate()')
+  const end = source.indexOf('\nprint_cursor_gatekeeper_help()', start)
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const loginStart = source.indexOf('ensure_agent_login()')
+  const loginEnd = source.indexOf('\nrun_acp_bridge()', loginStart)
+  const prepareStart = source.indexOf('run_internal_prepare_agent()')
+  const prepareEnd = source.indexOf('\nrun_internal_ensure_profile()', prepareStart)
+  assert.notEqual(loginStart, -1)
+  assert.notEqual(loginEnd, -1)
+  assert.notEqual(prepareStart, -1)
+  assert.notEqual(prepareEnd, -1)
+
+  const helpers = source.slice(start, end) + '\n' + source.slice(loginStart, loginEnd) + '\n' + source.slice(prepareStart, prepareEnd)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-legacy-trae-decline-'))
+  const binDir = path.join(home, 'bin')
+  const calls = path.join(home, 'calls.log')
+  const unexpected = path.join(home, 'unexpected.log')
+  mkdirSync(binDir)
+  writeFileSync(path.join(binDir, 'traecli'), `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(calls)}
+exit 72
+`)
+  chmodSync(path.join(binDir, 'traecli'), 0o755)
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+PATH="$1/bin:/usr/bin:/bin"
+TEST_HOME="$1"
+AAMP_TRAE_CLI_BIN=""
+AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS=1
+TRAEX_INSTALLER_URL="https://code.byted.org/api/tos-proxy/download/traex_install.sh"
+AGENT=trae
+TRAE_CLI_BIN=""
+AGENT_PREPARE_CANCELLED="false"
+AGENT_PREPARE_CANCEL_REASON=""
+agent_detail() { :; }
+agent_log() { :; }
+agent_fail() { printf '%s\\n' "$*" >&2; exit 1; }
+clear_codex_quarantine() { :; }
+clear_cursor_quarantine() { :; }
+${helpers}
+confirm_trae_upgrade() { return 1; }
+run_traex_installer() { printf 'unexpected installer\\n' >&2; return 1; }
+prepare_internal_agent_environment() { :; }
+ensure_codex_cli_updated() { :; }
+maybe_mock_fail() { :; }
+ensure_acpx() { touch "$TEST_HOME/unexpected.log"; }
+build_acp_agent_command() { touch "$TEST_HOME/unexpected.log"; }
+emit_internal_result() { printf '%s\\n' "$1"; }
+json_escape() { printf '%s' "$1"; }
+run_internal_prepare_agent
+`, 'bash', home], { encoding: 'utf8', timeout: 5000 })
+
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout.trim())
+  assert.equal(payload.cancelled, true)
+  assert.equal(payload.agent_type, 'trae')
+  assert.match(payload.reason, /飞书任务 Agent 暂不支持使用旧版 Coco 建立连接/)
+  assert.match(payload.reason, /本次未启动飞书任务连接/)
+  assert.match(payload.reason, /Trae CLI 2\.0/)
+  assert.doesNotMatch(payload.reason, /ACP|login|TUI/)
+  assert.equal(Object.hasOwn(payload, 'acp_command'), false)
+  assert.equal(existsSync(calls), false)
+  assert.equal(existsSync(unexpected), false)
+})
+
+test('bootstrap can upgrade legacy Coco/Trae to traex and continue with the traex ACP command', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('resolve_trae_cli_candidate()')
+  const end = source.indexOf('\nprint_cursor_gatekeeper_help()', start)
+  const loginStart = source.indexOf('ensure_agent_login()')
+  const loginEnd = source.indexOf('\nrun_acp_bridge()', loginStart)
+  const commandStart = source.indexOf('build_acp_agent_command()')
+  const commandEnd = source.indexOf('\nvalidate_codex_acp_command()', commandStart)
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+  assert.notEqual(loginStart, -1)
+  assert.notEqual(loginEnd, -1)
+  assert.notEqual(commandStart, -1)
+  assert.notEqual(commandEnd, -1)
+
+  const helpers = source.slice(start, end) + '\n' + source.slice(loginStart, loginEnd) + '\n' + source.slice(commandStart, commandEnd)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-legacy-trae-upgrade-'))
+  const binDir = path.join(home, 'bin')
+  mkdirSync(binDir)
+  writeFileSync(path.join(binDir, 'traecli'), '#!/usr/bin/env bash\nexit 72\n')
+  chmodSync(path.join(binDir, 'traecli'), 0o755)
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+PATH="$1/bin:${path.dirname(process.execPath)}:/usr/bin:/bin"
+TEST_BIN_DIR="$1/bin"
+AAMP_TRAE_CLI_BIN=""
+AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS=1
+AGENT=trae
+TRAE_CLI_BIN=""
+agent_detail() { :; }
+agent_log() { printf '[log] %s\\n' "$*"; }
+agent_fail() { printf '%s\\n' "$*" >&2; exit 1; }
+clear_codex_quarantine() { :; }
+clear_cursor_quarantine() { :; }
+${helpers}
+confirm_trae_upgrade() { return 0; }
+run_traex_installer() {
+  printf '%s\\n' '#!/usr/bin/env bash' 'exit 0' > "$TEST_BIN_DIR/traex"
+  chmod +x "$TEST_BIN_DIR/traex"
+}
+ensure_agent_login
+build_acp_agent_command
+printf 'agent=%s\\ncommand=%s\\n' "$AGENT" "$ACP_AGENT_COMMAND"
+`, 'bash', home], { encoding: 'utf8', timeout: 5000 })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /agent=traex/)
+  assert.match(result.stdout, new RegExp(`command=${path.join(binDir, 'traex').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} acp serve`))
+})
+
 test('bootstrap help owns log commands and success output stays concise', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const controller = readFileSync(path.resolve(__dirname, '../bin/feishu-task-agent-controller.mjs'), 'utf8')
@@ -140,7 +349,7 @@ test('bootstrap help owns log commands and success output stays concise', () => 
   assert.match(success, /🟢 保持终端打开，你可以给 agent 派发飞书任务/)
   assert.doesNotMatch(success, /print_local_log_hints/)
   assert.match(controller, /🟢 保持终端打开，你可以给 agent 派发飞书任务/)
-  assert.match(controller, /\[aamp-one-click\] 启动成功：\$\{bindingLabel\(binding\)\}/)
+  assert.match(controller, /\[aamp-one-click\] 启动成功：\$\{bindingLabel\(binding, runtimeAgentType\)\}/)
   assert.equal(controller.match(/printBindingStarted\(/g)?.length, 3)
   assert.doesNotMatch(controller, /已接入飞书任务，可以开始对话 & 派发任务/)
   assert.doesNotMatch(controller, /飞书 Bot：/)

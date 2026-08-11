@@ -52,6 +52,9 @@ CODEX_APP_CLI="/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTO_UPDATE="${CODEX_AUTO_UPDATE:-true}"
 CODEX_NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex}"
 CODEX_ACP_PKG="${CODEX_ACP_PKG:-@agentclientprotocol/codex-acp@1.0.2}"
+AAMP_TRAE_CLI_BIN="${AAMP_TRAE_CLI_BIN:-}"
+AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS="${AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS:-10}"
+TRAEX_INSTALLER_URL="${TRAEX_INSTALLER_URL:-https://code.byted.org/api/tos-proxy/download/traex_install.sh}"
 LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
 LARK_CLI_MIN_VERSION="${LARK_CLI_MIN_VERSION:-1.0.64}"
 FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-im:message,im:message:send_as_bot,im:message:readonly,im:resource,cardkit:card:write,task:task,task:comment,task:task:readonly,task:comment:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly,search:docs:read,base:app:copy,base:app:create,base:app:read,base:app:update,base:block:create,base:block:delete,base:block:read,base:block:update,base:dashboard:create,base:dashboard:delete,base:dashboard:read,base:dashboard:update,base:field:create,base:field:delete,base:field:read,base:field:update,base:form:create,base:form:delete,base:form:read,base:form:update,base:history:read,base:record:create,base:record:delete,base:record:read,base:record:update,base:role:create,base:role:delete,base:role:read,base:role:update,base:table:create,base:table:delete,base:table:read,base:table:update,base:view:read,base:view:write_only,base:workflow:create,base:workflow:read,base:workflow:update,board:whiteboard:node:create,board:whiteboard:node:read,calendar:calendar.event:create,calendar:calendar.event:delete,calendar:calendar.event:read,calendar:calendar.event:reply,calendar:calendar.event:update,calendar:calendar.free_busy:read,calendar:calendar:create,calendar:calendar:delete,calendar:calendar:read,calendar:calendar:update,contact:user.base:readonly,contact:user.basic_profile:readonly,docs:document.media:download,docs:document.media:upload,docs:document:export,docs:document:import,docx:document:create,docx:document:readonly,docx:document:write_only,drive:drive.metadata:readonly,drive:file:download,drive:file:upload,im:chat.managers:write_only,im:chat.members:read,im:chat.members:write_only,im:chat.moderation:read,im:chat:moderation:write_only,im:message.pins:read,im:message.pins:write_only,im:message.reactions:read,im:message.reactions:write_only,im:message:recall,mail:user_mailbox.event.mail_address:read,mail:user_mailbox.mail_contact:read,mail:user_mailbox.message.address:read,mail:user_mailbox.message.body:read,mail:user_mailbox.message.subject:read,mindnote:node:create,mindnote:node:read,minutes:minutes.basic:read,minutes:minutes.media:export,minutes:minutes:readonly,sheets:spreadsheet.meta:read,sheets:spreadsheet.meta:write_only,sheets:spreadsheet:create,sheets:spreadsheet:read,sheets:spreadsheet:write_only,slides:presentation:create,slides:presentation:read,slides:presentation:update,slides:presentation:write_only,task:custom_field:read,task:custom_field:write,task:section:read,task:section:write,vc:meeting.bot.join:write,vc:meeting.meetingevent:read,vc:meeting.message:write,vc:record:readonly,wiki:member:create,wiki:member:retrieve,wiki:member:update,wiki:node:copy,wiki:node:create,wiki:node:move,wiki:node:read,wiki:node:retrieve,wiki:space:read,wiki:space:retrieve,wiki:space:write_only}"
@@ -86,8 +89,11 @@ CODEM_SERVICE_START_OUTPUT=""
 CODEM_AUTO_UPDATE_DONE="false"
 CODEM_FORCE_LOGIN_DONE="false"
 CODEM_PROVIDER_RECOVERY_DONE="false"
+TRAE_CLI_BIN=""
 PAIRING_URL=""
 ACP_AGENT_COMMAND=""
+AGENT_PREPARE_CANCELLED="false"
+AGENT_PREPARE_CANCEL_REASON=""
 STARTED_BRIDGE_PID=""
 ONE_CLICK_RUN_ID="$(date +%s)-$$"
 BOT_RESERVED="false"
@@ -132,7 +138,8 @@ Running the standalone one-click script without a subcommand is the same as
 "feishu-task-agent install".
 
 Options:
-  --agent codex|cursor|trae   Use this Agent for every new binding in the command.
+  --agent codex|cursor|trae|traex
+                               Use this Agent for every new binding in the command.
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
   -h, --help                 Show this help
@@ -1179,8 +1186,15 @@ npm_install_register_helper() {
 
 validate_agent_name() {
   case "$1" in
-    codex|cursor|trae) ;;
-    *) agent_fail "--agent must be codex, cursor, or trae" ;;
+    codex|cursor|trae|traex) ;;
+    *) agent_fail "--agent must be codex, cursor, trae, or traex" ;;
+  esac
+}
+
+agent_display_name() {
+  case "$1" in
+    trae) printf '%s' "trae（旧版 Coco）" ;;
+    *) printf '%s' "$1" ;;
   esac
 }
 
@@ -1203,8 +1217,11 @@ agent_cli_detected() {
     cursor)
       find_cursor_agent_cli >/dev/null 2>&1
       ;;
+    traex)
+      find_traex_cli >/dev/null 2>&1
+      ;;
     trae)
-      find_trae_cli >/dev/null 2>&1
+      find_legacy_trae_cli >/dev/null 2>&1
       ;;
     *)
       return 1
@@ -1220,7 +1237,9 @@ discover_interactive_agents() {
   if agent_cli_detected cursor; then
     DETECTED_AGENTS+=("cursor")
   fi
-  if agent_cli_detected trae; then
+  if agent_cli_detected traex; then
+    DETECTED_AGENTS+=("traex")
+  elif agent_cli_detected trae; then
     DETECTED_AGENTS+=("trae")
   fi
 
@@ -1244,9 +1263,9 @@ render_agent_menu() {
   for index in "${!DETECTED_AGENTS[@]}"; do
     printf '\033[2K\r' >&3
     if [ "$index" -eq "$selected" ]; then
-      printf '  > %s\n' "${DETECTED_AGENTS[$index]}" >&3
+      printf '  > %s\n' "$(agent_display_name "${DETECTED_AGENTS[$index]}")" >&3
     else
-      printf '    %s\n' "${DETECTED_AGENTS[$index]}" >&3
+      printf '    %s\n' "$(agent_display_name "${DETECTED_AGENTS[$index]}")" >&3
     fi
   done
   printf '\033[2K\r使用 ↑/↓ 选择，回车确认。也可按数字键或 j/k。\n' >&3
@@ -1260,7 +1279,7 @@ select_agent_interactively() {
   discover_interactive_agents
 
   if ! exec 3<>/dev/tty; then
-    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|trae"
+    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|trae|traex"
   fi
 
   tty_state="$(stty -g <&3)"
@@ -2684,19 +2703,105 @@ find_cursor_agent_cli() {
   return 1
 }
 
-find_trae_cli() {
+resolve_trae_cli_candidate() {
   local candidate
-  for candidate in traecli traex; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
+  candidate="$1"
+  [ -n "$candidate" ] || return 1
+  if command -v "$candidate" >/dev/null 2>&1; then
+    command -v "$candidate"
+    return 0
+  fi
+  if [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+find_traex_cli_candidates() {
+  local candidate resolved emitted=""
+  local candidates=()
+  if [ -n "$TRAE_CLI_BIN" ]; then
+    case "${TRAE_CLI_BIN##*/}:${AGENT:-}" in
+      traex:*|*:traex) candidates+=("$TRAE_CLI_BIN") ;;
+    esac
+  fi
+  if [ -n "$AAMP_TRAE_CLI_BIN" ]; then
+    case "${AAMP_TRAE_CLI_BIN##*/}:${AGENT:-}" in
+      traex:*|*:traex) candidates+=("$AAMP_TRAE_CLI_BIN") ;;
+    esac
+  fi
+  candidates+=("traex")
+
+  for candidate in "${candidates[@]}"; do
+    resolved="$(resolve_trae_cli_candidate "$candidate" || true)"
+    [ -n "$resolved" ] || continue
+    case "$emitted" in
+      *"|$resolved|"*) continue ;;
+    esac
+    emitted="${emitted}|$resolved|"
+    printf '%s\n' "$resolved"
   done
+}
+
+find_legacy_trae_cli_candidates() {
+  local candidate resolved emitted=""
+  local candidates=()
+  if [ -n "$TRAE_CLI_BIN" ]; then
+    case "${TRAE_CLI_BIN##*/}:${AGENT:-}" in
+      traecli:*|coco:*|*:trae) candidates+=("$TRAE_CLI_BIN") ;;
+    esac
+  fi
+  if [ -n "$AAMP_TRAE_CLI_BIN" ]; then
+    case "${AAMP_TRAE_CLI_BIN##*/}:${AGENT:-}" in
+      traecli:*|coco:*|*:trae) candidates+=("$AAMP_TRAE_CLI_BIN") ;;
+    esac
+  fi
+  candidates+=("traecli" "coco")
+
+  for candidate in "${candidates[@]}"; do
+    resolved="$(resolve_trae_cli_candidate "$candidate" || true)"
+    [ -n "$resolved" ] || continue
+    case "$emitted" in
+      *"|$resolved|"*) continue ;;
+    esac
+    emitted="${emitted}|$resolved|"
+    printf '%s\n' "$resolved"
+  done
+}
+
+find_traex_cli() {
+  local candidate
+  candidate="$(find_traex_cli_candidates | head -n 1)"
+  if [ -n "$candidate" ]; then
+    TRAE_CLI_BIN="$candidate"
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+find_legacy_trae_cli() {
+  local candidate
+  candidate="$(find_legacy_trae_cli_candidates | head -n 1)"
+  if [ -n "$candidate" ]; then
+    TRAE_CLI_BIN="$candidate"
+    printf '%s\n' "$candidate"
+    return 0
+  fi
   return 1
 }
 
 resolve_trae_cli() {
-  find_trae_cli
+  if [ -n "$TRAE_CLI_BIN" ]; then
+    printf '%s\n' "$TRAE_CLI_BIN"
+    return 0
+  fi
+  case "${AGENT:-}" in
+    traex) find_traex_cli ;;
+    trae) find_legacy_trae_cli ;;
+    *) find_traex_cli || find_legacy_trae_cli ;;
+  esac
 }
 
 resolve_cursor_cli_for_acp() {
@@ -2741,8 +2846,20 @@ ensure_agent_cli() {
     return 0
   fi
 
+  if [ "$AGENT" = "traex" ]; then
+    find_traex_cli >/dev/null 2>&1 || agent_fail "未检测到 traex CLI。请先安装 Trae CLI 2.0 后重新运行脚本。"
+    return 0
+  fi
+
   if [ "$AGENT" = "trae" ]; then
-    find_trae_cli >/dev/null 2>&1 || agent_fail "未检测到 traecli 或 traex CLI。请先安装 Trae CLI 后重新运行脚本。"
+    if find_traex_cli >/dev/null 2>&1; then
+      agent_log "旧版 trae 绑定已检测到 traex，将使用 Trae CLI 2.0 继续启动。"
+      return 0
+    fi
+    if find_legacy_trae_cli >/dev/null 2>&1; then
+      return 0
+    fi
+    agent_fail "未检测到旧版 Coco/Trae CLI（traecli 或 coco）。如果已升级，请使用 --agent traex。"
     return 0
   fi
 
@@ -3131,18 +3248,140 @@ run_codex_login() {
   return "$status"
 }
 
-run_trae_login_status() {
-  local trae_bin
-  trae_bin="$(resolve_trae_cli || true)"
-  [ -n "$trae_bin" ] || return 127
-  "$trae_bin" login status >/dev/null 2>&1
+run_quiet_command_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+  node - "$timeout_seconds" "$@" <<'NODE'
+const { spawn } = require('node:child_process');
+
+const timeoutSeconds = Number(process.argv[2] || '10');
+const timeoutMs = Math.max(1, Number.isFinite(timeoutSeconds) ? timeoutSeconds : 10) * 1000;
+const [command, ...args] = process.argv.slice(3);
+if (!command) process.exit(127);
+
+let finished = false;
+let timedOut = false;
+const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'ignore'] });
+const timer = setTimeout(() => {
+  timedOut = true;
+  child.kill('SIGTERM');
+  setTimeout(() => child.kill('SIGKILL'), 1000).unref();
+}, timeoutMs);
+
+child.once('error', (error) => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timer);
+  process.exit(error && error.code === 'ENOENT' ? 127 : 1);
+});
+
+child.once('exit', (code, signal) => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timer);
+  if (timedOut) process.exit(124);
+  if (typeof code === 'number') process.exit(code);
+  process.exit(signal ? 1 : 0);
+});
+NODE
 }
 
-run_trae_login() {
+run_trae_login_status_for_bin() {
+  local trae_bin="$1"
+  run_quiet_command_with_timeout "$AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS" "$trae_bin" login status
+}
+
+trae_login_status_timeout_message() {
+  printf '%s' "traex login status 超时。请手动执行 'traex login status' 检查登录状态后重新运行脚本。"
+}
+
+run_traex_login_status() {
+  local trae_bin status
+  trae_bin="$(find_traex_cli || true)"
+  [ -n "$trae_bin" ] || return 127
+  TRAE_CLI_BIN="$trae_bin"
+  agent_log "checking Trae CLI login status: $trae_bin"
+  if run_trae_login_status_for_bin "$trae_bin"; then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 124 ]; then
+    agent_log "Trae CLI login status timed out after ${AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS}s: $trae_bin"
+  fi
+  return "$status"
+}
+
+run_traex_login() {
   local trae_bin
   trae_bin="$(resolve_trae_cli || true)"
   [ -n "$trae_bin" ] || return 127
   "$trae_bin" login
+}
+
+trae_cli_is_traex() {
+  [ -n "$TRAE_CLI_BIN" ] && [ "${TRAE_CLI_BIN##*/}" = "traex" ]
+}
+
+confirm_trae_upgrade() {
+  local answer
+  printf '\n检测到 trae（旧版 Coco），飞书任务 Agent 暂不支持使用该版本建立连接。\n' >&2
+  printf '建议升级到 Trae CLI 2.0（traex）后继续。\n' >&2
+  printf '升级过程中可自行选择是否保留旧版 Coco。\n' >&2
+  answer="$(read_tty_line "是否现在升级到 traex？[y/N] ")"
+  case "$answer" in
+    y|Y|yes|YES|Yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+run_traex_installer() {
+  agent_log "正在安装/升级 traex..."
+  curl -fsSL "$TRAEX_INSTALLER_URL" | sh
+}
+
+maybe_upgrade_legacy_trae_cli() {
+  if trae_cli_is_traex; then
+    AGENT="traex"
+    return 0
+  fi
+
+  if confirm_trae_upgrade; then
+    run_traex_installer || agent_fail "traex 安装失败。请手动执行：curl -fsSL $TRAEX_INSTALLER_URL | sh"
+    hash -r 2>/dev/null || true
+    TRAE_CLI_BIN=""
+    find_traex_cli >/dev/null 2>&1 || agent_fail "traex 安装后仍未检测到。请确认 traex 在 PATH 中，然后重新运行脚本。"
+    AGENT="traex"
+    agent_log "已切换为 traex，继续启动。"
+    return 0
+  fi
+
+  AGENT_PREPARE_CANCELLED="true"
+  AGENT_PREPARE_CANCEL_REASON="用户取消升级。飞书任务 Agent 暂不支持使用旧版 Coco 建立连接，本次未启动飞书任务连接。如需继续，请先安装 Trae CLI 2.0：curl -fsSL $TRAEX_INSTALLER_URL | sh"
+  agent_log "已取消升级，本次未启动飞书任务连接。"
+}
+
+ensure_traex_login() {
+  local trae_login_status
+  set +e
+  run_traex_login_status
+  trae_login_status=$?
+  set -e
+  if [ "$trae_login_status" -eq 124 ]; then
+    agent_fail "$(trae_login_status_timeout_message)"
+  fi
+  if [ "$trae_login_status" -ne 0 ]; then
+    agent_log "Trae CLI 2.0 未登录，正在启动登录流程。"
+    run_traex_login || agent_fail "Trae CLI 2.0 登录失败。请先执行 'traex login' 完成登录后重新运行脚本。"
+    set +e
+    run_traex_login_status
+    trae_login_status=$?
+    set -e
+    if [ "$trae_login_status" -eq 124 ]; then
+      agent_fail "$(trae_login_status_timeout_message)"
+    fi
+    [ "$trae_login_status" -eq 0 ] || agent_fail "Trae CLI 2.0 仍未登录。请先执行 'traex login' 完成登录后重新运行脚本。"
+  fi
 }
 
 print_cursor_gatekeeper_help() {
@@ -3426,11 +3665,13 @@ ensure_agent_login() {
         run_cursor_login_status || agent_fail "cursor CLI 仍未登录。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
       fi
       ;;
+    traex)
+      ensure_traex_login
+      ;;
     trae)
-      if ! run_trae_login_status; then
-        agent_log "Trae CLI 未登录，正在启动登录流程。"
-        run_trae_login || agent_fail "Trae CLI 登录失败。请先执行 'traecli login' 或 'traex login' 完成登录后重新运行脚本。"
-        run_trae_login_status || agent_fail "Trae CLI 仍未登录。请先执行 'traecli login' 或 'traex login' 完成登录后重新运行脚本。"
+      maybe_upgrade_legacy_trae_cli
+      if trae_cli_is_traex; then
+        ensure_traex_login
       fi
       ;;
     codem)
@@ -3516,9 +3757,9 @@ resolve_codex_cli_for_acp() {
 
 build_acp_agent_command() {
   ACP_AGENT_COMMAND="$AGENT"
-  if [ "$AGENT" = "trae" ]; then
+  if [ "$AGENT" = "trae" ] || [ "$AGENT" = "traex" ]; then
     local trae_bin
-    trae_bin="$(resolve_trae_cli)" || agent_fail "Trae CLI is unavailable after discovery"
+    trae_bin="$(find_traex_cli)" || agent_fail "Trae CLI 2.0（traex）不可用，无法启动飞书任务所需的 ACP 服务。"
     ACP_AGENT_COMMAND="$trae_bin acp serve"
     agent_detail "using native Trae ACP command: $ACP_AGENT_COMMAND"
     return 0
@@ -3744,7 +3985,9 @@ run_internal_discover_agents() {
   if agent_cli_detected cursor; then
     agents+=("cursor")
   fi
-  if agent_cli_detected trae; then
+  if agent_cli_detected traex; then
+    agents+=("traex")
+  elif agent_cli_detected trae; then
     agents+=("trae")
   fi
   local joined=""
@@ -3776,6 +4019,10 @@ run_internal_prepare_agent() {
   prepare_internal_agent_environment
   ensure_codex_cli_updated
   ensure_agent_login
+  if [ "$AGENT_PREPARE_CANCELLED" = "true" ]; then
+    emit_internal_result "{\"cancelled\":true,\"agent_type\":\"$(json_escape "$AGENT")\",\"reason\":\"$(json_escape "$AGENT_PREPARE_CANCEL_REASON")\"}"
+    return 0
+  fi
   maybe_mock_fail "agent-login"
   ensure_acpx
   build_acp_agent_command
