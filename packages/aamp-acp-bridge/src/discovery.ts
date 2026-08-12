@@ -4,6 +4,7 @@ import { resolveCredentialsFile } from './storage.js'
 import {
   KNOWN_AGENTS,
   defaultAcpCommand,
+  defaultAgentCommand,
   detectKnownAgent,
   missingAgentWarning,
 } from './agent-resolver.js'
@@ -66,7 +67,7 @@ export function discoverAcpBridgeAgents(configPath: string): AcpBridgeDiscovery 
   const candidates = names.map((name): AcpBridgeAgentCandidate => {
     const existingAgent = previousAgents.get(name)
     const resolution = detectKnownAgent(name)
-    const command = resolution?.command ?? name
+    const command = resolution?.command ?? defaultAgentCommand(name)
     const detected = Boolean(resolution)
     const configured = Boolean(existingAgent)
     const warnings = detected ? [] : [missingAgentWarning(name)]

@@ -31,10 +31,15 @@ import {
   type SenderPolicy,
 } from './pairing.js'
 import type { BridgeRuntimeEvent } from './bridge.js'
+import { UserFacingBridgeError } from './errors.js'
 
 const TEXT_DELTA_FLUSH_MS = 5_000
 const TEXT_DELTA_FLUSH_CHARS = 120
 const TEXT_DELTA_BOUNDARY_CHARS = 32
+const IDENTITY_AUTH_RETRY_COUNT = 5
+const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
+const SESSION_KEY_DISPATCH_CONTEXT_KEY = 'aamp_session_key'
+const ACP_AUTH_FAILURE_PATTERN = /authentication (?:required|failed)/i
 
 export interface AgentIdentity {
   email: string
@@ -114,6 +119,14 @@ function matchPairedSenderPolicy(
   return { allowed: true }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function toBasicAuth(email: string, password: string): string {
+  return `Basic ${Buffer.from(`${email}:${password}`).toString('base64')}`
+}
+
 function matchCombinedSenderPolicy(
   task: TaskDispatch,
   configuredPolicies: AgentConfig['senderPolicies'],
@@ -141,6 +154,44 @@ function matchCombinedSenderPolicy(
 export interface AgentBridgeStartOptions {
   quiet?: boolean
   onEvent?: (event: BridgeRuntimeEvent) => void
+  debug?: boolean
+}
+
+export function requiresStartupReadinessProbe(agent: Pick<AgentConfig, 'name'>): boolean {
+  return agent.name.trim().toLowerCase() === 'workbuddy'
+}
+
+export function formatAgentReadinessError(agentName: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (agentName.trim().toLowerCase() === 'workbuddy') {
+    if (ACP_AUTH_FAILURE_PATTERN.test(message)) {
+      return 'WorkBuddy is not logged in. Open WorkBuddy and sign in, then retry.'
+    }
+    return `WorkBuddy ACP readiness check failed: ${message}`
+  }
+  return message
+}
+
+export function formatTaskAgentError(agentName: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (agentName.trim().toLowerCase() === 'workbuddy' && ACP_AUTH_FAILURE_PATTERN.test(message)) {
+    return 'WorkBuddy login expired. Open WorkBuddy and sign in, then retry the task.'
+  }
+  return message
+}
+
+export function formatDebugPromptLog(options: {
+  agentName: string
+  taskId: string
+  sessionName: string
+  prompt: string
+}): string {
+  return [
+    `[${options.agentName}] ACP prompt debug task=${options.taskId} session=${options.sessionName}`,
+    '--- BEGIN ACP PROMPT ---',
+    options.prompt,
+    '--- END ACP PROMPT ---',
+  ].join('\n')
 }
 
 interface HandleEventOptions {
@@ -248,10 +299,38 @@ function renderTextChunk(chunk: AcpTextChunk, state: StreamTextRenderState): str
   return `${prefix}${chunk.text}`
 }
 
-function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): boolean {
+export function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): boolean {
   return (events ?? []).some((event) =>
-    event.intent === 'task.result' || event.intent === 'task.cancel',
+    event.intent === 'task.result'
+    || event.intent === 'task.cancel'
+    || event.intent === 'task.help_needed',
   )
+}
+
+function normalizeSessionKey(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+export function resolveTaskSessionKey(
+  task: Pick<TaskDispatch, 'sessionKey' | 'dispatchContext'>,
+): string | undefined {
+  return normalizeSessionKey(task.sessionKey)
+    ?? normalizeSessionKey(task.dispatchContext?.[SESSION_KEY_DISPATCH_CONTEXT_KEY])
+}
+
+export function stripAampInternalDispatchContext<T extends { dispatchContext?: Record<string, string> }>(
+  task: T,
+): T {
+  const context = task.dispatchContext
+  if (!context || !(SESSION_KEY_DISPATCH_CONTEXT_KEY in context)) return task
+  const { [SESSION_KEY_DISPATCH_CONTEXT_KEY]: _sessionKey, ...publicContext } = context
+  const stripped = { ...task }
+  if (Object.keys(publicContext).length > 0) {
+    stripped.dispatchContext = publicContext
+  } else {
+    delete stripped.dispatchContext
+  }
+  return stripped
 }
 
 function threadAlreadyPairResponded(events: AampThreadEvent[] | undefined): boolean {
@@ -268,6 +347,12 @@ function isClosedStreamAppendError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return message.includes('AAMP stream append failed: 409')
     && message.includes('Task stream is already closed')
+}
+
+function isStreamServiceUnavailableError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return message.includes('AAMP stream create failed: 503')
+    || message.includes('Stream service unavailable')
 }
 
 function firstDispatchContextValue(
@@ -407,6 +492,7 @@ export class AgentBridge {
   private activeTaskIds = new Set<string>()
   private isHistoricalReconcile = false
   private onEvent: ((event: BridgeRuntimeEvent) => void) | undefined
+  private debugPrompt = false
 
   constructor(
     private readonly agentConfig: AgentConfig,
@@ -439,7 +525,7 @@ export class AgentBridge {
   }
 
   private resolveTaskSessionName(task: TaskDispatch): string {
-    const stickyValue = task.sessionKey?.trim()
+    const stickyValue = resolveTaskSessionKey(task)
     if (!stickyValue) return this.sessionName
     const suffix = this.sanitizeSessionSuffix(stickyValue)
     return suffix ? `${this.sessionName}-${suffix}` : this.sessionName
@@ -482,6 +568,15 @@ export class AgentBridge {
   async start(options: AgentBridgeStartOptions = {}): Promise<void> {
     this.onEvent = options.onEvent
     let quietStartup = options.quiet === true
+    this.debugPrompt = options.debug === true
+
+    if (requiresStartupReadinessProbe(this.agentConfig)) {
+      try {
+        await this.acpx.probeAgent(this.agentConfig.acpCommand)
+      } catch (err) {
+        throw new UserFacingBridgeError(formatAgentReadinessError(this.name, err), { cause: err })
+      }
+    }
 
     // 1. Resolve AAMP identity
     this.identity = await this.resolveIdentity()
@@ -764,9 +859,15 @@ export class AgentBridge {
       }
       return
     }
+    const publicTask = stripAampInternalDispatchContext(task)
+    const publicHydratedTask = stripAampInternalDispatchContext(hydratedTask)
 
+    this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
+      this.agentConfig.senderPoliciesFile,
+      this.agentConfig.name,
+    ))
     const senderDecision = matchCombinedSenderPolicy(
-      task,
+      publicTask,
       this.agentConfig.senderPolicies,
       this.senderPolicies,
     )
@@ -817,7 +918,7 @@ export class AgentBridge {
     } | null = null
 
     const queueStreamAppend = (
-      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact',
+      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact' | 'status',
       payload: Record<string, unknown>,
     ) => {
       if (!this.client || !activeStream || streamClosed) return
@@ -918,7 +1019,7 @@ export class AgentBridge {
     }
 
     const appendStreamEvent = async (
-      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact',
+      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact' | 'status',
       payload: Record<string, unknown>,
     ) => {
       if (!this.client || !activeStream || streamClosed) return
@@ -960,27 +1061,33 @@ export class AgentBridge {
     }
 
     try {
-      activeStream = await this.client.createStream({
-        taskId: task.taskId,
-        peerEmail: task.from,
-      })
-      await this.client.sendStreamOpened({
-        to: task.from,
-        taskId: task.taskId,
-        streamId: activeStream.streamId,
-        inReplyTo: task.messageId,
-      })
-      await appendStreamEvent('todo', {
-        items: [{ id: 'acp-task', content: 'ACP task started', status: 'in_progress' }],
-        summary: 'ACP task started',
-      })
+      try {
+        activeStream = await this.client.createStream({
+          taskId: task.taskId,
+          peerEmail: task.from,
+        })
+        await this.client.sendStreamOpened({
+          to: task.from,
+          taskId: task.taskId,
+          streamId: activeStream.streamId,
+          inReplyTo: task.messageId,
+        })
+        await appendStreamEvent('status', { state: 'running', label: 'ACP task started' })
+      } catch (err) {
+        if (!isStreamServiceUnavailableError(err)) throw err
+        activeStream = null
+        streamClosed = true
+        console.warn(
+          `[${this.name}] AAMP stream unavailable for ${task.taskId}; continuing without realtime stream: ${(err as Error).message}`,
+        )
+      }
 
-      const attachmentPromptLines = await this.materializeIncomingAttachments(hydratedTask)
+      const attachmentPromptLines = await this.materializeIncomingAttachments(publicHydratedTask)
       const promptTask = attachmentPromptLines.length > 0
         ? {
-            ...hydratedTask,
+            ...publicHydratedTask,
             bodyText: [
-              hydratedTask.bodyText,
+              publicHydratedTask.bodyText,
               '',
               'Downloaded attachments:',
               ...attachmentPromptLines,
@@ -988,8 +1095,16 @@ export class AgentBridge {
               'Use these local file paths when the user asks about attached images or files.',
             ].filter((line) => line != null).join('\n'),
           }
-        : hydratedTask
-      const prompt = buildPrompt(promptTask, hydratedTask.threadContextText, this.name)
+        : publicHydratedTask
+      const prompt = buildPrompt(promptTask, publicHydratedTask.threadContextText, this.name)
+      if (this.debugPrompt) {
+        console.log(formatDebugPromptLog({
+          agentName: this.name,
+          taskId: task.taskId,
+          sessionName: taskSessionName,
+          prompt,
+        }))
+      }
       await this.acpx.ensureSession(this.agentConfig.acpCommand, taskSessionName)
       await appendStreamEvent('todo', {
         items: [{ id: 'acp-prompt', content: 'Prompt sent to ACP agent', status: 'completed' }],
@@ -1124,7 +1239,7 @@ export class AgentBridge {
         })
       }
     } catch (err) {
-      const errorMsg = (err as Error).message
+      const errorMsg = formatTaskAgentError(this.name, err)
       console.error(`[${this.name}] Task ${task.taskId} error: ${errorMsg}`)
       try {
         await flushStreamWrites()
@@ -1313,15 +1428,24 @@ export class AgentBridge {
       try {
         const data = JSON.parse(readFileSync(credFile, 'utf-8'))
         if (data.email && data.mailboxToken && data.smtpPassword) {
-          return {
+          const identity = {
             email: data.email,
             mailboxToken: data.mailboxToken,
             smtpPassword: data.smtpPassword,
           }
+          const authState = await this.checkIdentityAuthorization(identity)
+          if (authState === 'authorized' || authState === 'unknown') {
+            return identity
+          }
+          console.warn(`[${this.name}] Stored AAMP credentials are unauthorized; re-registering mailbox`)
         }
       } catch { /* re-register */ }
     }
 
+    return this.registerIdentity(credFile)
+  }
+
+  private async registerIdentity(credFile: string): Promise<AgentIdentity> {
     // Self-register
     const slug = this.agentConfig.slug ?? `${this.agentConfig.name}-bridge`
     const description = this.agentConfig.description ?? `${this.agentConfig.name} via ACP bridge`
@@ -1343,6 +1467,33 @@ export class AgentBridge {
     writeFileSync(credFile, JSON.stringify(identity, null, 2))
     console.log(`[${this.name}] Registered: ${identity.email} (credentials saved to ${credFile})`)
 
+    await this.waitForIdentityAuthorization(identity)
     return identity
+  }
+
+  private async checkIdentityAuthorization(identity: AgentIdentity): Promise<'authorized' | 'unauthorized' | 'unknown'> {
+    try {
+      const base = this.aampHost.replace(/\/$/, '')
+      const res = await fetch(`${base}/.well-known/jmap`, {
+        headers: { Authorization: toBasicAuth(identity.email, identity.smtpPassword) },
+      })
+      if (res.ok) return 'authorized'
+      if (res.status === 401 || res.status === 403) return 'unauthorized'
+      return 'unknown'
+    } catch {
+      return 'unknown'
+    }
+  }
+
+  private async waitForIdentityAuthorization(identity: AgentIdentity): Promise<void> {
+    for (let attempt = 1; attempt <= IDENTITY_AUTH_RETRY_COUNT; attempt += 1) {
+      const authState = await this.checkIdentityAuthorization(identity)
+      if (authState === 'authorized' || authState === 'unknown') return
+      if (attempt < IDENTITY_AUTH_RETRY_COUNT) {
+        await sleep(IDENTITY_AUTH_RETRY_DELAY_MS)
+      }
+    }
+
+    throw new Error(`Registered AAMP credentials for ${identity.email} are not authorized by JMAP`)
   }
 }

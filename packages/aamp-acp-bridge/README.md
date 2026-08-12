@@ -16,7 +16,7 @@ Initialize the bridge:
 npx aamp-acp-bridge init
 ```
 
-The init wizard scans installed ACP-capable agents, including Hermes and the macOS WorkBuddy app, then lets you select multiple entries with arrow keys, Space, and Enter. For each selected agent, choose one authorization setup method:
+The init wizard scans installed ACP-capable agents, including Hermes, Traex, and the macOS WorkBuddy app, then lets you select multiple entries with arrow keys, Space, and Enter. For each selected agent, choose one authorization setup method:
 
 - Pair with a five-minute terminal QR code plus the matching `aamp://connect?...` URL.
 - Manually enter `senderPolicies`.
@@ -55,7 +55,7 @@ npx aamp-acp-bridge start --json
 npx aamp-acp-bridge pair --agent claude --json --no-start
 ```
 
-`init --json` is an upsert operation for desktop clients: it writes the bridge config, reuses existing credentials when available, registers missing mailboxes, and does not auto-start the bridge. `discover --json` scans known ACP-capable agents on PATH, detects the CLIs bundled inside the macOS Codex and WorkBuddy apps, and includes already configured agents from the bridge config. `start --json` emits JSONL runtime events on stdout and sends human-readable logs to stderr. `pair --json --no-start` creates a pairing URL without rendering a terminal QR code.
+`init --json` is an upsert operation for desktop clients: it writes the bridge config, reuses existing credentials when available, registers missing mailboxes, and does not auto-start the bridge. `discover --json` scans known ACP-capable agents on PATH, also detects the Codex CLI bundled inside `/Applications/Codex.app`, and includes already configured agents from the bridge config. `start --json` emits JSONL runtime events on stdout and sends human-readable logs to stderr. `pair --json --no-start` creates a pairing URL without rendering a terminal QR code.
 
 Example JSON init input:
 
@@ -70,6 +70,13 @@ Example JSON init input:
     }
   ]
 }
+```
+
+When debugging task routing, add `--debug` to print the exact prompt sent to
+the ACP agent for each `task.dispatch`:
+
+```bash
+npx aamp-acp-bridge start --debug
 ```
 
 By default, the bridge stores its config under `~/.aamp/acp-bridge/config.json` and agent credentials under `~/.aamp/acp-bridge/credentials/`.
@@ -87,8 +94,14 @@ Dispatch tasks can also carry:
 
 - `priority`: `urgent | high | normal`
 - `expiresAt`: an ISO-8601 timestamp after which the task should no longer run
+- `promptRules`: an optional complete text block that replaces the default task
+  prompt rules
 
 If a `task.cancel` arrives before the ACP agent returns a final answer, the bridge suppresses any later result send for that task.
+
+When `promptRules` is present on `task.dispatch`, the ACP prompt keeps its
+standard task identity, metadata, dispatch context, description, and thread
+context, then replaces the default task rule block with the provided text.
 
 While ACP execution is in progress, the bridge can:
 
@@ -149,17 +162,16 @@ Hermes exposes ACP through `hermes acp`, so its bridge config uses a raw ACP com
 
 `init --agent hermes` writes this command automatically when Hermes is installed.
 
-### Traex
+### Trae CLI Next（内部版）
 
-Trae CLI 2.0 exposes a native ACP server through `traex`. Sign in first, then
-initialize the native Traex profile:
+Trae CLI Next（内部版） exposes a native ACP server. Sign in first, then initialize the canonical `traex` agent:
 
 ```bash
 traex login
 npx aamp-acp-bridge init --agent traex
 ```
 
-The generated agent config uses:
+The generated config uses the native command:
 
 ```json
 {
@@ -169,9 +181,12 @@ The generated agent config uses:
 }
 ```
 
-ACP Bridge detects only the `traex` executable for this profile. It does not
-fall back to Coco or `trae`; TraeCode CLI is the separate canonical `traecli`
-identity documented below. The generated command deliberately omits `--yolo`.
+ACP Bridge does not auto-discover the legacy `trae` or `coco` names. TraeCode
+CLI is the separate canonical `traecli` identity documented below. Existing
+explicit configurations remain usable because their `acpCommand` is preserved
+verbatim.
+
+The default deliberately omits `--yolo`. ACP Bridge already auto-approves ACP permission requests through `acpx`, while Trae's `--yolo` also disables sandboxing. Only add `--yolo` through an explicit custom `acpCommand` when the surrounding environment provides an external sandbox.
 
 ### TraeCode CLI
 
@@ -188,22 +203,25 @@ command omits `--yolo`.
 
 ### WorkBuddy
 
-On macOS, the bridge detects WorkBuddy at:
+On macOS, the bridge detects WorkBuddy only at:
 
 ```text
 /Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy
 ```
 
-`init --agent workbuddy` automatically uses the embedded ACP entrypoint:
+`init --agent workbuddy` uses the embedded ACP entrypoint:
 
 ```text
 /Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy --acp
 ```
 
 Open WorkBuddy and sign in before starting the bridge so the embedded CLI can
-reuse its local authentication state. Automatic WorkBuddy detection is limited
-to the standard macOS application path; on other platforms or for a custom
-installation, provide an explicit `acpCommand`.
+reuse its local authentication state. At startup, the bridge creates and closes
+a temporary ACP session to verify that WorkBuddy is ready; no model prompt is
+sent. If WorkBuddy is signed out, that agent fails startup with an actionable
+login message instead of being reported as ready. Automatic WorkBuddy detection
+is limited to this standard macOS installation; use an explicit `acpCommand` for
+another platform or installation path.
 
 ### WorkBuddy AI
 

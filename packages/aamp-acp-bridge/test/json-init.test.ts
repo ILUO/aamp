@@ -4,18 +4,27 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { runJsonInit } from '../src/json-init.js'
+import { WORKBUDDY_APP_CLI } from '../src/agent-resolver.js'
+
+function withCredentials(name: string, run: (paths: {
+  directory: string
+  configPath: string
+  credentialsFile: string
+}) => Promise<void>): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), `aamp-${name}-json-init-`))
+  const configPath = join(directory, 'config.json')
+  const credentialsFile = join(directory, `${name}-credentials.json`)
+  writeFileSync(credentialsFile, JSON.stringify({
+    email: `${name}@example.com`,
+    smtpPassword: 'fixture-password',
+  }))
+
+  return run({ directory, configPath, credentialsFile })
+    .finally(() => rmSync(directory, { recursive: true, force: true }))
+}
 
 test('JSON init supplies the native traex ACP command', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'aamp-traex-json-init-'))
-  const configPath = join(directory, 'config.json')
-  const credentialsFile = join(directory, 'traex-credentials.json')
-
-  try {
-    writeFileSync(credentialsFile, JSON.stringify({
-      email: 'traex@example.com',
-      smtpPassword: 'fixture-password',
-    }))
-
+  await withCredentials('traex', async ({ configPath, credentialsFile }) => {
     const result = await runJsonInit(configPath, {
       agents: [{ name: 'traex', credentialsFile }],
     })
@@ -26,55 +35,11 @@ test('JSON init supplies the native traex ACP command', async () => {
     assert.equal(written.agents[0].name, 'traex')
     assert.equal(written.agents[0].acpCommand, 'traex acp serve')
     assert.equal(written.agents[0].slug, 'traex-bridge')
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
-})
-
-test('JSON init preserves an existing custom traex ACP command', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'aamp-traex-json-init-'))
-  const configPath = join(directory, 'config.json')
-  const credentialsFile = join(directory, 'traex-credentials.json')
-  const customCommand = 'traex acp serve --config model="custom"'
-
-  try {
-    writeFileSync(credentialsFile, JSON.stringify({
-      email: 'traex@example.com',
-      smtpPassword: 'fixture-password',
-    }))
-    writeFileSync(configPath, JSON.stringify({
-      aampHost: 'https://meshmail.ai',
-      rejectUnauthorized: false,
-      agents: [{
-        name: 'traex',
-        acpCommand: customCommand,
-        credentialsFile,
-      }],
-    }))
-
-    const result = await runJsonInit(configPath, {
-      agents: [{ name: 'traex', credentialsFile }],
-    })
-
-    assert.equal(result.agents[0].acpCommand, customCommand)
-    const written = JSON.parse(readFileSync(configPath, 'utf8'))
-    assert.equal(written.agents[0].acpCommand, customCommand)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+  })
 })
 
 test('JSON init supplies the native TraeCode CLI ACP command', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'aamp-traecode-json-init-'))
-  const configPath = join(directory, 'config.json')
-  const credentialsFile = join(directory, 'traecli-credentials.json')
-
-  try {
-    writeFileSync(credentialsFile, JSON.stringify({
-      email: 'traecli@example.com',
-      smtpPassword: 'fixture-password',
-    }))
-
+  await withCredentials('traecli', async ({ configPath, credentialsFile }) => {
     const result = await runJsonInit(configPath, {
       agents: [{ name: 'traecli', credentialsFile }],
     })
@@ -84,27 +49,52 @@ test('JSON init supplies the native TraeCode CLI ACP command', async () => {
     assert.equal(written.agents[0].name, 'traecli')
     assert.equal(written.agents[0].acpCommand, 'traecli acp serve')
     assert.equal(written.agents[0].slug, 'traecli-bridge')
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+  })
 })
 
 test('JSON init preserves an explicit TraeCode CLI command', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'aamp-traecode-json-init-'))
-  const configPath = join(directory, 'config.json')
-  const credentialsFile = join(directory, 'traecli-credentials.json')
-  const command = 'env TRAE_CONFIG_DIR=/tmp/fixture traecli acp serve'
-
-  try {
-    writeFileSync(credentialsFile, JSON.stringify({
-      email: 'traecli@example.com',
-      smtpPassword: 'fixture-password',
-    }))
+  await withCredentials('traecli', async ({ configPath, credentialsFile }) => {
+    const command = 'env TRAE_CONFIG_DIR=/tmp/fixture traecli acp serve'
     const result = await runJsonInit(configPath, {
       agents: [{ name: 'traecli', acpCommand: command, credentialsFile }],
     })
     assert.equal(result.agents[0].acpCommand, command)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
+  })
+})
+
+test('JSON init rejects empty and whitespace-only explicit ACP commands', async () => {
+  await withCredentials('traex', async ({ configPath, credentialsFile }) => {
+    for (const acpCommand of ['', '   ', '\t\r\n']) {
+      await assert.rejects(runJsonInit(configPath, {
+        agents: [{ name: 'traex', acpCommand, credentialsFile }],
+      }))
+    }
+  })
+})
+
+test('JSON init preserves a quoted multi-token ACP command verbatim', async () => {
+  await withCredentials('traex', async ({ configPath, credentialsFile }) => {
+    const command = '  traex acp serve --model "doubao pro"  '
+    const result = await runJsonInit(configPath, {
+      agents: [{ name: 'traex', acpCommand: command, credentialsFile }],
+    })
+
+    assert.equal(result.agents[0].acpCommand, command)
+    const written = JSON.parse(readFileSync(configPath, 'utf8'))
+    assert.equal(written.agents[0].acpCommand, command)
+  })
+})
+
+test('JSON init preserves an explicit WorkBuddy ACP command', async () => {
+  await withCredentials('workbuddy', async ({ configPath, credentialsFile }) => {
+    const command = `${WORKBUDDY_APP_CLI} --acp`
+    const result = await runJsonInit(configPath, {
+      agents: [{ name: 'workbuddy', acpCommand: command, credentialsFile }],
+    })
+
+    assert.equal(result.agents[0].acpCommand, command)
+    const written = JSON.parse(readFileSync(configPath, 'utf8'))
+    assert.equal(written.agents[0].name, 'workbuddy')
+    assert.equal(written.agents[0].acpCommand, command)
+  })
 })

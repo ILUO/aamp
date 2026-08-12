@@ -1,28 +1,24 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { discoverAcpBridgeAgents } from '../src/discovery.js'
-import { withFakePath } from './path-fixture.js'
+import test from 'node:test'
+import {
+  discoverAcpBridgeAgents,
+  type AcpBridgeAgentCandidate,
+} from '../src/discovery.js'
+import { WORKBUDDY_APP_CLI } from '../src/agent-resolver.js'
+import { expectedFakePathVersion, withFakePath } from './path-fixture.js'
 
-function findTraex(configPath: string) {
+function findCandidate(configPath: string, name: string): AcpBridgeAgentCandidate {
   const matches = discoverAcpBridgeAgents(configPath).candidates
-    .filter((candidate) => candidate.id === 'traex')
+    .filter((candidate) => candidate.id === name)
   assert.equal(matches.length, 1)
   return matches[0]
 }
 
-function findTraeCode(configPath: string) {
-  const matches = discoverAcpBridgeAgents(configPath).candidates
-    .filter((candidate) => candidate.id === 'traecli')
-  assert.equal(matches.length, 1)
-  return matches[0]
-}
-
-test('discovers an installed native traex executable', {
-  skip: process.platform === 'win32',
-}, () => {
+test('discovers an installed native traex executable', () => {
   withFakePath([{ name: 'traex', version: 'traecli 0.200.19' }], (directory) => {
-    assert.deepEqual(findTraex(join(directory, 'missing-config.json')), {
+    assert.deepEqual(findCandidate(join(directory, 'missing-config.json'), 'traex'), {
       id: 'traex',
       displayName: 'traex',
       connection: 'acp_bridge',
@@ -31,17 +27,15 @@ test('discovers an installed native traex executable', {
       confidence: 'high',
       command: 'traex',
       acpCommand: 'traex acp serve',
-      version: 'traecli 0.200.19',
+      version: expectedFakePathVersion('traecli 0.200.19'),
       warnings: [],
     })
   })
 })
 
-test('reports the native defaults when traex is missing', {
-  skip: process.platform === 'win32',
-}, () => {
+test('reports canonical native defaults when traex is missing', () => {
   withFakePath([], (directory) => {
-    const candidate = findTraex(join(directory, 'missing-config.json'))
+    const candidate = findCandidate(join(directory, 'missing-config.json'), 'traex')
     assert.equal(candidate.detected, false)
     assert.equal(candidate.configured, false)
     assert.equal(candidate.confidence, 'low')
@@ -51,11 +45,9 @@ test('reports the native defaults when traex is missing', {
   })
 })
 
-test('discovers an installed native TraeCode CLI executable', {
-  skip: process.platform === 'win32',
-}, () => {
+test('discovers an installed native TraeCode CLI executable', () => {
   withFakePath([{ name: 'traecli', version: 'trae-cli version 0.120.52' }], (directory) => {
-    assert.deepEqual(findTraeCode(join(directory, 'missing-config.json')), {
+    assert.deepEqual(findCandidate(join(directory, 'missing-config.json'), 'traecli'), {
       id: 'traecli',
       displayName: 'traecli',
       connection: 'acp_bridge',
@@ -64,17 +56,15 @@ test('discovers an installed native TraeCode CLI executable', {
       confidence: 'high',
       command: 'traecli',
       acpCommand: 'traecli acp serve',
-      version: 'trae-cli version 0.120.52',
+      version: expectedFakePathVersion('trae-cli version 0.120.52'),
       warnings: [],
     })
   })
 })
 
-test('reports the canonical TraeCode CLI default when it is missing', {
-  skip: process.platform === 'win32',
-}, () => {
+test('reports the canonical TraeCode CLI default when it is missing', () => {
   withFakePath([], (directory) => {
-    const candidate = findTraeCode(join(directory, 'missing-config.json'))
+    const candidate = findCandidate(join(directory, 'missing-config.json'), 'traecli')
     assert.equal(candidate.detected, false)
     assert.equal(candidate.command, 'traecli')
     assert.equal(candidate.acpCommand, 'traecli acp serve')
@@ -82,12 +72,43 @@ test('reports the canonical TraeCode CLI default when it is missing', {
   })
 })
 
-test('does not expose legacy Trae or Coco names as native candidates', () => {
-  const ids = discoverAcpBridgeAgents('/definitely/missing/config.json')
-    .candidates.map((candidate) => candidate.id)
-  for (const legacyName of ['trae', 'coco']) {
-    assert.equal(ids.includes(legacyName), false)
-  }
+test('exposes WorkBuddy once with its standard embedded command', () => {
+  withFakePath([], (directory) => {
+    const candidate = findCandidate(join(directory, 'missing-config.json'), 'workbuddy')
+    assert.equal(candidate.command, WORKBUDDY_APP_CLI)
+    assert.equal(candidate.acpCommand, `${WORKBUDDY_APP_CLI} --acp`)
+  })
+})
+
+test('does not expose legacy Trae names as native candidates', () => {
+  withFakePath([], (directory) => {
+    const ids = discoverAcpBridgeAgents(join(directory, 'missing-config.json'))
+      .candidates.map((candidate) => candidate.id)
+    for (const legacyName of ['trae', 'coco']) {
+      assert.equal(ids.includes(legacyName), false)
+    }
+  })
+})
+
+test('preserves an explicitly configured legacy Trae command for saved bindings', () => {
+  withFakePath([], (directory) => {
+    const configPath = join(directory, 'bridge.json')
+    writeFileSync(configPath, JSON.stringify({
+      aampHost: 'https://meshmail.ai',
+      rejectUnauthorized: false,
+      agents: [{
+        name: 'trae',
+        acpCommand: 'traex acp serve',
+        credentialsFile: join(directory, 'missing-credentials.json'),
+      }],
+    }))
+
+    const candidate = findCandidate(configPath, 'trae')
+    assert.equal(candidate.detected, false)
+    assert.equal(candidate.configured, true)
+    assert.equal(candidate.confidence, 'medium')
+    assert.equal(candidate.acpCommand, 'traex acp serve')
+  })
 })
 
 test('exposes both WorkBuddy products as distinct native candidates', () => {
