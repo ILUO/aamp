@@ -13,9 +13,11 @@ import { withFakePath } from './path-fixture.js'
 
 const WORKBUDDY_AI_ACP_COMMAND = `'${WORKBUDDY_AI_APP_CLI}' --acp`
 
-test('registers only traex as a native Trae profile', () => {
-  assert.equal(KNOWN_AGENTS.filter((name) => name === 'traex').length, 1)
-  for (const legacyName of ['trae', 'traecli', 'coco']) {
+test('registers canonical Traex and TraeCode CLI names', () => {
+  for (const name of ['traex', 'traecli']) {
+    assert.equal(KNOWN_AGENTS.filter((candidate) => candidate === name).length, 1)
+  }
+  for (const legacyName of ['trae', 'coco']) {
     assert.equal(KNOWN_AGENTS.includes(legacyName), false)
   }
 })
@@ -43,6 +45,32 @@ test('does not fall back to traecli or coco', {
     assert.equal(detectKnownAgent('traex'), undefined)
     assert.equal(defaultAcpCommand('traex'), 'traex acp serve')
     assert.equal(missingAgentWarning('traex'), 'traex was not found on PATH.')
+  })
+})
+
+test('detects native TraeCode CLI and maps its ACP command', {
+  skip: process.platform === 'win32',
+}, () => {
+  withFakePath([{ name: 'traecli', version: 'trae-cli version 0.120.52' }], () => {
+    assert.deepEqual(detectKnownAgent('traecli'), {
+      command: 'traecli',
+      acpCommand: 'traecli acp serve',
+      version: 'trae-cli version 0.120.52',
+    })
+    assert.equal(defaultAcpCommand('traecli'), 'traecli acp serve')
+  })
+})
+
+test('TraeCode CLI never falls back to internal Traex or Coco commands', {
+  skip: process.platform === 'win32',
+}, () => {
+  withFakePath([
+    { name: 'traex', version: 'internal next' },
+    { name: 'coco', version: 'internal legacy' },
+  ], () => {
+    assert.equal(detectKnownAgent('traecli'), undefined)
+    assert.equal(defaultAcpCommand('traecli'), 'traecli acp serve')
+    assert.equal(missingAgentWarning('traecli'), 'traecli was not found on PATH.')
   })
 })
 

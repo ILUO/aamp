@@ -5,9 +5,10 @@ import {
   resolveInitScanTargets,
 } from '../src/cli/init.js'
 
-test('interactive init accepts only the native traex name', () => {
+test('interactive init accepts canonical Traex and TraeCode CLI names', () => {
   assert.deepEqual(resolveInitScanTargets('traex'), ['traex'])
-  for (const legacyName of ['trae', 'traecli', 'coco']) {
+  assert.deepEqual(resolveInitScanTargets('traecli'), ['traecli'])
+  for (const legacyName of ['trae', 'coco']) {
     assert.throws(
       () => resolveInitScanTargets(legacyName),
       new RegExp(`Unknown ACP agent "${legacyName}"`),
@@ -33,4 +34,11 @@ test('interactive init accepts both canonical WorkBuddy products', () => {
     )
   }
   assert.match(noAgentsFoundMessage('workbuddy_ai'), /WorkBuddy AI/)
+})
+
+test('forced init explains a missing TraeCode CLI executable', () => {
+  assert.equal(
+    noAgentsFoundMessage('traecli'),
+    'No ACP agent found. traecli was not found on PATH.',
+  )
 })

@@ -63,3 +63,48 @@ test('JSON init preserves an existing custom traex ACP command', async () => {
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test('JSON init supplies the native TraeCode CLI ACP command', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'aamp-traecode-json-init-'))
+  const configPath = join(directory, 'config.json')
+  const credentialsFile = join(directory, 'traecli-credentials.json')
+
+  try {
+    writeFileSync(credentialsFile, JSON.stringify({
+      email: 'traecli@example.com',
+      smtpPassword: 'fixture-password',
+    }))
+
+    const result = await runJsonInit(configPath, {
+      agents: [{ name: 'traecli', credentialsFile }],
+    })
+
+    assert.equal(result.agents[0].acpCommand, 'traecli acp serve')
+    const written = JSON.parse(readFileSync(configPath, 'utf8'))
+    assert.equal(written.agents[0].name, 'traecli')
+    assert.equal(written.agents[0].acpCommand, 'traecli acp serve')
+    assert.equal(written.agents[0].slug, 'traecli-bridge')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('JSON init preserves an explicit TraeCode CLI command', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'aamp-traecode-json-init-'))
+  const configPath = join(directory, 'config.json')
+  const credentialsFile = join(directory, 'traecli-credentials.json')
+  const command = 'env TRAE_CONFIG_DIR=/tmp/fixture traecli acp serve'
+
+  try {
+    writeFileSync(credentialsFile, JSON.stringify({
+      email: 'traecli@example.com',
+      smtpPassword: 'fixture-password',
+    }))
+    const result = await runJsonInit(configPath, {
+      agents: [{ name: 'traecli', acpCommand: command, credentialsFile }],
+    })
+    assert.equal(result.agents[0].acpCommand, command)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

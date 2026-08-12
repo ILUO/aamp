@@ -170,8 +170,21 @@ The generated agent config uses:
 ```
 
 ACP Bridge detects only the `traex` executable for this profile. It does not
-fall back to Coco, `trae`, or `traecli`. The generated command deliberately
-omits `--yolo`.
+fall back to Coco or `trae`; TraeCode CLI is the separate canonical `traecli`
+identity documented below. The generated command deliberately omits `--yolo`.
+
+### TraeCode CLI
+
+The external TraeCode CLI exposes native ACP through `traecli acp serve`:
+
+```bash
+npx aamp-acp-bridge init --agent traecli
+```
+
+The generated agent entry uses canonical name `traecli` and command
+`traecli acp serve`. ACP Bridge does not update TraeCode CLI or inspect its
+login/model state; prepare the client before starting the bridge. The generated
+command omits `--yolo`.
 
 ### WorkBuddy
 

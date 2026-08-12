@@ -11,7 +11,7 @@ const WORKBUDDY_AI_APP_ACP_COMMAND = `'${WORKBUDDY_AI_APP_CLI}' --acp`
 export const KNOWN_AGENTS: readonly string[] = [
   'claude', 'codex', 'gemini', 'goose', 'openclaw',
   'opencode', 'cursor', 'copilot', 'kimi', 'kiro',
-  'hermes', 'traex', 'workbuddy', 'workbuddy_ai',
+  'hermes', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai',
 ]
 
 export interface AgentResolution {
@@ -50,7 +50,7 @@ function workbuddyApp(name: string): {
 
 function baseAcpCommand(name: string): string {
   if (name === 'hermes') return 'hermes acp'
-  if (name === 'traex') return 'traex acp serve'
+  if (name === 'traex' || name === 'traecli') return `${name} acp serve`
   if (name === 'workbuddy_ai') return WORKBUDDY_AI_APP_ACP_COMMAND
   return name
 }
