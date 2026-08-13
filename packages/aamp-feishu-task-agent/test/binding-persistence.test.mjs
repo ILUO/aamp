@@ -168,38 +168,45 @@ test('declining a replacement returns to the continue-selection prompt', () => {
   const acceptedStart = session.indexOf('bindingIntents.push', duplicateStart)
   assert.notEqual(duplicateStart, -1)
   assert.notEqual(acceptedStart, -1)
+  assert.ok(duplicateStart < acceptedStart, 'replacement decision must precede accepting the binding')
   const duplicateBranch = session.slice(duplicateStart, acceptedStart)
   assert.doesNotMatch(duplicateBranch, /continue;/)
   assert.match(session, /keepGoing = await confirm\('是否继续选择本地智能体和 Bot？', false\)/)
 })
 
-test('install saves accepted pending bindings before Agent setup and promotes one at a time', () => {
+test('install saves accepted pending bindings before Agent setup and uses the shared launcher', () => {
   const source = readFileSync(controllerPath, 'utf8')
   const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
-  assert.ok(
-    session.indexOf('await upsertBindings(bindingIntents)') < session.indexOf('await setupAgentGroups(saved)'),
-    'install must persist accepted drafts before setting up Agent groups',
-  )
-  assert.match(session, /await updateBinding\(paired\.binding\)/)
+  const persisted = session.indexOf('await upsertBindings(bindingIntents)')
+  const setup = session.indexOf('await setupAgentGroups(saved)')
+  assert.notEqual(persisted, -1, 'install must persist accepted drafts')
+  assert.notEqual(setup, -1, 'install must set up Agent groups')
+  assert.ok(persisted < setup, 'install must persist accepted drafts before setting up Agent groups')
+  assert.match(session, /startBindingsWithGroups\(saved, groups, mode\)/)
+  assert.doesNotMatch(session, /updateBinding/)
   assert.doesNotMatch(session, /replaceBindings\(bound\.succeeded\)/)
 })
 
 test('a failed install start keeps the already-saved pending binding', () => {
   const source = readFileSync(controllerPath, 'utf8')
   const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
-  const bindStart = session.indexOf('await bindOneDraft')
-  assert.notEqual(bindStart, -1, 'install must attempt to bind saved drafts')
-  const failureBranch = session.slice(session.indexOf('catch (error)', bindStart))
-  assert.doesNotMatch(failureBranch, /removeBinding|replaceBindings/)
-  assert.match(failureBranch, /failed\.push\(\{ binding: draft, reason \}\)/)
+  const launchStart = session.indexOf('await startBindingsWithGroups(saved, groups, mode)')
+  assert.notEqual(launchStart, -1, 'install must launch saved drafts for binding')
+  const launchBranch = session.slice(launchStart)
+  assert.doesNotMatch(launchBranch, /removeBinding|replaceBindings/)
+  assert.match(launchBranch, /failed\.push\(\.\.\.launched\.failed\)/)
 })
 
 test('install startup errors say the binding remains saved for retry', () => {
   const source = readFileSync(controllerPath, 'utf8')
-  const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
-  assert.match(session, /🔴 启动失败：\$\{bindingLabel\(draft\)\}/)
-  assert.match(session, /绑定配置已保存，可稍后运行 feishu-task-agent start 重试/)
-  assert.match(session, /setBindingStatus\(draft, 'start', 'failed', reason\)/)
+  const reporter = functionRange(source, 'function reportBindingFailure(', 'const bindingLauncherOperations = ')
+  const finalizer = functionRange(source, 'async function finalizeDeferredLaunchResults(', 'async function startBindingsWithGroups(')
+  const launcher = functionRange(source, 'async function startBindingsWithGroups(', 'function startupDisposition(')
+  assert.match(reporter, /🔴 启动失败：\$\{bindingLabel\(binding, runtimeAgentType\)\}/)
+  assert.match(reporter, /绑定配置已保存，可稍后运行 feishu-task-agent start 重试/)
+  assert.match(finalizer, /operations\.reportBindingFailure\([\s\S]*item\.runtimeAgentType,[\s\S]*item\.reason,[\s\S]*mode/)
+  assert.match(finalizer, /setBindingStatus\(item\.binding, 'start', 'failed', item\.reason\)/)
+  assert.match(launcher, /finalizeDeferredLaunchResults\(launched, mode, operations\)/)
 })
 
 test('add saves one atomic batch and never starts Agent groups', () => {
@@ -212,6 +219,7 @@ test('add saves one atomic batch and never starts Agent groups', () => {
   assert.notEqual(addStart, -1)
   assert.notEqual(installStart, -1)
   assert.ok(saveStart < addStart, 'add and install must share the same atomic batch save')
+  assert.ok(addStart < installStart, 'add must return before install process setup')
   const addBranch = session.slice(addStart, installStart)
-  assert.doesNotMatch(addBranch, /setupAgentGroups|bindOneDraft/)
+  assert.doesNotMatch(addBranch, /setupAgentGroups|prepareBindingStart|executePreparedBindingStart/)
 })

@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const bootstrap = path.resolve(__dirname, '../bootstrap/aamp-feishu-task-agent-bootstrap.sh')
 const packageJson = JSON.parse(readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'))
+const bootstrapBaseEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => (
+  !/^(?:npm_|INIT_CWD$)/i.test(key)
+)))
 
 test('task agent package includes the packaged bin directory', () => {
   assert.equal(
@@ -75,6 +78,127 @@ test('bootstrap accepts the legacy normal token passed by an older auto-updater'
 
   assert.equal(result.status, 0)
   assert.match(result.stdout, /Usage:/)
+})
+
+test('internal profile probe reports hit or miss without profile mutation, auth login, or prompting', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-profile-probe-'))
+  const fakeCli = path.join(root, 'lark-cli')
+  const callsFile = path.join(root, 'calls.log')
+  writeFileSync(fakeCli, `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CALLS_FILE"
+case "$*" in
+  "--version") printf 'lark-cli version 1.0.64\n' ;;
+  "profile list") printf '["profile-ready"]\n' ;;
+  "--profile profile-ready auth status --json") printf '{"identities":{"user":{"available":true,"tokenStatus":"valid","scope":"scope:ready"}}}\n' ;;
+  *" profile add "*|*" auth login "*) printf 'unexpected mutation\n' >&2; exit 97 ;;
+esac
+`)
+  chmodSync(fakeCli, 0o755)
+
+  const runProbe = (profile) => {
+    const resultFile = path.join(root, `${profile}.json`)
+    const binding = JSON.stringify({
+      agent_type: 'codex',
+      aamp_host: 'https://meshmail.ai',
+      bot: { app_id: `cli_${profile}`, lark_cli_profile: profile },
+    })
+    const shell = [
+      'set -euo pipefail',
+      'exec 3>"$RESULT_FILE"',
+      'exec 4<&0',
+      'exec bash "$BOOTSTRAP" __probe-profile --agent codex --aamp-host https://meshmail.ai',
+    ].join('\n')
+    const result = spawnSync('bash', ['-c', shell], {
+      input: `${binding}\n`,
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        ...bootstrapBaseEnv,
+        HOME: root,
+        BOOTSTRAP: bootstrap,
+        RESULT_FILE: resultFile,
+        CALLS_FILE: callsFile,
+        AAMP_TASK_DEFAULT_ACTION: 'help',
+        AAMP_TASK_AUTO_UPDATE: 'false',
+        AAMP_LARK_CLI_BIN: fakeCli,
+        AAMP_LARK_CLI_CONFIG_DIR: path.join(root, 'lark-config'),
+        NPM_CONFIG_CACHE: path.join(root, 'npm-cache'),
+        NPM_GLOBAL_PREFIX: path.join(root, 'npm-global'),
+        FEISHU_USER_AUTH_REQUIRED_SCOPES: 'scope:ready',
+        FEISHU_USER_AUTH_EXCLUDES: '',
+      },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    return {
+      payload: JSON.parse(readFileSync(resultFile, 'utf8')),
+      stdout: result.stdout,
+      stderr: result.stderr,
+    }
+  }
+
+  const hit = runProbe('profile-ready')
+  const miss = runProbe('profile-missing')
+
+  assert.deepEqual(hit.payload, {
+    ready: true,
+    lark_cli_bin: fakeCli,
+    lark_cli_config_dir: path.join(root, 'lark-config'),
+  })
+  assert.deepEqual(miss.payload, { ready: false })
+  const calls = readFileSync(callsFile, 'utf8')
+  assert.doesNotMatch(calls, /profile add|auth login/)
+  assert.doesNotMatch(
+    `${calls}\n${hit.stdout}\n${hit.stderr}\n${miss.stdout}\n${miss.stderr}`,
+    /open|prompt|是否|\[y\/n\]/i,
+  )
+})
+
+test('internal profile probe does not install lark-cli when no existing candidate is available', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-profile-probe-no-cli-'))
+  const binDir = path.join(root, 'bin')
+  const callsFile = path.join(root, 'calls.log')
+  const resultFile = path.join(root, 'result.json')
+  mkdirSync(binDir)
+  writeFileSync(path.join(binDir, 'node'), `#!/usr/bin/env bash\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
+  writeFileSync(path.join(binDir, 'npm'), '#!/usr/bin/env bash\nprintf "npm:%s\\n" "$*" >> "$CALLS_FILE"\nexit 97\n')
+  writeFileSync(path.join(binDir, 'npx'), '#!/usr/bin/env bash\nprintf "npx:%s\\n" "$*" >> "$CALLS_FILE"\nexit 97\n')
+  for (const executable of ['node', 'npm', 'npx']) chmodSync(path.join(binDir, executable), 0o755)
+  const binding = JSON.stringify({
+    agent_type: 'codex',
+    aamp_host: 'https://meshmail.ai',
+    bot: { app_id: 'cli_probe_no_cli', lark_cli_profile: 'profile-missing' },
+  })
+  const shell = [
+    'set -euo pipefail',
+    'exec 3>"$RESULT_FILE"',
+    'exec 4<&0',
+    'exec bash "$BOOTSTRAP" __probe-profile --agent codex --aamp-host https://meshmail.ai',
+  ].join('\n')
+  const result = spawnSync('bash', ['-c', shell], {
+    input: `${binding}\n`,
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      PATH: `${binDir}:/usr/bin:/bin`,
+      BOOTSTRAP: bootstrap,
+      RESULT_FILE: resultFile,
+      CALLS_FILE: callsFile,
+      AAMP_TASK_AUTO_UPDATE: 'false',
+      AAMP_LARK_CLI_BIN: '',
+      AAMP_LARK_CLI_CONFIG_DIR: path.join(root, 'lark-config'),
+      NPM_CONFIG_CACHE: path.join(root, 'npm-cache'),
+      NPM_GLOBAL_PREFIX: path.join(root, 'npm-global'),
+    },
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(resultFile, 'utf8')), { ready: false })
+  assert.equal(existsSync(callsFile), false, 'probe must never invoke npm or npx')
+  assert.equal(existsSync(path.join(root, 'lark-config')), false, 'miss probe must not create config')
+  assert.equal(existsSync(path.join(root, 'npm-cache')), false, 'probe must not create npm cache')
+  assert.equal(existsSync(path.join(root, 'npm-global')), false, 'probe must not create npm prefix')
 })
 
 test('bootstrap does not detect Grok agent as Cursor', () => {
@@ -375,7 +499,7 @@ test('bootstrap help owns log commands and success output stays concise', () => 
   assert.doesNotMatch(success, /print_local_log_hints/)
   assert.match(controller, /🟢 保持终端打开，你可以给 agent 派发飞书任务/)
   assert.match(controller, /\[aamp-one-click\] 启动成功：\$\{bindingLabel\(binding, runtimeAgentType\)\}/)
-  assert.equal(controller.match(/printBindingStarted\(/g)?.length, 3)
+  assert.equal(controller.match(/printBindingStarted\(/g)?.length, 4)
   assert.doesNotMatch(controller, /已接入飞书任务，可以开始对话 & 派发任务/)
   assert.doesNotMatch(controller, /飞书 Bot：/)
   assert.doesNotMatch(controller, /保持此终端打开；按 Ctrl\+C 停止本次启动的本地连接。/)
@@ -1315,4 +1439,99 @@ test('Codex update is skipped when the selected CLI is already latest', () => {
   assert.match(output, /当前 Codex CLI 版本是：1\.2\.3，最新版本是：1\.2\.3/)
   assert.doesNotMatch(output, /正在更新 Codex CLI/)
   assert.equal(existsSync(updateMarker), false)
+})
+
+test('Codex latest-version lookup is cached while the installed version is unchanged', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const helperStart = source.indexOf('codex_cli_version()')
+  const helperEnd = source.indexOf('\nrun_codex_login_status()', helperStart)
+  const helpers = source.slice(helperStart, helperEnd)
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-codex-update-cache-'))
+  const fakeCodex = path.join(root, 'codex')
+  const lookupMarker = path.join(root, 'registry-lookups')
+  const cacheFile = path.join(root, 'cache.json')
+  const detailFile = path.join(root, 'details.log')
+
+  writeFileSync(fakeCodex, '#!/usr/bin/env bash\nprintf "codex-cli 1.2.3\\n"\n')
+  chmodSync(fakeCodex, 0o755)
+
+  const shell = [
+    'set -euo pipefail',
+    'AGENT="codex"',
+    'CODEX_AUTO_UPDATE="true"',
+    'CODEX_NPM_PACKAGE="@openai/codex"',
+    'CODEX_UPDATE_CACHE_FILE="$1/cache.json"',
+    'CODEX_UPDATE_CACHE_TTL_SECONDS="86400"',
+    'ONE_CLICK_LOG="$1/one-click.log"',
+    'DETAIL_FILE="$1/details.log"',
+    'LOOKUP_MARKER="$1/registry-lookups"',
+    'FAKE_CODEX="$1/codex"',
+    'resolve_codex_cli_for_acp() { printf "%s\\n" "$FAKE_CODEX"; }',
+    'agent_detail() { printf "%s\\n" "$*" >>"$DETAIL_FILE"; }',
+    'write_one_click_log() { :; }',
+    helpers,
+    'resolve_latest_codex_cli_version() { printf "lookup\\n" >>"$LOOKUP_MARKER"; printf "1.2.3\\n"; }',
+    'ensure_codex_cli_updated',
+    'ensure_codex_cli_updated',
+  ].join('\n')
+  const result = spawnSync('bash', ['-c', shell, 'bash', root], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(lookupMarker, 'utf8').trim().split(/\n/).length, 1)
+  assert.match(readFileSync(detailFile, 'utf8'), /Codex CLI update check cache is fresh/)
+  const cache = JSON.parse(readFileSync(cacheFile, 'utf8'))
+  assert.equal(cache.current_version, '1.2.3')
+  assert.equal(cache.latest_version, '1.2.3')
+  assert.equal(cache.package, '@openai/codex')
+  assert.equal(cache.registry, 'https://registry.npmjs.org/')
+})
+
+test('Codex latest-version cache invalidates on version, registry, and malformed data', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const helperStart = source.indexOf('codex_cli_version()')
+  const helperEnd = source.indexOf('\nrun_codex_login_status()', helperStart)
+  const helpers = source.slice(helperStart, helperEnd)
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-codex-update-cache-version-'))
+  const fakeCodex = path.join(root, 'codex')
+  const versionFile = path.join(root, 'version')
+  const lookupMarker = path.join(root, 'registry-lookups')
+
+  writeFileSync(versionFile, '1.2.3\n')
+  writeFileSync(fakeCodex, '#!/usr/bin/env bash\nprintf "codex-cli %s\\n" "$(cat "$VERSION_FILE")"\n')
+  chmodSync(fakeCodex, 0o755)
+
+  const shell = [
+    'set -euo pipefail',
+    'AGENT="codex"',
+    'CODEX_AUTO_UPDATE="true"',
+    'CODEX_NPM_PACKAGE="@openai/codex"',
+    'NPM_REGISTRY="https://registry-one.example/"',
+    'CODEX_UPDATE_CACHE_FILE="$1/cache.json"',
+    'CODEX_UPDATE_CACHE_TTL_SECONDS="86400"',
+    'ONE_CLICK_LOG="$1/one-click.log"',
+    'VERSION_FILE="$1/version"',
+    'LOOKUP_MARKER="$1/registry-lookups"',
+    'FAKE_CODEX="$1/codex"',
+    'export VERSION_FILE',
+    'resolve_codex_cli_for_acp() { printf "%s\\n" "$FAKE_CODEX"; }',
+    'agent_detail() { :; }',
+    'write_one_click_log() { :; }',
+    helpers,
+    'resolve_latest_codex_cli_version() { printf "lookup\\n" >>"$LOOKUP_MARKER"; cat "$VERSION_FILE"; }',
+    'ensure_codex_cli_updated',
+    'printf "1.2.4\\n" >"$VERSION_FILE"',
+    'ensure_codex_cli_updated',
+    'NPM_REGISTRY="https://registry-two.example/"',
+    'ensure_codex_cli_updated',
+    `CACHE_FILE="$CODEX_UPDATE_CACHE_FILE" node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.env.CACHE_FILE,"utf8"));value.latest_version={};fs.writeFileSync(process.env.CACHE_FILE,JSON.stringify(value));'`,
+    'ensure_codex_cli_updated',
+  ].join('\n')
+  const result = spawnSync('bash', ['-c', shell, 'bash', root], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(lookupMarker, 'utf8').trim().split(/\n/).length, 4)
+  const cache = JSON.parse(readFileSync(path.join(root, 'cache.json'), 'utf8'))
+  assert.equal(cache.current_version, '1.2.4')
+  assert.equal(cache.latest_version, '1.2.4')
+  assert.equal(cache.registry, 'https://registry-two.example/')
 })

@@ -32,6 +32,21 @@ test('network errors retain nested DNS and socket causes', () => {
   )
 })
 
+test('ACP retry detection is independent of concurrent event completion order', () => {
+  const events = [
+    { type: 'agent.started', agent: 'cursor' },
+    { type: 'agent.failed', agent: 'codex', message: 'fetch failed | code=ECONNRESET' },
+    { type: 'agent.started', agent: 'traex' },
+    { type: 'bridge.running', agents: [{ name: 'traex' }, { name: 'cursor' }] },
+  ]
+  assert.equal(
+    runtimeNetwork.classifyNetworkError(
+      runtimeNetwork.agentStartRetryError(events, ['codex', 'cursor', 'traex'], 1, 3),
+    ),
+    'connection_reset',
+  )
+})
+
 test('network errors are classified for DNS, timeout, reset, TLS, and HTTP failures', () => {
   assert.equal(typeof runtimeNetwork?.classifyNetworkError, 'function')
 
@@ -316,6 +331,28 @@ test('controller retries real bridge stages without an independent AAMP prefligh
   assert.match(controller, /type: 'bridge\.process'/)
   assert.match(controller, /withNetworkRetry/)
   assert.match(controller, /createSerializedLineWriter/)
+})
+
+test('controller serializes manifest and errors and flushes them during cleanup', () => {
+  assert.match(controller, /const manifestWriter = createSerializedRunner/)
+  assert.match(controller, /const errorLogWriter = createSerializedLineWriter/)
+  assert.match(controller, /await manifestWriter\.flush\(\)/)
+  assert.match(controller, /await errorLogWriter\.flush\(\)/)
+  assert.match(controller, /const cleanupRuntimeResources = createResourceCleanup/)
+  assert.match(controller, /await cleanupRuntimeResources\(\)/)
+  assert.doesNotMatch(controller, /let cleanupPromise/)
+  const signalStart = controller.indexOf("for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])")
+  const signalEnd = controller.indexOf('\nlet isMainModule = false', signalStart)
+  const signalBlock = controller.slice(signalStart, signalEnd)
+  assert.match(signalBlock, /promptInterrupter\.interrupt/)
+  assert.doesNotMatch(signalBlock, /process\.exit\(/)
+})
+
+test('runtime session acquisition releases a lease completed after stop was requested', () => {
+  const acquireStart = controller.indexOf('async function acquireRuntimeSessionLease(action)')
+  const acquireEnd = controller.indexOf('\nfunction emptyStore()', acquireStart)
+  const acquireBlock = controller.slice(acquireStart, acquireEnd)
+  assert.match(acquireBlock, /heldLeases\.add\(lease\);\s*if \(stopRequested\) {\s*await releaseLease\(lease\);/)
 })
 
 test('install output keeps the final summary without redundant per-binding success lines', () => {

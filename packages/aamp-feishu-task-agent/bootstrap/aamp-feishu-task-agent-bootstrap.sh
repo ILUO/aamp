@@ -51,6 +51,8 @@ CODEX_CHATGPT_APP_CLI="/Applications/ChatGPT.app/Contents/Resources/codex"
 CODEX_APP_CLI="/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTO_UPDATE="${CODEX_AUTO_UPDATE:-true}"
 CODEX_NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex}"
+CODEX_UPDATE_CACHE_FILE="${CODEX_UPDATE_CACHE_FILE:-$HOME/.aamp/feishu-task-agent/codex-update-cache.json}"
+CODEX_UPDATE_CACHE_TTL_SECONDS="${CODEX_UPDATE_CACHE_TTL_SECONDS:-86400}"
 CODEX_ACP_PKG="${CODEX_ACP_PKG:-@agentclientprotocol/codex-acp@1.0.2}"
 AAMP_TRAE_CLI_BIN="${AAMP_TRAE_CLI_BIN:-}"
 AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS="${AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS:-10}"
@@ -1480,7 +1482,7 @@ parse_args() {
   fi
 
   case "${1:-}" in
-    install|start|list|add|remove|update|help|__discover-agents|__register-binding|__prepare-agent|__ensure-profile)
+    install|start|list|add|remove|update|help|__discover-agents|__register-binding|__prepare-agent|__probe-profile|__ensure-profile)
       AAMP_TASK_ACTION="$1"
       shift
       ;;
@@ -2292,6 +2294,13 @@ ensure_lark_cli_profile() {
   with_lark_cli_config_lock ensure_lark_cli_profile_locked "$@"
 }
 
+probe_lark_cli_profile_locked() {
+  local profile="$1"
+  "$LARK_CLI_CMD" profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1 \
+    || return 1
+  lark_cli_user_auth_satisfied "$profile"
+}
+
 ensure_lark_cli_profile_locked() {
   local app_id="$1"
   local app_secret="$2"
@@ -3079,6 +3088,68 @@ resolve_latest_codex_cli_version() {
     --prefix "$NPM_GLOBAL_PREFIX" 2>>"$ONE_CLICK_LOG" | tail -n 1 | tr -d '[:space:]'
 }
 
+codex_update_cache_latest() {
+  local current_version="$1"
+  [ -n "${CODEX_UPDATE_CACHE_FILE:-}" ] || return 1
+  [ -n "$current_version" ] || return 1
+  [ -f "$CODEX_UPDATE_CACHE_FILE" ] || return 1
+  CACHE_FILE="$CODEX_UPDATE_CACHE_FILE" \
+    TTL="${CODEX_UPDATE_CACHE_TTL_SECONDS:-86400}" \
+    CURRENT_VERSION="$current_version" \
+    NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex}" \
+    NPM_REGISTRY_VALUE="${NPM_REGISTRY:-https://registry.npmjs.org/}" \
+    node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(process.env.CACHE_FILE, "utf8")); } catch { process.exit(1); }
+const checkedAt = Number(data.checked_at || 0);
+const ttl = Number(process.env.TTL || 86400);
+const age = Math.floor(Date.now() / 1000) - checkedAt;
+if (data.version !== 1 || typeof data.checked_at !== "number" || !Number.isFinite(checkedAt) || checkedAt <= 0) process.exit(1);
+if (!Number.isFinite(ttl) || ttl <= 0 || age < 0 || age >= ttl) process.exit(1);
+if (typeof data.current_version !== "string" || typeof data.latest_version !== "string") process.exit(1);
+if (typeof data.package !== "string" || typeof data.registry !== "string") process.exit(1);
+if (String(data.current_version || "") !== String(process.env.CURRENT_VERSION || "")) process.exit(1);
+if (String(data.package || "") !== String(process.env.NPM_PACKAGE || "")) process.exit(1);
+if (String(data.registry || "") !== String(process.env.NPM_REGISTRY_VALUE || "")) process.exit(1);
+const latest = String(data.latest_version || "").trim();
+if (!/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(latest)) process.exit(1);
+process.stdout.write(latest);
+' 2>>"${ONE_CLICK_LOG:-/dev/null}"
+}
+
+write_codex_update_cache() {
+  local current_version="$1"
+  local latest_version="$2"
+  [ -n "${CODEX_UPDATE_CACHE_FILE:-}" ] || return 0
+  [ -n "$current_version" ] && [ -n "$latest_version" ] || return 0
+  mkdir -p "$(dirname "$CODEX_UPDATE_CACHE_FILE")"
+  CACHE_FILE="$CODEX_UPDATE_CACHE_FILE" \
+    CURRENT_VERSION="$current_version" \
+    LATEST_VERSION="$latest_version" \
+    NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex}" \
+    NPM_REGISTRY_VALUE="${NPM_REGISTRY:-https://registry.npmjs.org/}" \
+    node -e '
+const fs = require("fs");
+const file = process.env.CACHE_FILE;
+const temporary = `${file}.tmp.${process.pid}`;
+const payload = {
+  version: 1,
+  checked_at: Math.floor(Date.now() / 1000),
+  current_version: process.env.CURRENT_VERSION || "",
+  latest_version: process.env.LATEST_VERSION || "",
+  package: process.env.NPM_PACKAGE || "",
+  registry: process.env.NPM_REGISTRY_VALUE || "",
+};
+try {
+  fs.writeFileSync(temporary, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
+  fs.renameSync(temporary, file);
+} finally {
+  try { fs.unlinkSync(temporary); } catch {}
+}
+' 2>>"${ONE_CLICK_LOG:-/dev/null}" || true
+}
+
 codex_cli_update_available() {
   CODEX_CURRENT_VERSION="$1" CODEX_LATEST_VERSION="$2" node -e '
 function parse(value) {
@@ -3217,7 +3288,13 @@ ensure_codex_cli_updated() {
   codex_bin="$(resolve_codex_cli_for_acp || true)"
   [ -n "$codex_bin" ] || return 0
   version_before="$(codex_cli_version_number "$codex_bin" || true)"
-  latest_version="$(resolve_latest_codex_cli_version || true)"
+  latest_version="$(codex_update_cache_latest "$version_before" || true)"
+  if [ -n "$latest_version" ]; then
+    agent_detail "Codex CLI update check cache is fresh: current=${version_before:-unknown} latest=$latest_version"
+  else
+    latest_version="$(resolve_latest_codex_cli_version || true)"
+    write_codex_update_cache "$version_before" "$latest_version"
+  fi
   version_line="当前 Codex CLI 版本是：${version_before:-未知}，最新版本是：${latest_version:-获取失败}"
   write_one_click_log "[aamp-one-click] $version_line"
   agent_detail "checking Codex CLI update: path=$codex_bin version=${version_before:-unknown}"
@@ -4220,6 +4297,28 @@ run_internal_prepare_agent() {
   emit_internal_result "{\"agent_type\":\"$(json_escape "$AGENT")\",\"acp_command\":\"$(json_escape "$ACP_AGENT_COMMAND")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
 }
 
+run_internal_probe_profile() {
+  AAMP_TASK_INTERNAL_BINDING_JSON=""
+  IFS= read -r AAMP_TASK_INTERNAL_BINDING_JSON <&"$AAMP_TASK_INTERNAL_INPUT_FD" || true
+  [ -n "$AAMP_TASK_INTERNAL_BINDING_JSON" ] || agent_fail "missing internal binding payload"
+  APP_ID="$(binding_json_field bot.app_id)"
+  LARK_CLI_PROFILE="$(binding_json_field bot.lark_cli_profile)"
+  [ -n "$APP_ID" ] && [ -n "$LARK_CLI_PROFILE" ] || agent_fail "binding is missing Feishu app or profile"
+  AAMP_TASK_INTERNAL_BINDING_JSON=""
+  unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
+  export LARKSUITE_CLI_CONFIG_DIR="$AAMP_LARK_CLI_CONFIG_DIR"
+  unset LARK_CLI_NO_PROXY
+  if ! select_lark_cli_bin_from_candidates; then
+    emit_internal_result '{"ready":false}'
+    return 0
+  fi
+  if with_lark_cli_config_lock probe_lark_cli_profile_locked "$LARK_CLI_PROFILE"; then
+    emit_internal_result "{\"ready\":true,\"lark_cli_bin\":\"$(json_escape "$LARK_CLI_CMD")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
+  else
+    emit_internal_result '{"ready":false}'
+  fi
+}
+
 run_internal_ensure_profile() {
   AAMP_TASK_INTERNAL_BINDING_JSON=""
   IFS= read -r AAMP_TASK_INTERNAL_BINDING_JSON <&"$AAMP_TASK_INTERNAL_INPUT_FD" || true
@@ -4238,7 +4337,9 @@ run_internal_ensure_profile() {
 
 run_internal_action() {
   AAMP_TASK_INTERNAL="true"
-  ensure_node_toolchain
+  if [ "$AAMP_TASK_ACTION" != "__probe-profile" ]; then
+    ensure_node_toolchain
+  fi
   case "$AAMP_TASK_ACTION" in
     __discover-agents)
       run_internal_discover_agents
@@ -4248,6 +4349,9 @@ run_internal_action() {
       ;;
     __prepare-agent)
       run_internal_prepare_agent
+      ;;
+    __probe-profile)
+      run_internal_probe_profile
       ;;
     __ensure-profile)
       run_internal_ensure_profile
@@ -4332,7 +4436,7 @@ main() {
   fi
 
   case "$AAMP_TASK_ACTION" in
-    __discover-agents|__register-binding|__prepare-agent|__ensure-profile)
+    __discover-agents|__register-binding|__prepare-agent|__probe-profile|__ensure-profile)
       run_internal_action
       return 0
       ;;

@@ -5,7 +5,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const controllerPath = path.resolve(__dirname, '../bin/feishu-task-agent-controller.mjs')
-const { installHasOnlyCancellations, startupSummaryLines } = await import(pathToFileURL(controllerPath).href)
+const {
+  installHasOnlyCancellations,
+  orderStartupItems,
+  reconcileStartupResults,
+  startupSummaryLines,
+} = await import(pathToFileURL(controllerPath).href)
 
 function binding(agentType, botName, appId) {
   return {
@@ -38,6 +43,57 @@ test('partial success keeps the planned denominator and lists success then failu
     '  原因：Trae CLI Next 未登录',
   ])
   assert.doesNotMatch(lines.join('\n'), /\n\n启动失败：/)
+})
+
+test('concurrent completion order is restored to binding selection order', () => {
+  const selected = [
+    { binding_id: 'traex', ...binding('traex', 'Trae', 'cli_traex') },
+    { binding_id: 'codex', ...binding('codex', 'Codex', 'cli_codex') },
+    { binding_id: 'cursor', ...binding('cursor', 'Cursor', 'cli_cursor') },
+  ]
+  const completed = [selected[2], selected[0], selected[1]].map((item) => ({ binding: item }))
+  const ordered = orderStartupItems(selected, completed)
+  assert.deepEqual(
+    ordered.map(({ binding: item }) => item.binding_id),
+    ['traex', 'codex', 'cursor'],
+  )
+  assert.deepEqual(startupSummaryLines({
+    title: '已成功启动',
+    plannedCount: selected.length,
+    running: ordered,
+  }), [
+    '已成功启动 3/3 个配置。',
+    '启动成功：',
+    '- traex ↔ Trae (cli_traex)',
+    '- codex ↔ Codex (cli_codex)',
+    '- cursor ↔ Cursor (cli_cursor)',
+  ])
+})
+
+test('install cancellations from selection and launcher retain full selection order', async () => {
+  const acceptedThenAgentCancelled = {
+    binding_id: 'accepted-first',
+    ...binding('codex', 'Accepted First', 'cli_first'),
+  }
+  const declinedReplacement = {
+    binding_id: 'declined-second',
+    ...binding('cursor', 'Declined Second', 'cli_second'),
+  }
+  const selected = [acceptedThenAgentCancelled, declinedReplacement]
+  const result = await reconcileStartupResults(selected, {
+    running: [],
+    failed: [],
+    cancelled: [
+      { binding: declinedReplacement, reason: '用户取消替换已有绑定' },
+      { binding: acceptedThenAgentCancelled, reason: '用户取消了 Agent 准备流程' },
+    ],
+  }, [], async () => ({ alive: [], failed: [] }))
+
+  assert.deepEqual(result.cancelled.map(({ binding: item }) => item.binding_id), [
+    'accepted-first',
+    'declined-second',
+  ])
+  assert.equal(result.disposition, 'only-cancel')
 })
 
 test('summary uses the resolved runtime type and omits empty sections', () => {
@@ -107,15 +163,15 @@ test('runtime reconciliation preserves the resolved Agent type for failure summa
   assert.match(reconcile, /runtimeAgentType: item\.runtimeAgentType/)
 })
 
-test('direct startup failures preserve the resolved Agent type for failure summaries', async () => {
+test('layered startup failures preserve the resolved Agent type for failure summaries', async () => {
   const source = await import('node:fs').then(({ readFileSync }) => readFileSync(controllerPath, 'utf8'))
-  const start = source.indexOf('async function startSelectedBindings(')
-  const end = source.indexOf('\nasync function markRuntimeFailed(', start)
+  const start = source.indexOf('async function startBindingsWithGroups(')
+  const end = source.indexOf('\nasync function startSelectedBindings(', start)
   assert.notEqual(start, -1)
   assert.notEqual(end, -1)
-  const startSelected = source.slice(start, end)
-  assert.match(startSelected, /runtimeAgentType: failedRuntimeAgentType/)
-  assert.match(startSelected, /runtimeAgentTypes\?\.get\(binding\.agent_type\)/)
+  const launcher = source.slice(start, end)
+  assert.match(launcher, /failed\.push\(\{ binding, reason, runtimeAgentType \}\)/)
+  assert.match(launcher, /runtimeAgentTypes\?\.get\(binding\.agent_type\)/)
 })
 
 test('a reconciled runtime failure prevents install from returning as cancellation-only', () => {

@@ -10,6 +10,16 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import {
+  createKeyedSerialExecutor,
+  createSerializedRunner,
+  runLayeredStarts,
+} from './runtime-concurrency.mjs';
+import {
+  createPackageExecutableLauncher,
+  npmExecutableResolverArgs,
+  parseResolvedPackageExecutable,
+} from './runtime-package-executable.mjs';
+import {
   agentStartRetryError,
   agentStartFailureMessage,
   bridgeAuthenticationRetryError,
@@ -57,6 +67,7 @@ const READY_TIMEOUT_MS = Number(process.env.AAMP_TASK_READY_TIMEOUT_MS || 90_000
 const NETWORK_MAX_ATTEMPTS = Math.max(1, Number(process.env.AAMP_TASK_NETWORK_MAX_ATTEMPTS || 3));
 const NETWORK_RETRY_BASE_DELAY_MS = Math.max(0, Number(process.env.AAMP_TASK_NETWORK_RETRY_BASE_DELAY_MS || 500));
 const NETWORK_PROBE_TIMEOUT_MS = Math.max(1_000, Number(process.env.AAMP_TASK_NETWORK_PROBE_TIMEOUT_MS || 10_000));
+const FEISHU_START_CONCURRENCY = 4;
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
 const AGENT_TYPES = ['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy'];
@@ -70,10 +81,56 @@ const managedProcesses = new Set();
 const transientProcesses = new Set();
 const heldLeases = new Set();
 const bindingStatuses = new Map();
+const runPairingSerially = createKeyedSerialExecutor();
+const errorLogWriter = createSerializedLineWriter((content) => appendPrivate(ERRORS_LOG, content));
+const manifestWriter = createSerializedRunner(async () => {
+  const statuses = [...bindingStatuses.entries()].map(([bindingId, status]) => ({
+    binding_id: bindingId,
+    ...status,
+  }));
+  await writeJsonAtomic(MANIFEST_FILE, {
+    schema: 'aamp.local_logs.run.v2',
+    run_id: RUN_ID,
+    task_agent_version: process.env.AAMP_TASK_AGENT_VERSION || '',
+    command: COMMAND,
+    started_at: process.env.AAMP_TASK_RUN_STARTED_AT || RUN_STARTED_AT,
+    config_file: CONFIG_FILE,
+    runtime_home: RUNTIME_HOME,
+    bindings: statuses,
+    errors_log: ERRORS_LOG,
+    log_dir: RUN_LOG_DIR,
+  });
+});
 let stopRequested = false;
 let stopSignal = '';
-let cleanupPromise;
 let terminal;
+
+function createResourceCleanup(drain) {
+  const runner = createSerializedRunner(drain);
+  return () => runner.run();
+}
+
+function createPromptInterrupter() {
+  let activeCancel;
+  return {
+    activate(cancel) {
+      if (activeCancel) throw new Error('已有交互提示正在等待输入');
+      activeCancel = cancel;
+      return () => {
+        if (activeCancel === cancel) activeCancel = undefined;
+      };
+    },
+    interrupt(error) {
+      const cancel = activeCancel;
+      if (!cancel) return false;
+      activeCancel = undefined;
+      cancel(error);
+      return true;
+    },
+  };
+}
+
+const promptInterrupter = createPromptInterrupter();
 
 function nowIso() {
   return new Date().toISOString();
@@ -383,6 +440,10 @@ async function acquireRuntimeSessionLease(action) {
   }
   const lease = { lockDir: RUNTIME_SESSION_LOCK, release };
   heldLeases.add(lease);
+  if (stopRequested) {
+    await releaseLease(lease);
+    throwIfStopping();
+  }
   return lease;
 }
 
@@ -565,6 +626,18 @@ function bindingLabel(binding, resolvedAgentType = binding.agent_type) {
   return `${agentBindingDisplayName(resolvedAgentType)} ↔ ${botName} (${binding.bot?.app_id || 'unknown'})`;
 }
 
+function pairingQueueKey(prepared) {
+  return `${prepared.group.host}\u0000${prepared.binding.agent_type}`;
+}
+
+function orderStartupItems(bindings, items) {
+  const order = new Map(bindings.map((binding, index) => [binding.binding_id, index]));
+  return [...items].sort((left, right) => (
+    (order.get(left.binding.binding_id) ?? Number.MAX_SAFE_INTEGER)
+      - (order.get(right.binding.binding_id) ?? Number.MAX_SAFE_INTEGER)
+  ));
+}
+
 function startupSummaryLines({ title, plannedCount, running = [], failed = [], cancelled = [] }) {
   const lines = [`${title} ${running.length}/${plannedCount} 个配置。`];
   if (running.length) {
@@ -686,7 +759,7 @@ function printBindingCancelled(binding, reason) {
 }
 
 async function recordError(component, message, binding) {
-  await appendPrivate(ERRORS_LOG, `${JSON.stringify({
+  await errorLogWriter.write(`${JSON.stringify({
     timestamp: nowIso(),
     level: 'error',
     component,
@@ -697,19 +770,7 @@ async function recordError(component, message, binding) {
 }
 
 async function writeManifest() {
-  const statuses = [...bindingStatuses.entries()].map(([bindingId, status]) => ({ binding_id: bindingId, ...status }));
-  await writeJsonAtomic(MANIFEST_FILE, {
-    schema: 'aamp.local_logs.run.v2',
-    run_id: RUN_ID,
-    task_agent_version: process.env.AAMP_TASK_AGENT_VERSION || '',
-    command: COMMAND,
-    started_at: process.env.AAMP_TASK_RUN_STARTED_AT || RUN_STARTED_AT,
-    config_file: CONFIG_FILE,
-    runtime_home: RUNTIME_HOME,
-    bindings: statuses,
-    errors_log: ERRORS_LOG,
-    log_dir: RUN_LOG_DIR,
-  });
+  await manifestWriter.run();
 }
 
 async function setBindingStatus(binding, phase, status, reason = '') {
@@ -748,7 +809,12 @@ async function chooseOne(title, items, render, initialIndex = 0) {
 
   draw();
   return new Promise((resolve, reject) => {
+    let finished = false;
+    let releasePrompt = () => {};
     const finish = (error) => {
+      if (finished) return;
+      finished = true;
+      releasePrompt();
       input.off('keypress', onKeypress);
       input.setRawMode(wasRaw);
       input.pause();
@@ -774,6 +840,7 @@ async function chooseOne(title, items, render, initialIndex = 0) {
       }
       draw(true);
     };
+    releasePrompt = promptInterrupter.activate(finish);
     input.on('keypress', onKeypress);
   });
 }
@@ -803,7 +870,12 @@ async function chooseMany(title, items, render) {
 
   draw();
   return new Promise((resolve, reject) => {
+    let finished = false;
+    let releasePrompt = () => {};
     const finish = (error) => {
+      if (finished) return;
+      finished = true;
+      releasePrompt();
       input.off('keypress', onKeypress);
       input.setRawMode(wasRaw);
       input.pause();
@@ -839,6 +911,7 @@ async function chooseMany(title, items, render) {
       }
       draw(true);
     };
+    releasePrompt = promptInterrupter.activate(finish);
     input.on('keypress', onKeypress);
   });
 }
@@ -902,12 +975,63 @@ function npmExecArgs(packageSpec, executable, args) {
   ];
 }
 
-async function runCapture(packageSpec, executable, args, options = {}) {
+async function runNpmExecCapture(packageSpec, executable, args, options = {}) {
   throwIfStopping();
   const child = spawn(NPM_BIN, npmExecArgs(packageSpec, executable, args), {
     env: options.env || process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
+  });
+  const processRecord = trackTransientProcess(child, executable, process.platform !== 'win32');
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  if (options.input !== undefined) child.stdin.end(options.input);
+  else child.stdin.end();
+  if (stopRequested) await stopManagedProcess(processRecord);
+  const exit = await processRecord.exitPromise;
+  throwIfStopping();
+  if (options.logFile) {
+    await appendPrivate(options.logFile, `${stdout}${stderr ? `\n${stderr}` : ''}`);
+  }
+  if (exit.code !== 0) {
+    const detail = redact(stderr.trim() || stdout.trim() || exit.error?.message || `exit ${exit.code}`);
+    throw new Error(`${executable} failed: ${detail.split('\n').slice(-8).join('\n')}`);
+  }
+  return { stdout, stderr };
+}
+
+const packageExecutableLauncher = createPackageExecutableLauncher({
+  materialize: async (packageSpec, executable, options = {}) => {
+    const result = await runNpmExecCapture(
+      packageSpec,
+      process.execPath,
+      npmExecutableResolverArgs(executable),
+      options,
+    );
+    return parseResolvedPackageExecutable(result.stdout, executable);
+  },
+});
+
+async function runCapture(packageSpec, executable, args, options = {}) {
+  throwIfStopping();
+  const preparedExecutable = await packageExecutableLauncher.resolve(
+    packageSpec,
+    executable,
+    options,
+  );
+  throwIfStopping();
+  const child = packageExecutableLauncher.launchPrepared({
+    preparedExecutable,
+    args,
+    spawnOptions: {
+      env: options.env || process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    },
   });
   const processRecord = trackTransientProcess(child, executable, process.platform !== 'win32');
   let stdout = '';
@@ -985,15 +1109,33 @@ function createLineReader(stream, onLine) {
   });
 }
 
-async function startManagedProcess({ label, packageSpec, executable, args, env, logFile }) {
+async function startManagedProcess({
+  label,
+  packageSpec,
+  executable,
+  args,
+  env,
+  logFile,
+  preparedExecutable,
+}) {
   await ensurePrivateDir(path.dirname(logFile));
   throwIfStopping();
   await fsp.writeFile(logFile, '', { mode: 0o600, flag: 'a' });
   throwIfStopping();
-  const child = spawn(NPM_BIN, npmExecArgs(packageSpec, executable, args), {
-    env: env || process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32',
+  const executableDescriptor = preparedExecutable || await packageExecutableLauncher.resolve(
+    packageSpec,
+    executable,
+    { env: env || process.env },
+  );
+  throwIfStopping();
+  const child = packageExecutableLauncher.launchPrepared({
+    preparedExecutable: executableDescriptor,
+    args,
+    spawnOptions: {
+      env: env || process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    },
   });
   const processStartedAt = Date.now();
   const logWriter = createSerializedLineWriter((content) => appendPrivate(logFile, content));
@@ -1203,7 +1345,7 @@ async function releaseLease(lease) {
   await lease.release();
 }
 
-async function setupAgentGroups(bindings) {
+async function initializeAgentGroups(bindings) {
   const byHost = new Map();
   for (const binding of bindings) {
     if (!byHost.has(binding.aamp_host)) byHost.set(binding.aamp_host, new Map());
@@ -1233,6 +1375,8 @@ async function setupAgentGroups(bindings) {
       cancellations: new Map(),
       runtimeAgentTypes: new Map(),
       leases: new Map(),
+      agents: [],
+      bridgeEnv,
       process: undefined,
     };
     groups.set(host, group);
@@ -1324,18 +1468,44 @@ async function setupAgentGroups(bindings) {
       throwIfStopping();
       const initialized = parseJsonDocument(initResult.stdout, 'ACP init');
       for (const agent of initialized.agents || []) group.identities.set(agent.name, agent.email);
+      group.agents = agents;
+    } catch (error) {
+      for (const agent of agents) {
+        const message = agentStartFailureMessage(
+          error?.agentStartEvents || group.process?.events,
+          agent.name,
+          redact(error.message || error),
+        );
+        recordStableAgentFailure(group, agent.name, message);
+      }
+      if (group.process) await stopManagedProcess(group.process);
+      for (const lease of group.leases.values()) await releaseLease(lease);
+      group.leases.clear();
+      if (stopRequested) throw error;
+    }
+  }
+  return groups;
+}
+
+async function startAgentGroups(groups) {
+  for (const group of groups.values()) {
+    const agents = group.agents || [];
+    if (!agents.length) continue;
+    const bridgeEnv = group.bridgeEnv;
+    try {
+      throwIfStopping();
       const runtimeAgentNames = agents
         .map((agent) => group.runtimeAgentTypes.get(agent.name) || agent.name)
         .map(agentSelectionDisplayName);
       console.log(`[aamp-one-click] 正在启动本地 Agent Bridge (${runtimeAgentNames.join(', ')})...`);
       const started = await runNetworkStage(async ({ attempt, maxAttempts }) => {
         const process = await startManagedProcess({
-          label: `ACP Bridge ${host}`,
+          label: `ACP Bridge ${group.host}`,
           packageSpec: ACP_PACKAGE,
           executable: 'aamp-acp-bridge',
           args: ['start', '--config', group.configFile, '--json', ...(DEBUG_MODE ? ['--debug'] : [])],
           env: bridgeEnv,
-          logFile,
+          logFile: group.logFile,
         });
         group.process = process;
         try {
@@ -1358,8 +1528,8 @@ async function setupAgentGroups(bindings) {
       }, {
         stage: 'acp-start',
         label: 'Agent Bridge 启动',
-        host,
-        logFile,
+        host: group.host,
+        logFile: group.logFile,
         environment: bridgeEnv,
       });
       group.process = started.process;
@@ -1397,20 +1567,19 @@ async function setupAgentGroups(bindings) {
   return groups;
 }
 
-function resolveGroup(groups, binding) {
+async function setupAgentGroups(bindings) {
+  const groups = await initializeAgentGroups(bindings);
+  await startAgentGroups(groups);
+  return groups;
+}
+
+function resolveInitializedGroup(groups, binding) {
   const group = groups.get(binding.aamp_host);
   if (!group) throw new Error(`Agent Bridge group is unavailable for ${binding.aamp_host}`);
   const agentCancellation = group.cancellations.get(binding.agent_type);
   if (agentCancellation) throw new Error(agentCancellation);
   const agentFailure = group.failures.get(binding.agent_type);
-  if ((!group.process || group.process.exited) && agentFailure) throw new Error(agentFailure);
-  if (!group.process || group.process.exited) {
-    const tail = group.process?.outputTail?.slice(-10).join('\n');
-    throw new Error(`Agent Bridge 已退出${tail ? `：\n${tail}` : ''}`);
-  }
-  if (!group.availableAgents.has(binding.agent_type)) {
-    throw new Error(group.failures.get(binding.agent_type) || `${binding.agent_type} Agent Bridge 未启动`);
-  }
+  if (agentFailure) throw new Error(agentFailure);
   const email = group.identities.get(binding.agent_type);
   if (!email) throw new Error(`${binding.agent_type} Agent mailbox is unavailable`);
   if (binding.agent_target_email && binding.agent_target_email !== email) {
@@ -1418,6 +1587,19 @@ function resolveGroup(groups, binding) {
   }
   const runtimeAgentType = group.runtimeAgentTypes.get(binding.agent_type) || binding.agent_type;
   return { group, email, runtimeAgentType };
+}
+
+function resolveGroup(groups, binding) {
+  const resolved = resolveInitializedGroup(groups, binding);
+  const { group } = resolved;
+  if (!group.process || group.process.exited) {
+    const tail = group.process?.outputTail?.slice(-10).join('\n');
+    throw new Error(`Agent Bridge 已退出${tail ? `：\n${tail}` : ''}`);
+  }
+  if (!group.availableAgents.has(binding.agent_type)) {
+    throw new Error(group.failures.get(binding.agent_type) || `${binding.agent_type} Agent Bridge 未启动`);
+  }
+  return resolved;
 }
 
 async function writeFeishuRuntimeProfile(binding) {
@@ -1446,6 +1628,52 @@ async function ensureBindingProfile(binding) {
   });
 }
 
+async function probeBindingProfile(binding) {
+  return runBootstrapHelper('__probe-profile', binding, {
+    AAMP_TASK_INTERNAL_BINDING_JSON: JSON.stringify({
+      agent_type: binding.agent_type,
+      aamp_host: binding.aamp_host,
+      bot: {
+        app_id: binding.bot.app_id,
+        lark_cli_profile: binding.bot.lark_cli_profile,
+      },
+    }),
+  });
+}
+
+const readyProfileProbeOperations = Object.freeze({
+  probeBindingProfile,
+  throwIfStopping,
+});
+
+async function probeReadyBindingProfiles(
+  bindings,
+  operations = readyProfileProbeOperations,
+) {
+  const probes = new Map();
+  for (const binding of bindings) {
+    if (bindingNeedsInitialStart(binding)) continue;
+    operations.throwIfStopping();
+    try {
+      const profile = await operations.probeBindingProfile(binding);
+      operations.throwIfStopping();
+      if (profile?.ready === true && profile.lark_cli_bin) probes.set(binding, profile);
+    } catch {
+      operations.throwIfStopping();
+      // The normal binding preparation remains authoritative for misses and failures.
+    }
+  }
+  return probes;
+}
+
+function prewarmFeishuExecutable(binding) {
+  return packageExecutableLauncher.resolve(
+    FEISHU_PACKAGE,
+    'aamp-feishu-bridge',
+    { env: onlineEnvironment(binding) },
+  );
+}
+
 function feishuArgs(binding, larkCliBin, target) {
   const targetArgs = target.pairingUrl
     ? ['--pairing-url', target.pairingUrl]
@@ -1466,25 +1694,61 @@ function feishuArgs(binding, larkCliBin, target) {
   ];
 }
 
-async function prepareFeishuProcess(binding, phase, runtimeAgentType = binding.agent_type) {
-  throwIfStopping();
-  await writeFeishuRuntimeProfile(binding);
-  throwIfStopping();
-  const profile = await ensureBindingProfile(binding);
-  throwIfStopping();
+const feishuPreparationOperations = Object.freeze({
+  ensureBindingProfile,
+  onlineEnvironment,
+  throwIfStopping,
+  writeFeishuRuntimeProfile,
+});
+
+async function prepareFeishuProcess(
+  binding,
+  phase,
+  runtimeAgentType = binding.agent_type,
+  profileProbes,
+  operations = feishuPreparationOperations,
+) {
+  operations.throwIfStopping();
+  await operations.writeFeishuRuntimeProfile(binding);
+  operations.throwIfStopping();
+  const environment = operations.onlineEnvironment(binding);
+  const probedProfile = profileProbes?.get(binding);
+  const profile = probedProfile?.ready === true
+    && probedProfile.lark_cli_bin
+    && path.resolve(probedProfile.lark_cli_config_dir || '')
+      === path.resolve(environment.LARKSUITE_CLI_CONFIG_DIR || '')
+    ? probedProfile
+    : await operations.ensureBindingProfile(binding);
+  operations.throwIfStopping();
   if (!profile.lark_cli_bin) throw new Error(`lark-cli profile ${binding.bot.lark_cli_profile} is unavailable`);
+  const preparedExecutable = operations.resolveFeishuExecutable
+    ? await operations.resolveFeishuExecutable(environment)
+    : await packageExecutableLauncher.resolve(
+        FEISHU_PACKAGE,
+        'aamp-feishu-bridge',
+        { env: environment },
+      );
+  operations.throwIfStopping();
   return {
     binding,
     phase,
     runtimeAgentType,
     larkCliBin: profile.lark_cli_bin,
     logFile: path.join(RUN_LOG_DIR, `feishu-bridge-${safeId(binding.binding_id)}-${phase}.jsonl`),
+    preparedExecutable,
   };
 }
 
 async function startPreparedFeishuProcess(prepared, target, environment = onlineEnvironment(prepared.binding)) {
   throwIfStopping();
-  const { binding, phase, runtimeAgentType, larkCliBin, logFile } = prepared;
+  const {
+    binding,
+    phase,
+    runtimeAgentType,
+    larkCliBin,
+    logFile,
+    preparedExecutable,
+  } = prepared;
   const phaseMessage = phase === 'install'
     ? '正在建立绑定并启动飞书任务 Bridge'
     : phase === 'add'
@@ -1498,6 +1762,7 @@ async function startPreparedFeishuProcess(prepared, target, environment = online
     args: feishuArgs(binding, larkCliBin, target),
     env: environment,
     logFile,
+    preparedExecutable,
   });
 }
 
@@ -1628,152 +1893,582 @@ async function validateSavedRuntime(binding) {
   }
 }
 
-async function bindOneDraft(draft, groups, mode) {
-  await setBindingStatus(draft, 'bind', 'starting');
-  throwIfStopping();
-  const { group, email, runtimeAgentType } = resolveGroup(groups, draft);
-  const binding = { ...draft, state: 'ready', agent_target_email: email, updated_at: nowIso() };
-  const preparedFeishu = await prepareFeishuProcess(binding, mode, runtimeAgentType);
-  throwIfStopping();
-  const pairResult = await runCapture(
-    ACP_PACKAGE,
-    'aamp-acp-bridge',
-    ['pair', '--agent', draft.agent_type, '--config', group.configFile, '--json', '--no-start'],
-    { logFile: group.logFile },
-  );
-  throwIfStopping();
-  const pairing = parseJsonDocument(pairResult.stdout, 'ACP pairing');
-  if (!pairing.connectUrl || !pairing.pairingFile || pairing.mailbox !== email) {
-    throw new Error('ACP Bridge 返回的配对信息不完整或 mailbox 不一致');
+const bindingStartOperations = Object.freeze({
+  // User-visible success output is deferred until layered results are back in selection order.
+  printBindingStarted: () => {},
+  readInitialRuntimeMetadata,
+  runCapture,
+  parseJsonDocument,
+  setBindingStatus,
+  startPreparedFeishuUntilReady,
+  stopManagedProcess,
+  throwIfStopping,
+  updateBinding,
+  validateSavedRuntime,
+});
+
+const bindingPreparationOperations = Object.freeze({
+  nowIso,
+  prepareFeishuProcess,
+  resolveGroup,
+  resolveInitializedGroup,
+  setBindingStatus,
+  throwIfStopping,
+  validateSavedRuntime,
+});
+
+async function prepareBindingStart(
+  binding,
+  groups,
+  mode,
+  operations = bindingPreparationOperations,
+  options = {},
+) {
+  operations.throwIfStopping();
+  const pending = bindingNeedsInitialStart(binding);
+  await operations.setBindingStatus(binding, pending ? 'bind' : 'start', 'starting');
+  operations.throwIfStopping();
+  const resolve = options.allowAgentStarting && !pending
+    ? operations.resolveInitializedGroup
+    : operations.resolveGroup;
+  const { group, email, runtimeAgentType } = resolve(groups, binding);
+  const activeBinding = pending
+    ? { ...binding, state: 'ready', agent_target_email: email, updated_at: operations.nowIso() }
+    : binding;
+  if (!pending) {
+    if (email !== binding.agent_target_email) {
+      throw new Error('当前 Agent mailbox 与绑定记录不一致，请重新绑定');
+    }
+    await operations.validateSavedRuntime(binding);
   }
+  operations.throwIfStopping();
+  const preparedFeishu = await operations.prepareFeishuProcess(
+    activeBinding,
+    mode,
+    runtimeAgentType,
+    options.profileProbes,
+  );
+  return {
+    originalBinding: binding,
+    binding: activeBinding,
+    group,
+    mode,
+    pending,
+    email,
+    runtimeAgentType,
+    preparedFeishu,
+    deferReadyCommit: Boolean(options.deferReadyCommit && !pending),
+  };
+}
+
+async function executePreparedReadyBindingStart(prepared, operations = bindingStartOperations) {
+  const { binding, group, runtimeAgentType, preparedFeishu } = prepared;
   let feishu;
-  let keepRunning = false;
   try {
-    feishu = await startPreparedFeishuUntilReady(
+    feishu = await operations.startPreparedFeishuUntilReady(
+      preparedFeishu,
+      { agentTargetEmail: binding.agent_target_email },
+      { stage: 'feishu-start' },
+    );
+    operations.throwIfStopping();
+    if (!prepared.deferReadyCommit) {
+      await operations.setBindingStatus(binding, 'start', 'running');
+      operations.throwIfStopping();
+      operations.printBindingStarted(binding, runtimeAgentType);
+    }
+    return { binding, process: feishu, group, runtimeAgentType };
+  } catch (error) {
+    if (feishu) await operations.stopManagedProcess(feishu);
+    throw error;
+  }
+}
+
+async function executePreparedPendingBindingStart(prepared, operations = bindingStartOperations) {
+  const {
+    originalBinding,
+    binding,
+    group,
+    mode,
+    email,
+    runtimeAgentType,
+    preparedFeishu,
+  } = prepared;
+  let feishu;
+  try {
+    const pairResult = await operations.runCapture(
+      ACP_PACKAGE,
+      'aamp-acp-bridge',
+      ['pair', '--agent', originalBinding.agent_type, '--config', group.configFile, '--json', '--no-start'],
+      { logFile: group.logFile },
+    );
+    operations.throwIfStopping();
+    const pairing = operations.parseJsonDocument(pairResult.stdout, 'ACP pairing');
+    if (!pairing.connectUrl || !pairing.pairingFile || pairing.mailbox !== email) {
+      throw new Error('ACP Bridge 返回的配对信息不完整或 mailbox 不一致');
+    }
+    feishu = await operations.startPreparedFeishuUntilReady(
       preparedFeishu,
       { pairingUrl: pairing.connectUrl },
       { stage: mode === 'install' ? 'feishu-install-bind' : 'feishu-add-bind', pairingFile: pairing.pairingFile },
     );
-    throwIfStopping();
-    binding.runtime = await readInitialRuntimeMetadata(binding, feishu, email);
-    throwIfStopping();
-    await validateSavedRuntime(binding);
-    throwIfStopping();
-    const startsBridge = mode === 'install' || mode === 'start';
-    await setBindingStatus(binding, startsBridge ? 'start' : 'bind', startsBridge ? 'running' : 'succeeded');
-    throwIfStopping();
-    keepRunning = startsBridge;
-    return { binding, process: keepRunning ? feishu : undefined, group, runtimeAgentType };
-  } finally {
-    if (!keepRunning) await stopManagedProcess(feishu);
+    operations.throwIfStopping();
+    binding.runtime = await operations.readInitialRuntimeMetadata(binding, feishu, email);
+    operations.throwIfStopping();
+    await operations.validateSavedRuntime(binding);
+    operations.throwIfStopping();
+    await operations.updateBinding(binding);
+    operations.throwIfStopping();
+    await operations.setBindingStatus(binding, 'start', 'running');
+    operations.throwIfStopping();
+    return { binding, process: feishu, group, runtimeAgentType };
+  } catch (error) {
+    if (feishu) await operations.stopManagedProcess(feishu);
+    throw error;
   }
 }
 
-async function startOneBinding(binding, groups) {
-  await setBindingStatus(binding, 'start', 'starting');
-  throwIfStopping();
-  const { email, runtimeAgentType } = resolveGroup(groups, binding);
-  if (email !== binding.agent_target_email) throw new Error('当前 Agent mailbox 与绑定记录不一致，请重新绑定');
-  await validateSavedRuntime(binding);
-  throwIfStopping();
-  const preparedFeishu = await prepareFeishuProcess(binding, 'start', runtimeAgentType);
-  const feishu = await startPreparedFeishuUntilReady(
-    preparedFeishu,
-    { agentTargetEmail: binding.agent_target_email },
-    { stage: 'feishu-start' },
-  );
-  throwIfStopping();
-  await setBindingStatus(binding, 'start', 'running');
-  throwIfStopping();
-  printBindingStarted(binding, runtimeAgentType);
-  return { process: feishu, runtimeAgentType };
+async function executePreparedBindingStart(prepared, operations = bindingStartOperations) {
+  if (!prepared.pending) return executePreparedReadyBindingStart(prepared, operations);
+  return runPairingSerially(pairingQueueKey(prepared), async () => {
+    return executePreparedPendingBindingStart(prepared, operations);
+  });
 }
 
-async function startSelectedBindings(bindings, existingGroups) {
+async function runPreparedBindingStarts(preparedItems, start = executePreparedBindingStart) {
+  const lanes = [];
+  const pendingLanes = new Map();
+  for (const item of preparedItems) {
+    if (!item.prepared.pending) {
+      lanes.push([item]);
+      continue;
+    }
+    const key = pairingQueueKey(item.prepared);
+    let lane = pendingLanes.get(key);
+    if (!lane) {
+      lane = [];
+      pendingLanes.set(key, lane);
+      lanes.push(lane);
+    }
+    lane.push(item);
+  }
+
+  const laneOutcomes = await runLayeredStarts(lanes, {
+    concurrency: FEISHU_START_CONCURRENCY,
+    prepare: async (lane) => lane,
+    start: async (lane) => {
+      const outcomes = [];
+      for (const item of lane) {
+        try {
+          outcomes.push({
+            status: 'fulfilled',
+            phase: 'start',
+            value: await start(item.prepared),
+            item: item.prepared.originalBinding || item.prepared.binding,
+            index: item.index,
+          });
+        } catch (reason) {
+          if (stopRequested) throw reason;
+          outcomes.push({
+            status: 'rejected',
+            phase: 'start',
+            reason,
+            item: item.prepared.originalBinding || item.prepared.binding,
+            index: item.index,
+          });
+        }
+      }
+      return outcomes;
+    },
+  });
+  const rejectedLane = laneOutcomes.find((outcome) => outcome.status === 'rejected');
+  if (rejectedLane && stopRequested) throw rejectedLane.reason;
+  const byIndex = new Map(laneOutcomes.flatMap((outcome) => (
+    outcome.status === 'fulfilled' ? outcome.value : []
+  )).map((outcome) => [outcome.index, outcome]));
+  return preparedItems.map(({ index }) => byIndex.get(index));
+}
+
+function reportBindingFailure(binding, runtimeAgentType, reason, mode) {
+  console.error(`🔴 启动失败：${bindingLabel(binding, runtimeAgentType)}\n   原因：${reason}`);
+  if (mode === 'install') {
+    console.error('   绑定配置已保存，可稍后运行 feishu-task-agent start 重试。');
+  } else {
+    console.error('   已跳过该项，继续启动下一项。');
+  }
+}
+
+const bindingLauncherOperations = Object.freeze({
+  bindingCancellationReason,
+  executePreparedBindingStart,
+  prepareBindingStart: (binding, groups, mode, options) => (
+    prepareBindingStart(binding, groups, mode, bindingPreparationOperations, options)
+  ),
+  printBindingCancelled,
+  printBindingStarted,
+  recordError,
+  reportBindingFailure,
+  setBindingStatus,
+  throwIfStopping,
+});
+
+async function finalizeDeferredLaunchResults(launched, mode, operations = bindingLauncherOperations) {
+  for (const item of launched.cancelled) {
+    await operations.setBindingStatus(
+      item.binding,
+      mode === 'install' ? 'bind' : 'start',
+      'cancelled',
+      item.reason,
+    );
+    operations.printBindingCancelled(item.binding, item.reason);
+  }
+  for (const item of launched.failed) {
+    await operations.setBindingStatus(item.binding, 'start', 'failed', item.reason);
+    await operations.recordError('startup', item.reason, item.binding);
+    operations.reportBindingFailure(
+      item.binding,
+      item.runtimeAgentType,
+      item.reason,
+      mode,
+    );
+  }
+}
+
+async function startBindingsWithGroups(
+  bindings,
+  groups,
+  mode,
+  operations = bindingLauncherOperations,
+  options = {},
+) {
+  const cancelled = [];
+  const candidates = [];
+  for (const binding of bindings) {
+    operations.throwIfStopping();
+    const reason = operations.bindingCancellationReason(groups, binding);
+    if (reason) {
+      const runtimeAgentType = groups.get(binding.aamp_host)?.runtimeAgentTypes?.get(binding.agent_type)
+        || binding.agent_type;
+      cancelled.push({ binding, reason, runtimeAgentType });
+    } else {
+      candidates.push(binding);
+    }
+  }
+
+  const outcomes = new Array(candidates.length);
+  const preparedItems = [];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const binding = candidates[index];
+    try {
+      preparedItems.push({
+        index,
+        prepared: await operations.prepareBindingStart(binding, groups, mode, options),
+      });
+    } catch (reason) {
+      if (stopRequested) throw reason;
+      outcomes[index] = { status: 'rejected', phase: 'prepare', reason, item: binding, index };
+    }
+  }
+  const started = await runPreparedBindingStarts(preparedItems, (prepared) => {
+    operations.throwIfStopping();
+    return operations.executePreparedBindingStart(prepared);
+  });
+  started.forEach((outcome, preparedIndex) => {
+    outcomes[preparedItems[preparedIndex].index] = outcome;
+  });
+  operations.throwIfStopping();
+
   const running = [];
   const failed = [];
+  for (const outcome of outcomes) {
+    if (outcome.status === 'fulfilled') {
+      running.push(outcome.value);
+      if (mode === 'start' && !options.deferReadyCommit) {
+        operations.printBindingStarted(outcome.value.binding, outcome.value.runtimeAgentType);
+      }
+      continue;
+    }
+    const binding = outcome.item;
+    const reason = redact(outcome.reason?.message || outcome.reason);
+    const runtimeAgentType = groups.get(binding.aamp_host)?.runtimeAgentTypes?.get(binding.agent_type)
+      || binding.agent_type;
+    failed.push({ binding, reason, runtimeAgentType });
+  }
+  const launched = {
+    running: orderStartupItems(bindings, running),
+    failed: orderStartupItems(bindings, failed),
+    cancelled: orderStartupItems(bindings, cancelled),
+  };
+  if (!options.deferReadyCommit) {
+    await finalizeDeferredLaunchResults(launched, mode, operations);
+  }
+  return launched;
+}
+
+async function stopRunningBindings(running) {
+  for (const item of [...running].reverse()) {
+    if (item.process && !item.process.exited) await stopManagedProcess(item.process);
+  }
+}
+
+const overlappedReadyReconcileOperations = Object.freeze({
+  printBindingCancelled,
+  printBindingStarted,
+  recordError,
+  reportBindingFailure,
+  setBindingStatus,
+  stopManagedProcess,
+  throwIfStopping,
+});
+
+async function reconcileOverlappedReadyBindings(
+  bindings,
+  launched,
+  groups,
+  operations = overlappedReadyReconcileOperations,
+) {
+  const alive = [];
+  const failed = [];
   const cancelled = [];
+  const outcomes = orderStartupItems(bindings, [
+    ...launched.running.map((item) => ({ ...item, launchStatus: 'running' })),
+    ...launched.failed.map((item) => ({ ...item, launchStatus: 'failed' })),
+    ...launched.cancelled.map((item) => ({ ...item, launchStatus: 'cancelled' })),
+  ]);
+  for (const item of outcomes) {
+    operations.throwIfStopping();
+    const { binding, process: feishu } = item;
+    const group = item.group || groups.get(binding.aamp_host);
+    const runtimeAgentType = item.runtimeAgentType
+      || group?.runtimeAgentTypes?.get(binding.agent_type)
+      || binding.agent_type;
+    const cancellation = group?.cancellations?.get(binding.agent_type) || '';
+    if (cancellation) {
+      if (feishu && !feishu.exited) await operations.stopManagedProcess(feishu);
+      await operations.setBindingStatus(binding, 'start', 'cancelled', cancellation);
+      operations.printBindingCancelled(binding, cancellation);
+      cancelled.push({ binding, reason: cancellation, runtimeAgentType });
+      continue;
+    }
+
+    let reason = group?.failures?.get(binding.agent_type) || '';
+    if (!reason && (!group?.process || group.process.exited)) {
+      reason = `${bindingLabel(binding, runtimeAgentType)} 的 Agent Bridge 在启动期间已退出：${group?.host || binding.aamp_host}`;
+    }
+    if (!reason && !group.availableAgents?.has(binding.agent_type)) {
+      reason = `${binding.agent_type} Agent Bridge 未启动`;
+    }
+    if (!reason && item.launchStatus === 'failed') {
+      reason = item.reason;
+    }
+    if (!reason && item.launchStatus === 'running' && (!feishu || feishu.exited)) {
+      reason = `${bindingLabel(binding, runtimeAgentType)} 的 Feishu Bridge 在进入监督前已退出 (${feishu?.exit?.signal || feishu?.exit?.code || 'unknown'})`;
+    }
+    if (reason) {
+      const redactedReason = redact(reason);
+      if (feishu && !feishu.exited) await operations.stopManagedProcess(feishu);
+      await operations.setBindingStatus(binding, 'start', 'failed', redactedReason);
+      await operations.recordError('startup', redactedReason, binding);
+      operations.reportBindingFailure(binding, runtimeAgentType, redactedReason, 'start');
+      failed.push({ binding, reason: redactedReason, runtimeAgentType });
+      continue;
+    }
+    if (item.launchStatus === 'cancelled') {
+      const launchCancellation = redact(item.reason);
+      await operations.setBindingStatus(binding, 'start', 'cancelled', launchCancellation);
+      operations.printBindingCancelled(binding, launchCancellation);
+      cancelled.push({ binding, reason: launchCancellation, runtimeAgentType });
+      continue;
+    }
+
+    await operations.setBindingStatus(binding, 'start', 'running');
+    operations.throwIfStopping();
+    operations.printBindingStarted(binding, runtimeAgentType);
+    alive.push(item);
+  }
+  return { alive, failed, cancelled };
+}
+
+async function runOverlappedStartup(bindings, groups, operations, profileProbes) {
+  const readyBindings = bindings.filter((binding) => !bindingNeedsInitialStart(binding));
+  const pendingBindings = bindings.filter((binding) => bindingNeedsInitialStart(binding));
+  const emptyLaunch = { running: [], failed: [], cancelled: [] };
+  const agentBranch = Promise.resolve().then(() => operations.startAgentGroups(groups));
+  const readyBranch = readyBindings.length
+    ? Promise.resolve().then(() => operations.startBindingsWithGroups(
+        readyBindings,
+        groups,
+        'start',
+        { allowAgentStarting: true, deferReadyCommit: true, profileProbes },
+      ))
+    : Promise.resolve(emptyLaunch);
+
+  const [agentOutcome, readyOutcome] = await Promise.allSettled([agentBranch, readyBranch]);
+  const earlyRunning = readyOutcome.status === 'fulfilled' ? readyOutcome.value.running : [];
+  if (agentOutcome.status === 'rejected' || readyOutcome.status === 'rejected') {
+    await operations.stopRunningBindings(earlyRunning);
+    operations.throwIfStopping();
+    throw (agentOutcome.status === 'rejected' ? agentOutcome.reason : readyOutcome.reason);
+  }
+  operations.throwIfStopping();
+
+  const reconciledReady = await operations.reconcileOverlappedReadyBindings(
+    readyBindings,
+    readyOutcome.value,
+    groups,
+  );
+  operations.throwIfStopping();
+  const pendingLaunch = pendingBindings.length
+    ? await operations.startBindingsWithGroups(pendingBindings, groups, 'start')
+    : emptyLaunch;
+  operations.throwIfStopping();
+
+  return {
+    running: orderStartupItems(bindings, [
+      ...reconciledReady.alive,
+      ...pendingLaunch.running,
+    ]),
+    failed: orderStartupItems(bindings, [
+      ...reconciledReady.failed,
+      ...pendingLaunch.failed,
+    ]),
+    cancelled: orderStartupItems(bindings, [
+      ...reconciledReady.cancelled,
+      ...pendingLaunch.cancelled,
+    ]),
+  };
+}
+
+function startupDisposition({ running = [], failed = [], cancelled = [] }, extraFailureCount = 0) {
+  if (running.length) return 'supervise';
+  if (cancelled.length && !failed.length && extraFailureCount === 0) return 'only-cancel';
+  return 'all-failed';
+}
+
+async function reconcileStartupResults(
+  bindings,
+  launched,
+  validationFailures = [],
+  reconcile = reconcileRetainedBindings,
+) {
+  const reconciled = await reconcile(launched.running);
+  const result = {
+    running: orderStartupItems(bindings, reconciled.alive),
+    failed: orderStartupItems(bindings, [
+      ...validationFailures,
+      ...launched.failed,
+      ...reconciled.failed,
+    ]),
+    cancelled: orderStartupItems(bindings, launched.cancelled),
+  };
+  return { ...result, disposition: startupDisposition(result) };
+}
+
+async function recordOnlineValidationFailure(binding, error) {
+  const reason = redact(error.message || error);
+  await setBindingStatus(binding, 'start', 'failed', reason);
+  await recordError('startup', reason, binding);
+  console.error(`\n🔴 启动失败：${bindingLabel(binding)}\n   原因：${reason}`);
+  console.error('   已跳过该项，继续启动下一项。');
+  return { binding, reason };
+}
+
+function startBindingsForOverlap(bindings, groups, mode, options) {
+  return startBindingsWithGroups(bindings, groups, mode, bindingLauncherOperations, options);
+}
+
+const startupOrchestrationOperations = Object.freeze({
+  finalizeDeferredLaunchResults: (launched) => finalizeDeferredLaunchResults(launched, 'start'),
+  initializeAgentGroups,
+  prewarmFeishuExecutable,
+  probeReadyBindingProfiles,
+  reconcileRetainedBindings,
+  reconcileOverlappedReadyBindings,
+  recordValidationFailure: recordOnlineValidationFailure,
+  startAgentGroups,
+  startBindingsWithGroups: startBindingsForOverlap,
+  stopRunningBindings,
+  throwIfStopping,
+  validateBinding: assertOnlineBinding,
+});
+
+async function orchestrateStartupBindings(
+  bindings,
+  existingGroups,
+  operations = startupOrchestrationOperations,
+) {
+  const validationFailures = [];
   const onlineBindings = [];
   for (const binding of bindings) {
     try {
-      assertOnlineBinding(binding);
+      operations.validateBinding(binding);
       onlineBindings.push(binding);
     } catch (error) {
-      const reason = redact(error.message || error);
-      failed.push({ binding, reason });
-      await setBindingStatus(binding, 'start', 'failed', reason);
-      await recordError('startup', reason, binding);
-      console.error(`\n🔴 启动失败：${bindingLabel(binding)}\n   原因：${reason}`);
-      console.error('   已跳过该项，继续启动下一项。');
+      validationFailures.push(await operations.recordValidationFailure(binding, error));
     }
   }
-  const groups = existingGroups || await setupAgentGroups(onlineBindings);
-  for (const binding of onlineBindings) {
-    throwIfStopping();
-    const group = groups.get(binding.aamp_host);
-    const failedRuntimeAgentType = group?.runtimeAgentTypes?.get(binding.agent_type) || binding.agent_type;
-    const cancellationReason = bindingCancellationReason(groups, binding);
-    if (cancellationReason) {
-      cancelled.push({ binding, reason: cancellationReason, runtimeAgentType: failedRuntimeAgentType });
-      await setBindingStatus(binding, 'start', 'cancelled', cancellationReason);
-      printBindingCancelled(binding, cancellationReason);
-      continue;
-    }
+  if (onlineBindings.length && operations.prewarmFeishuExecutable) {
     try {
-      let activeBinding = binding;
-      let activeGroup = group;
-      let processRecord;
-      let runtimeAgentType = failedRuntimeAgentType;
-      if (bindingNeedsInitialStart(binding)) {
-        const paired = await bindOneDraft(binding, groups, 'start');
-        if (!paired.process) throw new Error('首次启动完成配对后未获得可监督的 Feishu Bridge 进程');
-        try {
-          await updateBinding(paired.binding);
-        } catch (error) {
-          await stopManagedProcess(paired.process);
-          throw error;
-        }
-        activeBinding = paired.binding;
-        activeGroup = paired.group;
-        processRecord = paired.process;
-        runtimeAgentType = paired.runtimeAgentType;
-        printBindingStarted(activeBinding, paired.runtimeAgentType);
-      } else {
-        const started = await startOneBinding(binding, groups);
-        processRecord = started.process;
-        runtimeAgentType = started.runtimeAgentType;
-      }
-      throwIfStopping();
-      running.push({ binding: activeBinding, process: processRecord, group: activeGroup, runtimeAgentType });
-    } catch (error) {
-      if (stopRequested) throw error;
-      const reason = redact(error.message || error);
-      failed.push({ binding, reason, runtimeAgentType: failedRuntimeAgentType });
-      await setBindingStatus(binding, 'start', 'failed', reason);
-      await recordError('startup', reason, binding);
-      console.error(`\n🔴 启动失败：${bindingLabel(binding, failedRuntimeAgentType)}\n   原因：${reason}`);
-      console.error('   已跳过该项，继续启动下一项。');
+      void Promise.resolve(operations.prewarmFeishuExecutable(onlineBindings[0])).catch(() => {});
+    } catch {
+      // This is speculative only. Binding preparation performs the authoritative resolve.
     }
   }
-  const reconciled = await reconcileRetainedBindings(running);
-  running.splice(0, running.length, ...reconciled.alive);
-  failed.push(...reconciled.failed);
+  let groups = existingGroups;
+  let profileProbes;
+  if (!groups) {
+    const initialization = Promise.resolve().then(() => operations.initializeAgentGroups(onlineBindings));
+    const probing = operations.probeReadyBindingProfiles
+      ? Promise.resolve().then(() => operations.probeReadyBindingProfiles(onlineBindings))
+      : Promise.resolve(new Map());
+    const [initializationOutcome, probingOutcome] = await Promise.allSettled([
+      initialization,
+      probing,
+    ]);
+    operations.throwIfStopping();
+    if (initializationOutcome.status === 'rejected') throw initializationOutcome.reason;
+    groups = initializationOutcome.value;
+    profileProbes = probingOutcome.status === 'fulfilled' ? probingOutcome.value : new Map();
+  }
+  const launched = existingGroups
+    ? await operations.startBindingsWithGroups(onlineBindings, groups, 'start')
+    : await runOverlappedStartup(onlineBindings, groups, operations, profileProbes);
+  const result = await reconcileStartupResults(
+    bindings,
+    launched,
+    validationFailures,
+    operations.reconcileRetainedBindings,
+  );
+  return { groups, ...result };
+}
+
+async function dispatchStartupResult(result, operations) {
+  const disposition = startupDisposition(result, operations.extraFailureCount || 0);
+  if (disposition === 'supervise') {
+    return operations.supervise(result.running, result.groups);
+  }
+  await operations.shutdown(result.groups);
+  if (disposition === 'only-cancel') return operations.onlyCancelled();
+  return operations.allFailed();
+}
+
+async function startSelectedBindings(bindings, existingGroups) {
+  const result = await orchestrateStartupBindings(bindings, existingGroups);
   printStartupSummary({
     title: '已成功启动',
     plannedCount: bindings.length,
-    running,
-    failed,
-    cancelled,
+    running: result.running,
+    failed: result.failed,
+    cancelled: result.cancelled,
   });
-  if (!running.length) {
-    await shutdownGroups(groups);
-    if (cancelled.length && !failed.length) {
-      return;
-    }
-    throw new Error('全部配置启动失败');
-  }
-  console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
-  await supervise(running, groups);
+  await dispatchStartupResult(result, {
+    supervise: async (running, groups) => {
+      console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
+      await supervise(running, groups);
+    },
+    shutdown: shutdownGroups,
+    onlyCancelled: async () => {},
+    allFailed: async () => { throw new Error('全部配置启动失败'); },
+  });
 }
 
 async function markRuntimeFailed(binding, reason, component) {
@@ -1842,23 +2537,27 @@ async function shutdownGroups(groups) {
   }
 }
 
-async function cleanupAll() {
-  if (cleanupPromise) return cleanupPromise;
-  cleanupPromise = (async () => {
-    while (managedProcesses.size || transientProcesses.size || heldLeases.size) {
-      const records = [...managedProcesses].reverse();
-      for (const record of records) {
-        managedProcesses.delete(record);
-        await stopManagedProcess(record).catch(() => {});
-      }
-      for (const record of [...transientProcesses].reverse()) {
-        transientProcesses.delete(record);
-        await stopManagedProcess(record).catch(() => {});
-      }
-      for (const lease of [...heldLeases]) await releaseLease(lease).catch(() => {});
+const cleanupRuntimeResources = createResourceCleanup(async () => {
+  while (managedProcesses.size || transientProcesses.size || heldLeases.size) {
+    const records = [...managedProcesses].reverse();
+    for (const record of records) {
+      managedProcesses.delete(record);
+      await stopManagedProcess(record).catch(() => {});
     }
-  })();
-  return cleanupPromise;
+    for (const record of [...transientProcesses].reverse()) {
+      transientProcesses.delete(record);
+      await stopManagedProcess(record).catch(() => {});
+    }
+    for (const lease of [...heldLeases]) await releaseLease(lease).catch(() => {});
+  }
+});
+
+async function cleanupAll() {
+  await cleanupRuntimeResources();
+  await Promise.allSettled([
+    (async () => await manifestWriter.flush())(),
+    (async () => await errorLogWriter.flush())(),
+  ]);
 }
 
 function printLogHints(detailed = false) {
@@ -1939,6 +2638,7 @@ async function runBindingSession(mode) {
   const agents = DEFAULT_AGENT ? [DEFAULT_AGENT] : await discoverAgents();
   throwIfStopping();
   const bindingIntents = [];
+  const selectedBindings = [];
   const succeeded = [];
   const failed = [];
   const cancelled = [];
@@ -1954,6 +2654,7 @@ async function runBindingSession(mode) {
       const draft = await createDraft(agents, selectedAppIds);
       throwIfStopping();
       selectedCount += 1;
+      selectedBindings.push(draft);
       const existing = existingByAppId.get(draft.bot.app_id);
       let accepted = true;
       if (existing) {
@@ -1990,6 +2691,7 @@ async function runBindingSession(mode) {
     return {
       groups: new Map(),
       saved: [],
+      selectedBindings,
       succeeded,
       failed,
       cancelled,
@@ -2013,6 +2715,7 @@ async function runBindingSession(mode) {
     return {
       groups: new Map(),
       saved,
+      selectedBindings,
       succeeded,
       failed,
       cancelled,
@@ -2027,47 +2730,15 @@ async function runBindingSession(mode) {
   throwIfStopping();
   const groups = await setupAgentGroups(saved);
   throwIfStopping();
-  for (const draft of saved) {
-    throwIfStopping();
-    const cancellationReason = bindingCancellationReason(groups, draft);
-    if (cancellationReason) {
-      cancelled.push({ binding: draft, reason: cancellationReason });
-      await setBindingStatus(draft, 'bind', 'cancelled', cancellationReason);
-      printBindingCancelled(draft, cancellationReason);
-      continue;
-    }
-    try {
-      const paired = await bindOneDraft(draft, groups, mode);
-      throwIfStopping();
-      if (mode === 'install' && !paired.process) throw new Error('完成绑定后未获得可监督的 Feishu Bridge 进程');
-      try {
-        await updateBinding(paired.binding);
-      } catch (error) {
-        await stopManagedProcess(paired.process);
-        throw error;
-      }
-      succeeded.push(paired.binding);
-      if (mode === 'install') {
-        running.push({
-          binding: paired.binding,
-          process: paired.process,
-          group: paired.group,
-          runtimeAgentType: paired.runtimeAgentType,
-        });
-      }
-    } catch (error) {
-      if (stopRequested) throw error;
-      const reason = redact(error.message || error);
-      failed.push({ binding: draft, reason });
-      await setBindingStatus(draft, 'start', 'failed', reason);
-      await recordError('startup', reason, draft);
-      console.error(`🔴 启动失败：${bindingLabel(draft)}\n   原因：${reason}`);
-      console.error('   绑定配置已保存，可稍后运行 feishu-task-agent start 重试。');
-    }
-  }
+  const launched = await startBindingsWithGroups(saved, groups, mode);
+  running.push(...launched.running);
+  succeeded.push(...launched.running.map(({ binding }) => binding));
+  failed.push(...launched.failed);
+  cancelled.push(...launched.cancelled);
   return {
     groups,
     saved,
+    selectedBindings,
     succeeded,
     failed,
     cancelled,
@@ -2082,10 +2753,16 @@ async function runInstall() {
   const result = await withMutationLock('install 绑定流程', async () => {
     const bound = await runBindingSession('install');
     throwIfStopping();
-    const reconciled = await reconcileRetainedBindings(bound.running);
+    const composed = await reconcileStartupResults(bound.selectedBindings, {
+      running: bound.running,
+      failed: bound.failed,
+      cancelled: bound.cancelled,
+    });
     throwIfStopping();
-    bound.running = reconciled.alive;
-    bound.runtimeFailures = reconciled.failed;
+    bound.running = composed.running;
+    bound.failed = composed.failed;
+    bound.cancelled = composed.cancelled;
+    bound.disposition = composed.disposition;
     return bound;
   });
 
@@ -2102,29 +2779,28 @@ async function runInstall() {
     }
     throw new Error('没有配置完成绑定，现有配置保持不变');
   }
-  const failures = [...result.failed, ...result.runtimeFailures];
   printStartupSummary({
     title: '已成功建立绑定并启动',
     plannedCount: result.selectedCount,
     running: result.running,
-    failed: failures,
+    failed: result.failed,
     cancelled: result.cancelled,
   });
-  if (!result.running.length) {
-    await shutdownGroups(result.groups);
-    if (installHasOnlyCancellations({
-      cancelled: result.cancelled,
-      failures,
-      selectionFailures: result.selectionFailures,
-    })) return;
-    throw new Error(`全部配置启动失败；${result.saved.length} 个绑定配置已保存，可稍后运行 feishu-task-agent start 重试`);
-  }
-
-  console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
-  if (result.selectionFailures.length) {
-    console.log(`另有 ${result.selectionFailures.length} 次选择未完成，详情见上方信息和本地日志。`);
-  }
-  await supervise(result.running, result.groups);
+  await dispatchStartupResult(result, {
+    extraFailureCount: result.selectionFailures.length,
+    supervise: async (running, groups) => {
+      console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
+      if (result.selectionFailures.length) {
+        console.log(`另有 ${result.selectionFailures.length} 次选择未完成，详情见上方信息和本地日志。`);
+      }
+      await supervise(running, groups);
+    },
+    shutdown: shutdownGroups,
+    onlyCancelled: async () => {},
+    allFailed: async () => {
+      throw new Error(`全部配置启动失败；${result.saved.length} 个绑定配置已保存，可稍后运行 feishu-task-agent start 重试`);
+    },
+  });
 }
 
 async function runAdd() {
@@ -2216,12 +2892,12 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     if (stopRequested) return;
     stopRequested = true;
     stopSignal = signal;
-    if (terminal?.input?.isRaw) terminal.input.setRawMode(false);
-    terminal?.output?.write('\x1b[?25h');
-    void cleanupAll().finally(() => {
-      console.log(`\n已收到 ${signal}，本次启动的 Bridge 已停止。`);
-      process.exit(0);
-    });
+    const interruptedPrompt = promptInterrupter.interrupt(new Error(`已收到 ${signal}`));
+    if (!interruptedPrompt) {
+      if (terminal?.input?.isRaw) terminal.input.setRawMode(false);
+      terminal?.output?.write('\x1b[?25h');
+    }
+    void cleanupAll().catch(() => {});
   });
 }
 
@@ -2254,11 +2930,31 @@ if (isMainModule) {
 export {
   bindingExpectation,
   commitPreparedAgentBindings,
+  createPromptInterrupter,
+  createResourceCleanup,
+  dispatchStartupResult,
+  executePreparedBindingStart,
+  executePreparedPendingBindingStart,
+  executePreparedReadyBindingStart,
   installHasOnlyCancellations,
+  initializeAgentGroups,
+  orderStartupItems,
+  prepareBindingStart,
+  prepareFeishuProcess,
   prepareAndCommitAgentBindings,
+  probeReadyBindingProfiles,
+  reconcileStartupResults,
+  reconcileOverlappedReadyBindings,
   recordPreparationFailure,
   recordStableAgentFailure,
   resolvePreparedAgentBindings,
+  orchestrateStartupBindings,
+  runOverlappedStartup,
+  runPreparedBindingStarts,
+  startBindingsWithGroups,
+  startAgentGroups,
+  startManagedProcess,
   startupSummaryLines,
+  cleanupAll,
   upsertBindings,
 };
