@@ -100,7 +100,7 @@ Options:
   --pm PATH                 npm-compatible package manager. Publish defaults to npm; local work prefers pnpm, then npm
   --pnpm PATH               Backward-compatible alias for --pm
   --otp CODE                Unsupported. Remote publish uses npm browser auth only
-  --agent NAME              Agent used in printed startup commands. Default: coco
+  --agent NAME              Deprecated compatibility option; printed startup commands omit --agent
   --version key=version     Override a target package version. Keys: acpBridge, feishuBridge, taskAgent
   --help                    Show this help
 `
@@ -622,7 +622,7 @@ function targetTgzPath(target, artifactsDir) {
   return target.tgz || path.join(artifactsDir, packFileName(target))
 }
 
-function buildLocalTestCommand(packageManager, targets, artifactsDir, agent) {
+function buildLocalTestCommand(packageManager, targets, artifactsDir) {
   if (!targets.taskAgent?.tgz) return null
   const taskAgentTgz = targetTgzPath(targets.taskAgent, artifactsDir)
   const envLines = ['AAMP_TASK_AUTO_UPDATE=false']
@@ -632,7 +632,7 @@ function buildLocalTestCommand(packageManager, targets, artifactsDir, agent) {
   if (targets.feishuBridge?.tgz) {
     envLines.push(`FEISHU_BRIDGE_PKG=${shellQuote(targetTgzPath(targets.feishuBridge, artifactsDir))}`)
   }
-  envLines.push(`bash -c 'tar -xOzf "$1" package/bootstrap/aamp-feishu-task-agent-bootstrap.sh | bash -s -- install --agent ${agent}' _ ${shellQuote(taskAgentTgz)}`)
+  envLines.push(`bash -c 'tar -xOzf "$1" package/bootstrap/aamp-feishu-task-agent-bootstrap.sh | bash -s -- install' _ ${shellQuote(taskAgentTgz)}`)
   return [
     `${packageManager.command} install -g --prefix "$HOME/.aamp/npm-global" --force ${shellQuote(taskAgentTgz)}`,
     envLines.join(' \\\n  '),
@@ -675,7 +675,6 @@ function commandArgsForOptions(options, scope, packageManager, publish) {
   } else {
     args.push('--pack')
   }
-  if (options.agent !== 'coco') args.push('--agent', options.agent)
   for (const [key, version] of options.versions) {
     args.push('--version', `${key}=${version}`)
   }
@@ -781,9 +780,6 @@ async function runWizard(baseOptions) {
       console.log(`remote publish uses npm browser auth; switching package manager to ${packageManager.command}`)
     }
 
-    const agent = await questionWithDefault(prompter, '启动命令使用哪个 agent', baseOptions.agent)
-    options.agent = validateAgentType(agent)
-
     const packageChoice = await questionWithDefault(
       prompter,
       '要打哪些包（all/acpBridge/feishuBridge/taskAgent，可逗号分隔；bridge 会自动带 taskAgent）',
@@ -799,8 +795,8 @@ async function runWizard(baseOptions) {
     const outDir = path.resolve(repoRoot, options.outDir)
     const artifactsDir = path.join(outDir, 'artifacts')
     const remoteOneClickUrl = tarballUrl(options.registry, targets.taskAgent.name, targets.taskAgent.version)
-    const remoteOneClickCommand = `curl -fsSL ${remoteOneClickUrl} | tar -xZO package/bootstrap/aamp-feishu-task-agent-bootstrap.sh | bash -s -- install --agent ${options.agent}`
-    const localTestCommand = buildLocalTestCommand(packageManager, targets, artifactsDir, options.agent)
+    const remoteOneClickCommand = `curl -fsSL ${remoteOneClickUrl} | tar -xZO package/bootstrap/aamp-feishu-task-agent-bootstrap.sh | bash -s -- install`
+    const localTestCommand = buildLocalTestCommand(packageManager, targets, artifactsDir)
     const followUpStartCommand = buildFollowUpStartCommand()
     const executionArgs = commandArgsForOptions(options, scope, packageManager, publish)
 
@@ -935,9 +931,9 @@ async function main() {
   }
 
   const oneClickUrl = tarballUrl(options.registry, targets.taskAgent.name, targets.taskAgent.version)
-  const oneClickCommand = `curl -fsSL ${oneClickUrl} | tar -xZO package/bootstrap/aamp-feishu-task-agent-bootstrap.sh | bash -s -- install --agent ${options.agent}`
+  const oneClickCommand = `curl -fsSL ${oneClickUrl} | tar -xZO package/bootstrap/aamp-feishu-task-agent-bootstrap.sh | bash -s -- install`
   const remoteOneClickCommand = options.publish ? oneClickCommand : null
-  const localTestCommand = buildLocalTestCommand(packageManager, targets, artifactsDir, options.agent)
+  const localTestCommand = buildLocalTestCommand(packageManager, targets, artifactsDir)
   const followUpStartCommand = buildFollowUpStartCommand()
   const manifest = {
     generatedAt: new Date().toISOString(),

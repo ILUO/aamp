@@ -6,7 +6,11 @@ import {
   discoverAcpBridgeAgents,
   type AcpBridgeAgentCandidate,
 } from '../src/discovery.js'
-import { WORKBUDDY_APP_CLI } from '../src/agent-resolver.js'
+import {
+  defaultAcpCommand,
+  WORKBUDDY_AI_APP_CLI,
+  WORKBUDDY_APP_CLI,
+} from '../src/agent-resolver.js'
 import { expectedFakePathVersion, withFakePath } from './path-fixture.js'
 
 function findCandidate(configPath: string, name: string): AcpBridgeAgentCandidate {
@@ -76,7 +80,30 @@ test('exposes WorkBuddy once with its standard embedded command', () => {
   withFakePath([], (directory) => {
     const candidate = findCandidate(join(directory, 'missing-config.json'), 'workbuddy')
     assert.equal(candidate.command, WORKBUDDY_APP_CLI)
-    assert.equal(candidate.acpCommand, `${WORKBUDDY_APP_CLI} --acp`)
+    assert.equal(candidate.acpCommand, defaultAcpCommand('workbuddy'))
+  })
+})
+
+test('discovery upgrades exact saved WorkBuddy legacy commands', () => {
+  withFakePath([], (directory) => {
+    const cases = [
+      ['workbuddy', `${WORKBUDDY_APP_CLI} --acp`],
+      ['workbuddy_ai', `'${WORKBUDDY_AI_APP_CLI}' --acp`],
+    ] as const
+
+    for (const [name, legacyCommand] of cases) {
+      const configPath = join(directory, `${name}.json`)
+      writeFileSync(configPath, JSON.stringify({
+        aampHost: 'https://meshmail.ai',
+        rejectUnauthorized: false,
+        agents: [{
+          name,
+          acpCommand: legacyCommand,
+          credentialsFile: join(directory, `${name}-credentials.json`),
+        }],
+      }))
+      assert.equal(findCandidate(configPath, name).acpCommand, defaultAcpCommand(name))
+    }
   })
 })
 

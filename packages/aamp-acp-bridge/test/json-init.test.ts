@@ -5,7 +5,11 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { loadConfig } from '../src/config.js'
 import { runJsonInit } from '../src/json-init.js'
-import { WORKBUDDY_AI_APP_CLI, WORKBUDDY_APP_CLI } from '../src/agent-resolver.js'
+import {
+  defaultAcpCommand,
+  WORKBUDDY_AI_APP_CLI,
+  WORKBUDDY_APP_CLI,
+} from '../src/agent-resolver.js'
 
 function withCredentials(name: string, run: (paths: {
   directory: string
@@ -86,27 +90,58 @@ test('JSON init preserves a quoted multi-token ACP command verbatim', async () =
   })
 })
 
-test('JSON init preserves an explicit WorkBuddy ACP command', async () => {
-  await withCredentials('workbuddy', async ({ configPath, credentialsFile }) => {
-    const command = `${WORKBUDDY_APP_CLI} --acp`
-    const result = await runJsonInit(configPath, {
-      agents: [{ name: 'workbuddy', acpCommand: command, credentialsFile }],
-    })
+test('JSON init preserves explicitly supplied WorkBuddy legacy commands', async () => {
+  const cases = [
+    ['workbuddy', `${WORKBUDDY_APP_CLI} --acp`],
+    ['workbuddy_ai', `'${WORKBUDDY_AI_APP_CLI}' --acp`],
+  ] as const
 
-    assert.equal(result.agents[0].acpCommand, command)
-    const written = JSON.parse(readFileSync(configPath, 'utf8'))
-    assert.equal(written.agents[0].name, 'workbuddy')
-    assert.equal(written.agents[0].acpCommand, command)
-  })
+  for (const [name, command] of cases) {
+    await withCredentials(name, async ({ configPath, credentialsFile }) => {
+      const result = await runJsonInit(configPath, {
+        agents: [{ name, acpCommand: command, credentialsFile }],
+      })
+
+      assert.equal(result.agents[0].acpCommand, command)
+      const written = JSON.parse(readFileSync(configPath, 'utf8'))
+      assert.equal(written.agents[0].name, name)
+      assert.equal(written.agents[0].acpCommand, command)
+    })
+  }
 })
 
-test('JSON init supplies the quoted native WorkBuddy AI ACP command', async () => {
+test('JSON init upgrades saved generated WorkBuddy commands when omitted', async () => {
+  const cases = [
+    ['workbuddy', `${WORKBUDDY_APP_CLI} --acp`],
+    ['workbuddy_ai', `'${WORKBUDDY_AI_APP_CLI}' --acp`],
+  ] as const
+
+  for (const [name, legacyCommand] of cases) {
+    await withCredentials(name, async ({ configPath, credentialsFile }) => {
+      writeFileSync(configPath, JSON.stringify({
+        aampHost: 'https://meshmail.ai',
+        rejectUnauthorized: false,
+        agents: [{ name, acpCommand: legacyCommand, credentialsFile }],
+      }))
+
+      const result = await runJsonInit(configPath, {
+        agents: [{ name, credentialsFile }],
+      })
+
+      assert.equal(result.agents[0].acpCommand, defaultAcpCommand(name))
+      const written = JSON.parse(readFileSync(configPath, 'utf8'))
+      assert.equal(written.agents[0].acpCommand, defaultAcpCommand(name))
+    })
+  }
+})
+
+test('JSON init supplies the isolated native WorkBuddy AI ACP command', async () => {
   await withCredentials('workbuddy_ai', async ({ configPath, credentialsFile }) => {
     const result = await runJsonInit(configPath, {
       agents: [{ name: 'workbuddy_ai', credentialsFile }],
     })
 
-    const command = `'${WORKBUDDY_AI_APP_CLI}' --acp`
+    const command = defaultAcpCommand('workbuddy_ai')
     assert.equal(result.agents[0].acpCommand, command)
     const written = JSON.parse(readFileSync(configPath, 'utf8'))
     assert.equal(written.agents[0].name, 'workbuddy_ai')

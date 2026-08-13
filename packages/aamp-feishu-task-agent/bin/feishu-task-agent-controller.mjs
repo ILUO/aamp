@@ -881,7 +881,7 @@ async function chooseMany(title, items, render) {
       const mark = checked.has(index) ? 'x' : ' ';
       output.write(`\x1b[2K\r  ${pointer} [${mark}] ${option.label}\n`);
     });
-    output.write('\x1b[2K\r使用 ↑/↓ 移动，空格多选，回车确认；选择“全部”会忽略其他选项。\n');
+    output.write('\x1b[2K\r使用 ↑/↓ 移动，按空格键选择（支持多选），按回车键确认；选择“全部”会取消其他选项的选中状态。\n');
   };
 
   draw();

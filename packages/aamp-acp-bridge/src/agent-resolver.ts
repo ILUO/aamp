@@ -1,13 +1,36 @@
 import { execFileSync } from 'node:child_process'
 import { accessSync, constants, existsSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { delimiter, extname, join } from 'node:path'
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+function shellWord(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : shellQuote(value)
+}
 
 const CODEX_APP_CLI = '/Applications/Codex.app/Contents/Resources/codex'
 const CODEX_APP_ACP_COMMAND = `env CODEX_PATH=${CODEX_APP_CLI} npx -y @agentclientprotocol/codex-acp`
 export const WORKBUDDY_APP_CLI = '/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy'
-const WORKBUDDY_APP_ACP_COMMAND = `${WORKBUDDY_APP_CLI} --acp`
 export const WORKBUDDY_AI_APP_CLI = '/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy'
-const WORKBUDDY_AI_APP_ACP_COMMAND = `'${WORKBUDDY_AI_APP_CLI}' --acp`
+const WORKBUDDY_APP_CONFIG_DIR = join(homedir(), '.workbuddy')
+const WORKBUDDY_AI_APP_CONFIG_DIR = join(homedir(), '.workbuddy-ai')
+const WORKBUDDY_APP_LEGACY_ACP_COMMAND = `${WORKBUDDY_APP_CLI} --acp`
+const WORKBUDDY_AI_APP_LEGACY_ACP_COMMAND = `'${WORKBUDDY_AI_APP_CLI}' --acp`
+const WORKBUDDY_APP_ACP_COMMAND = [
+  'env',
+  `CODEBUDDY_CONFIG_DIR=${shellWord(WORKBUDDY_APP_CONFIG_DIR)}`,
+  shellWord(WORKBUDDY_APP_CLI),
+  '--acp',
+].join(' ')
+const WORKBUDDY_AI_APP_ACP_COMMAND = [
+  'env',
+  `CODEBUDDY_CONFIG_DIR=${shellWord(WORKBUDDY_AI_APP_CONFIG_DIR)}`,
+  shellWord(WORKBUDDY_AI_APP_CLI),
+  '--acp',
+].join(' ')
 
 export const KNOWN_AGENTS = [
   'claude', 'codex', 'gemini', 'goose', 'openclaw',
@@ -25,12 +48,14 @@ export interface AgentResolution {
 function workbuddyApp(name: string): {
   cli: string
   acpCommand: string
+  legacyAcpCommand: string
   displayName: string
 } | undefined {
   if (name === 'workbuddy') {
     return {
       cli: WORKBUDDY_APP_CLI,
       acpCommand: WORKBUDDY_APP_ACP_COMMAND,
+      legacyAcpCommand: WORKBUDDY_APP_LEGACY_ACP_COMMAND,
       displayName: 'WorkBuddy',
     }
   }
@@ -38,6 +63,7 @@ function workbuddyApp(name: string): {
     return {
       cli: WORKBUDDY_AI_APP_CLI,
       acpCommand: WORKBUDDY_AI_APP_ACP_COMMAND,
+      legacyAcpCommand: WORKBUDDY_AI_APP_LEGACY_ACP_COMMAND,
       displayName: 'WorkBuddy AI',
     }
   }
@@ -176,10 +202,11 @@ export function defaultAcpCommand(name: string, previousCommand?: string): strin
     && previousCommand.trim().length > 0
     ? previousCommand
     : undefined
+  const legacyWorkbuddyCommand = workbuddyApp(name)?.legacyAcpCommand
   if (nonblankPreviousCommand && nonblankPreviousCommand !== baseCommand) {
-    if (name !== 'codex' || nonblankPreviousCommand !== CODEX_APP_CLI) {
-      return nonblankPreviousCommand
-    }
+    const isMigratableDefault = nonblankPreviousCommand === legacyWorkbuddyCommand
+      || (name === 'codex' && nonblankPreviousCommand === CODEX_APP_CLI)
+    if (!isMigratableDefault) return nonblankPreviousCommand
   }
   return detectKnownAgent(name)?.acpCommand ?? baseCommand
 }

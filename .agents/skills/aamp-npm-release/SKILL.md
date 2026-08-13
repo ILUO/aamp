@@ -21,10 +21,11 @@ The helper script is:
 node .agents/skills/aamp-npm-release/scripts/aamp-npm-release.mjs
 ```
 
-Generated startup commands use the canonical Task Agent types `codex`,
-`cursor`, `coco`, `traex`, `traecli`, and `workbuddy`. The helper defaults
-generated startup commands to `--agent coco`; pass `--agent` explicitly for a
-different type. The removed `trae` type is not accepted.
+Generated one-click startup commands omit `--agent` so the Task Agent installer
+opens its interactive multi-select and lets the user choose one or more detected
+agents. The helper still accepts `--agent` as a deprecated compatibility option,
+but it does not change printed startup commands. The removed `trae` type is not
+accepted.
 
 ## Release model
 
@@ -99,7 +100,8 @@ only when you intentionally want to inspect all package versions.
        to its npm versions page using Markdown:
        `[target name@version](https://www.npmjs.com/package/<target name>?activeTab=versions)`.
     2. One-click startup command: use the remote one-click command for published
-       packages, or the local tgz startup command for local-only packages.
+       packages, or the local tgz startup command for local-only packages. Do not
+       append `--agent`; let the installer open its interactive multi-select.
     3. Follow-up start command: include `feishu-task-agent start` and the
        `$HOME/.aamp/bin/feishu-task-agent start` fallback.
 

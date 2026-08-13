@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
@@ -14,7 +15,17 @@ import {
 } from '../src/agent-resolver.js'
 import { expectedFakePathVersion, withFakePath } from './path-fixture.js'
 
-const WORKBUDDY_AI_ACP_COMMAND = `'${WORKBUDDY_AI_APP_CLI}' --acp`
+function parseAcpCommand(command: string): string[] {
+  const parsed = spawnSync('bash', [
+    '-c',
+    'eval "set -- $1"; printf "%s\\0" "$@"',
+    'bash',
+    command,
+  ], { encoding: 'buffer' })
+
+  assert.equal(parsed.status, 0, parsed.stderr.toString())
+  return parsed.stdout.toString().split('\0').filter(Boolean)
+}
 
 test('registers canonical Traex and TraeCode CLI names', () => {
   for (const name of ['traex', 'traecli']) {
@@ -80,6 +91,35 @@ test('registers WorkBuddy and WorkBuddy AI as distinct canonical agents', () => 
   }
 })
 
+test('WorkBuddy products launch ACP with their desktop config directories', () => {
+  const cases = [
+    ['workbuddy', join(homedir(), '.workbuddy'), WORKBUDDY_APP_CLI],
+    ['workbuddy_ai', join(homedir(), '.workbuddy-ai'), WORKBUDDY_AI_APP_CLI],
+  ] as const
+
+  for (const [name, configDir, cli] of cases) {
+    assert.deepEqual(parseAcpCommand(defaultAcpCommand(name)), [
+      'env',
+      `CODEBUDDY_CONFIG_DIR=${configDir}`,
+      cli,
+      '--acp',
+    ])
+  }
+})
+
+test('migrates exact legacy WorkBuddy defaults and preserves custom commands', () => {
+  const cases = [
+    ['workbuddy', `${WORKBUDDY_APP_CLI} --acp`],
+    ['workbuddy_ai', `'${WORKBUDDY_AI_APP_CLI}' --acp`],
+  ] as const
+
+  for (const [name, legacyCommand] of cases) {
+    assert.equal(defaultAcpCommand(name, legacyCommand), defaultAcpCommand(name))
+    const customCommand = `${legacyCommand} --model custom`
+    assert.equal(defaultAcpCommand(name, customCommand), customCommand)
+  }
+})
+
 test('resolves WorkBuddy AI only from its international macOS bundle', () => {
   const seen: string[] = []
   const resolution = detectKnownAgent('workbuddy_ai', {
@@ -93,12 +133,11 @@ test('resolves WorkBuddy AI only from its international macOS bundle', () => {
 
   assert.deepEqual(resolution, {
     command: WORKBUDDY_AI_APP_CLI,
-    acpCommand: WORKBUDDY_AI_ACP_COMMAND,
+    acpCommand: defaultAcpCommand('workbuddy_ai'),
     version: '2.115.0',
   })
   assert.deepEqual(seen, [WORKBUDDY_AI_APP_CLI])
   assert.notEqual(WORKBUDDY_AI_APP_CLI, WORKBUDDY_APP_CLI)
-  assert.equal(defaultAcpCommand('workbuddy_ai'), WORKBUDDY_AI_ACP_COMMAND)
 })
 
 test('WorkBuddy AI ACP command keeps the application path as one shell word', {
@@ -111,17 +150,14 @@ test('WorkBuddy AI ACP command keeps the application path as one shell word', {
   })
   assert.ok(resolution)
 
-  const parsed = spawnSync('bash', [
-    '-c',
-    'eval "set -- $1"; printf "%s\\0" "$@"',
-    'bash',
-    resolution.acpCommand,
-  ], { encoding: 'buffer' })
-
-  assert.equal(parsed.status, 0, parsed.stderr.toString())
   assert.deepEqual(
-    parsed.stdout.toString().split('\0').filter(Boolean),
-    [WORKBUDDY_AI_APP_CLI, '--acp'],
+    parseAcpCommand(resolution.acpCommand),
+    [
+      'env',
+      `CODEBUDDY_CONFIG_DIR=${join(homedir(), '.workbuddy-ai')}`,
+      WORKBUDDY_AI_APP_CLI,
+      '--acp',
+    ],
   )
 })
 
@@ -154,7 +190,7 @@ test('resolves an executable standard macOS WorkBuddy app', () => {
     versionFor: () => '2.115.0',
   }), {
     command: WORKBUDDY_APP_CLI,
-    acpCommand: `${WORKBUDDY_APP_CLI} --acp`,
+    acpCommand: defaultAcpCommand('workbuddy'),
     version: '2.115.0',
   })
 })
