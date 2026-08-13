@@ -29,7 +29,7 @@ function bootstrapWorkBuddyFunctions(source) {
     functionRange(source, 'find_workbuddy_cli()', 'resolve_cursor_cli_for_acp()'),
     functionRange(source, 'ensure_agent_cli()', 'clear_quarantine_path()'),
     functionRange(source, 'ensure_agent_login()', 'run_acp_bridge()'),
-    functionRange(source, 'build_acp_agent_command()', 'validate_codex_acp_command()'),
+    functionRange(source, 'acp_command_word()', 'validate_codex_acp_command()'),
   ].join('\n')
 }
 
@@ -50,6 +50,7 @@ test('WorkBuddy discovery skips built-in Marketplace initialization without invo
     'set -euo pipefail',
     'WORKBUDDY_APP_CLI="$1"',
     'WORKBUDDY_AI_APP_CLI="/missing/WorkBuddy AI.app/codebuddy"',
+    'HOME="$2"',
     'AGENT="workbuddy"',
     'DETECTED_AGENTS=()',
     'ACP_AGENT_COMMAND=""',
@@ -68,13 +69,14 @@ test('WorkBuddy discovery skips built-in Marketplace initialization without invo
     'ensure_agent_cli',
     'ensure_agent_login',
     'build_acp_agent_command',
-    'printf "%s|%s" "${DETECTED_AGENTS[*]}" "$ACP_AGENT_COMMAND"',
-  ], [fakeCli])
+    'eval "set -- $ACP_AGENT_COMMAND"',
+    'printf "%s|%s|%s|%s|%s|%s" "${DETECTED_AGENTS[*]}" "$1" "$2" "${3-}" "${4-}" "${5-}"',
+  ], [fakeCli, root])
 
   assert.equal(result.status, 0, result.stderr)
   assert.equal(
     result.stdout,
-    `workbuddy|env CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1 ${fakeCli} --acp`,
+    `workbuddy|env|CODEBUDDY_CONFIG_DIR=${root}/.workbuddy|CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1|${fakeCli}|--acp`,
   )
   assert.equal(existsSync(callLog), false)
 })

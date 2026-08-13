@@ -50,6 +50,7 @@ test('discovers both WorkBuddy products and skips WorkBuddy AI Marketplace initi
     'set -euo pipefail',
     'WORKBUDDY_APP_CLI="$1"',
     'WORKBUDDY_AI_APP_CLI="$2"',
+    'HOME="$3"',
     'AGENT="workbuddy_ai"',
     'DETECTED_AGENTS=()',
     'ACP_AGENT_COMMAND=""',
@@ -70,13 +71,13 @@ test('discovers both WorkBuddy products and skips WorkBuddy AI Marketplace initi
     'ensure_agent_login',
     'build_acp_agent_command',
     'eval "set -- $ACP_AGENT_COMMAND"',
-    'printf "%s|%s|%s|%s|%s" "${DETECTED_AGENTS[*]}" "$1" "$2" "${3-}" "${4-}"',
-  ], [workbuddyCli, workbuddyAiCli])
+    'printf "%s|%s|%s|%s|%s|%s" "${DETECTED_AGENTS[*]}" "$1" "$2" "${3-}" "${4-}" "${5-}"',
+  ], [workbuddyCli, workbuddyAiCli, root])
 
   assert.equal(result.status, 0, result.stderr)
   assert.equal(
     result.stdout,
-    `workbuddy workbuddy_ai|env|CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1|${workbuddyAiCli}|--acp`,
+    `workbuddy workbuddy_ai|env|CODEBUDDY_CONFIG_DIR=${root}/.workbuddy-ai|CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1|${workbuddyAiCli}|--acp`,
   )
   assert.equal(existsSync(callLog), false)
 })

@@ -4024,21 +4024,25 @@ acp_command_word() {
 build_acp_agent_command() {
   ACP_AGENT_COMMAND="$AGENT"
   if [ "$AGENT" = "workbuddy" ]; then
-    local workbuddy_bin
+    local workbuddy_bin workbuddy_config_dir_word
     workbuddy_bin="$(find_workbuddy_cli)" \
       || agent_fail "WorkBuddy 不可用。请确认已安装到 /Applications/WorkBuddy.app。"
-    ACP_AGENT_COMMAND="env CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1 $workbuddy_bin --acp"
+    workbuddy_config_dir_word="$(acp_command_word "$HOME/.workbuddy")" \
+      || agent_fail "WorkBuddy 配置目录包含不受支持的换行符。"
+    ACP_AGENT_COMMAND="env CODEBUDDY_CONFIG_DIR=$workbuddy_config_dir_word CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1 $workbuddy_bin --acp"
     agent_detail "using native WorkBuddy ACP command: $ACP_AGENT_COMMAND"
     return 0
   fi
 
   if [ "$AGENT" = "workbuddy_ai" ]; then
-    local workbuddy_ai_bin workbuddy_ai_word
+    local workbuddy_ai_bin workbuddy_ai_word workbuddy_ai_config_dir_word
     workbuddy_ai_bin="$(find_workbuddy_ai_cli)" \
       || agent_fail "WorkBuddy AI CLI 不可用：${WORKBUDDY_AI_APP_CLI}。请确认该文件存在且可执行。"
     workbuddy_ai_word="$(acp_command_word "$workbuddy_ai_bin")" \
       || agent_fail "WorkBuddy AI 路径包含不受支持的换行符。"
-    ACP_AGENT_COMMAND="env CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1 $workbuddy_ai_word --acp"
+    workbuddy_ai_config_dir_word="$(acp_command_word "$HOME/.workbuddy-ai")" \
+      || agent_fail "WorkBuddy AI 配置目录包含不受支持的换行符。"
+    ACP_AGENT_COMMAND="env CODEBUDDY_CONFIG_DIR=$workbuddy_ai_config_dir_word CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1 $workbuddy_ai_word --acp"
     agent_detail "using native WorkBuddy AI ACP command: $ACP_AGENT_COMMAND"
     return 0
   fi
