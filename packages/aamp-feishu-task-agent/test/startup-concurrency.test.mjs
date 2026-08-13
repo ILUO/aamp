@@ -269,7 +269,7 @@ test('start and install share the same layered binding launcher', () => {
   assert.match(source, /concurrency: FEISHU_START_CONCURRENCY/)
   assert.match(source, /startSelectedBindings[\s\S]*orchestrateStartupBindings\(bindings, existingGroups\)/)
   assert.match(source, /orchestrateStartupBindings[\s\S]*operations\.startBindingsWithGroups\(onlineBindings, groups, 'start'\)/)
-  assert.match(source, /runBindingSession[\s\S]*startBindingsWithGroups\(saved, groups, mode\)/)
+  assert.match(source, /runBindingSession[\s\S]*startBindingsWithGroups\(acceptedBindings, groups, mode\)/)
   assert.match(source, /runInstall[\s\S]*reconcileStartupResults\(bound\.selectedBindings/)
 })
 
@@ -377,7 +377,7 @@ test('prepared startup dispatch and both callers use the shared launcher', () =>
     'async function runBindingSession(mode)',
     'async function runInstall()',
   )
-  assert.match(install, /startBindingsWithGroups\(saved, groups, mode\)/)
+  assert.match(install, /startBindingsWithGroups\(acceptedBindings, groups, mode\)/)
   assert.match(install, /selectedBindings/)
   assert.doesNotMatch(install, /updateBinding|Promise\.all/)
 })

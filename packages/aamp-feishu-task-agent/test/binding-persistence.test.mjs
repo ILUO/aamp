@@ -93,6 +93,33 @@ function functionRange(source, startName, endName) {
   return source.slice(start, end)
 }
 
+test('sameBindingRelationship ignores credentials labels and runtime metadata', () => {
+  const existing = readyBinding('11111111-1111-4111-8111-111111111111', 'cli_same')
+  const candidate = pendingBinding('22222222-2222-4222-8222-222222222222', 'cli_same')
+  candidate.bot.app_secret = 'rotated-secret'
+  candidate.bot.lark_cli_profile = 'new-local-profile'
+  candidate.bot.display_name = 'Renamed Bot'
+  candidate.created_at = '2026-08-13T01:00:00.000Z'
+  candidate.updated_at = '2026-08-13T01:00:00.000Z'
+
+  assert.equal(controller.sameBindingRelationship(existing, candidate), true)
+})
+
+test('sameBindingRelationship rejects every routing-field difference', () => {
+  const existing = readyBinding('11111111-1111-4111-8111-111111111111', 'cli_same')
+  const candidate = pendingBinding('22222222-2222-4222-8222-222222222222', 'cli_same')
+  const changed = [
+    ['agent_type', { ...candidate, agent_type: 'cursor' }],
+    ['aamp_host', { ...candidate, aamp_host: 'https://other.meshmail.ai' }],
+    ['environment.name', { ...candidate, environment: { name: 'boe' } }],
+    ['bot.app_id', { ...candidate, bot: { ...candidate.bot, app_id: 'cli_other' } }],
+  ]
+
+  for (const [field, value] of changed) {
+    assert.equal(controller.sameBindingRelationship(existing, value), false, field)
+  }
+})
+
 test('upsertBindings appends new Bots without removing existing bindings', async () => {
   const existing = readyBinding('11111111-1111-4111-8111-111111111111', 'cli_old')
   writeStore([existing])
@@ -153,19 +180,31 @@ test('upsertBindings rejects a stale approval without partially writing the batc
   ])
 })
 
-test('install and add explicitly confirm persisted duplicate Bots', () => {
+test('install and add silently reuse identical relationships and confirm changed ones', () => {
   const source = readFileSync(controllerPath, 'utf8')
-  assert.match(source, /Bot .* 已存在绑定/)
-  assert.match(source, /拟替换为/)
-  assert.match(source, /await confirm\('是否替换绑定？', false\)/)
-  assert.doesNotMatch(source, /mode === 'add'\s*\?\s*store\.bindings/)
+  const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
+  const reuseStart = session.indexOf('if (existing && sameBindingRelationship(existing, draft))')
+  const conflictStart = session.indexOf('else if (existing)', reuseStart)
+  const acceptedStart = session.indexOf('if (accepted)', conflictStart)
+
+  assert.notEqual(reuseStart, -1)
+  assert.notEqual(conflictStart, -1)
+  assert.notEqual(acceptedStart, -1)
+  const reuseBranch = session.slice(reuseStart, conflictStart)
+  assert.match(reuseBranch, /acceptedBinding = existing/)
+  assert.doesNotMatch(reuseBranch, /confirm|bindingIntents\.push|已存在绑定|拟替换为/)
+
+  const conflictBranch = session.slice(conflictStart, acceptedStart)
+  assert.match(conflictBranch, /Bot .* 已存在绑定/)
+  assert.match(conflictBranch, /拟替换为/)
+  assert.match(conflictBranch, /await confirm\('是否替换绑定？', false\)/)
 })
 
 test('declining a replacement returns to the continue-selection prompt', () => {
   const source = readFileSync(controllerPath, 'utf8')
   const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
-  const duplicateStart = session.indexOf('if (existing)')
-  const acceptedStart = session.indexOf('bindingIntents.push', duplicateStart)
+  const duplicateStart = session.indexOf('else if (existing)')
+  const acceptedStart = session.indexOf('if (accepted)', duplicateStart)
   assert.notEqual(duplicateStart, -1)
   assert.notEqual(acceptedStart, -1)
   assert.ok(duplicateStart < acceptedStart, 'replacement decision must precede accepting the binding')
@@ -174,24 +213,28 @@ test('declining a replacement returns to the continue-selection prompt', () => {
   assert.match(session, /keepGoing = await confirm\('是否继续选择本地智能体和 Bot？', false\)/)
 })
 
-test('install saves accepted pending bindings before Agent setup and uses the shared launcher', () => {
+test('install saves draft intents then launches all accepted bindings in selection order', () => {
   const source = readFileSync(controllerPath, 'utf8')
   const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
   const persisted = session.indexOf('await upsertBindings(bindingIntents)')
-  const setup = session.indexOf('await setupAgentGroups(saved)')
-  assert.notEqual(persisted, -1, 'install must persist accepted drafts')
-  assert.notEqual(setup, -1, 'install must set up Agent groups')
-  assert.ok(persisted < setup, 'install must persist accepted drafts before setting up Agent groups')
-  assert.match(session, /startBindingsWithGroups\(saved, groups, mode\)/)
-  assert.doesNotMatch(session, /updateBinding/)
-  assert.doesNotMatch(session, /replaceBindings\(bound\.succeeded\)/)
+  const setup = session.indexOf('await setupAgentGroups(acceptedBindings)')
+
+  assert.match(session, /const acceptedBindings = \[\]/)
+  assert.match(session, /acceptedBindings\.push\(acceptedBinding\)/)
+  assert.match(session, /selectedBindings\.push\(accepted \? acceptedBinding : draft\)/)
+  assert.match(session, /if \(bindingIntents\.length\)/)
+  assert.notEqual(persisted, -1)
+  assert.notEqual(setup, -1)
+  assert.ok(persisted < setup)
+  assert.match(session, /startBindingsWithGroups\(acceptedBindings, groups, mode\)/)
+  assert.doesNotMatch(session, /setupAgentGroups\(saved\)|startBindingsWithGroups\(saved/)
 })
 
 test('a failed install start keeps the already-saved pending binding', () => {
   const source = readFileSync(controllerPath, 'utf8')
   const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
-  const launchStart = session.indexOf('await startBindingsWithGroups(saved, groups, mode)')
-  assert.notEqual(launchStart, -1, 'install must launch saved drafts for binding')
+  const launchStart = session.indexOf('await startBindingsWithGroups(acceptedBindings, groups, mode)')
+  assert.notEqual(launchStart, -1, 'install must launch accepted bindings')
   const launchBranch = session.slice(launchStart)
   assert.doesNotMatch(launchBranch, /removeBinding|replaceBindings/)
   assert.match(launchBranch, /failed\.push\(\.\.\.launched\.failed\)/)
@@ -209,17 +252,31 @@ test('install startup errors say the binding remains saved for retry', () => {
   assert.match(launcher, /finalizeDeferredLaunchResults\(launched, mode, operations\)/)
 })
 
-test('add saves one atomic batch and never starts Agent groups', () => {
+test('add accepts reused bindings without persisting or starting them', () => {
   const source = readFileSync(controllerPath, 'utf8')
   const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
-  const saveStart = session.indexOf('await upsertBindings(bindingIntents)')
-  const addStart = session.indexOf("if (mode === 'add')")
-  const installStart = session.indexOf("console.log('\\n=== 建立绑定并启动 ===')")
-  assert.notEqual(saveStart, -1)
-  assert.notEqual(addStart, -1)
-  assert.notEqual(installStart, -1)
-  assert.ok(saveStart < addStart, 'add and install must share the same atomic batch save')
-  assert.ok(addStart < installStart, 'add must return before install process setup')
-  const addBranch = session.slice(addStart, installStart)
-  assert.doesNotMatch(addBranch, /setupAgentGroups|prepareBindingStart|executePreparedBindingStart/)
+  const addBranch = session.slice(
+    session.indexOf("if (mode === 'add')"),
+    session.indexOf("console.log('\\n=== 建立绑定并启动 ===')"),
+  )
+  const runAdd = functionRange(source, 'async function runAdd()', 'async function runList()')
+
+  assert.match(addBranch, /succeeded\.push\(\.\.\.acceptedBindings\)/)
+  assert.doesNotMatch(addBranch, /setupAgentGroups|startBindingsWithGroups/)
+  assert.match(runAdd, /if \(!result\.acceptedBindings\.length\)/)
+})
+
+test('install completion distinguishes accepted bindings from newly saved bindings', () => {
+  const source = readFileSync(controllerPath, 'utf8')
+  const runInstall = functionRange(source, 'async function runInstall()', 'async function runAdd()')
+
+  assert.match(runInstall, /if \(!result\.acceptedBindings\.length\)/)
+  assert.match(runInstall, /\$\{result\.acceptedBindings\.length\} 个绑定配置已保存/)
+})
+
+test('saved binding output does not use the ready-state green icon', () => {
+  const source = readFileSync(controllerPath, 'utf8')
+
+  assert.match(source, /console\.log\(`已保存：\$\{bindingLabel\(binding\)\}`\)/)
+  assert.doesNotMatch(source, /🟢 已保存：/)
 })

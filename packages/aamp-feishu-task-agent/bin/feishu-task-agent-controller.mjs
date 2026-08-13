@@ -559,6 +559,14 @@ function bindingExpectation(binding) {
   };
 }
 
+function sameBindingRelationship(existing, candidate) {
+  return Boolean(existing && candidate
+    && existing.agent_type === candidate.agent_type
+    && existing.aamp_host === candidate.aamp_host
+    && existing.environment?.name === candidate.environment?.name
+    && existing.bot?.app_id === candidate.bot?.app_id);
+}
+
 async function upsertBindings(intents) {
   return withConfigLock(async () => {
     const store = await loadStore();
@@ -2638,6 +2646,7 @@ async function runBindingSession(mode) {
   const agents = DEFAULT_AGENT ? [DEFAULT_AGENT] : await discoverAgents();
   throwIfStopping();
   const bindingIntents = [];
+  const acceptedBindings = [];
   const selectedBindings = [];
   const succeeded = [];
   const failed = [];
@@ -2654,10 +2663,12 @@ async function runBindingSession(mode) {
       const draft = await createDraft(agents, selectedAppIds);
       throwIfStopping();
       selectedCount += 1;
-      selectedBindings.push(draft);
       const existing = existingByAppId.get(draft.bot.app_id);
       let accepted = true;
-      if (existing) {
+      let acceptedBinding = draft;
+      if (existing && sameBindingRelationship(existing, draft)) {
+        acceptedBinding = existing;
+      } else if (existing) {
         console.log(`Bot ${draft.bot.app_id} 已存在绑定：${bindingLabel(existing)}`);
         console.log(`拟替换为：${bindingLabel(draft)}`);
         if (!await confirm('是否替换绑定？', false)) {
@@ -2668,12 +2679,16 @@ async function runBindingSession(mode) {
           printBindingCancelled(draft, reason);
         }
       }
+      selectedBindings.push(accepted ? acceptedBinding : draft);
       if (accepted) {
-        bindingIntents.push({
-          binding: draft,
-          expected: existing ? bindingExpectation(existing) : undefined,
-        });
-        console.log(`已选择：${bindingLabel(draft)}`);
+        acceptedBindings.push(acceptedBinding);
+        if (acceptedBinding === draft) {
+          bindingIntents.push({
+            binding: draft,
+            expected: existing ? bindingExpectation(existing) : undefined,
+          });
+        }
+        console.log(`已选择：${bindingLabel(acceptedBinding)}`);
       }
     } catch (error) {
       if (stopRequested) throw error;
@@ -2687,10 +2702,11 @@ async function runBindingSession(mode) {
     throwIfStopping();
   }
 
-  if (!bindingIntents.length) {
+  if (!acceptedBindings.length) {
     return {
       groups: new Map(),
       saved: [],
+      acceptedBindings,
       selectedBindings,
       succeeded,
       failed,
@@ -2702,19 +2718,23 @@ async function runBindingSession(mode) {
     };
   }
 
-  console.log('\n=== 保存绑定配置 ===');
-  const persisted = await upsertBindings(bindingIntents);
-  const saved = persisted.bindings;
-  for (const binding of saved) {
-    await setBindingStatus(binding, 'bind', 'saved');
-    console.log(`🟢 已保存：${bindingLabel(binding)}`);
+  let persisted = { bindings: [], replacedCount: 0 };
+  if (bindingIntents.length) {
+    console.log('\n=== 保存绑定配置 ===');
+    persisted = await upsertBindings(bindingIntents);
+    for (const binding of persisted.bindings) {
+      await setBindingStatus(binding, 'bind', 'saved');
+      console.log(`已保存：${bindingLabel(binding)}`);
+    }
   }
+  const saved = persisted.bindings;
 
   if (mode === 'add') {
-    succeeded.push(...saved);
+    succeeded.push(...acceptedBindings);
     return {
       groups: new Map(),
       saved,
+      acceptedBindings,
       selectedBindings,
       succeeded,
       failed,
@@ -2728,9 +2748,9 @@ async function runBindingSession(mode) {
 
   console.log('\n=== 建立绑定并启动 ===');
   throwIfStopping();
-  const groups = await setupAgentGroups(saved);
+  const groups = await setupAgentGroups(acceptedBindings);
   throwIfStopping();
-  const launched = await startBindingsWithGroups(saved, groups, mode);
+  const launched = await startBindingsWithGroups(acceptedBindings, groups, mode);
   running.push(...launched.running);
   succeeded.push(...launched.running.map(({ binding }) => binding));
   failed.push(...launched.failed);
@@ -2738,6 +2758,7 @@ async function runBindingSession(mode) {
   return {
     groups,
     saved,
+    acceptedBindings,
     selectedBindings,
     succeeded,
     failed,
@@ -2766,7 +2787,7 @@ async function runInstall() {
     return bound;
   });
 
-  if (!result.saved.length) {
+  if (!result.acceptedBindings.length) {
     if (result.cancelled.length && !result.selectionFailures.length) {
       printStartupSummary({
         title: '已成功建立绑定并启动',
@@ -2798,7 +2819,7 @@ async function runInstall() {
     shutdown: shutdownGroups,
     onlyCancelled: async () => {},
     allFailed: async () => {
-      throw new Error(`全部配置启动失败；${result.saved.length} 个绑定配置已保存，可稍后运行 feishu-task-agent start 重试`);
+      throw new Error(`全部配置启动失败；${result.acceptedBindings.length} 个绑定配置已保存，可稍后运行 feishu-task-agent start 重试`);
     },
   });
 }
@@ -2807,7 +2828,7 @@ async function runAdd() {
   const result = await withMutationLock('add 绑定流程', async () => {
     return runBindingSession('add');
   });
-  if (!result.saved.length) {
+  if (!result.acceptedBindings.length) {
     if (result.cancelled.length && !result.selectionFailures.length) {
       console.log(`已取消 ${result.cancelled.length} 个配置的绑定；现有配置保持不变。`);
       return;
@@ -2951,6 +2972,7 @@ export {
   orchestrateStartupBindings,
   runOverlappedStartup,
   runPreparedBindingStarts,
+  sameBindingRelationship,
   startBindingsWithGroups,
   startAgentGroups,
   startManagedProcess,
