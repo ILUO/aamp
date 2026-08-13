@@ -70,6 +70,7 @@ Known ACP agent names:
 | `kiro` | `kiro` |
 | `hermes` | `hermes acp` |
 | `workbuddy` | macOS WorkBuddy app embedded `codebuddy --acp` |
+| `workbuddy_ai` | macOS WorkBuddy AI app embedded `'codebuddy' --acp` |
 
 If one of these is requested and installed, configure it with ACP Bridge unless
 the table above says a more native connector is preferred, as with OpenClaw.
@@ -80,6 +81,12 @@ WorkBuddy auto-detection currently checks the standard macOS app path:
 `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy`.
 Open WorkBuddy and sign in before starting the bridge. For another platform or
 installation path, configure the embedded CLI plus `--acp` explicitly.
+
+WorkBuddy AI is a separate canonical Agent, `workbuddy_ai`, detected only at:
+`/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy`.
+Because the application path contains a space, its generated ACP command quotes
+the executable path before appending `--acp`. It does not fall back to
+`WorkBuddy.app`, `codebuddy`, or `cbc` on `PATH`.
 
 Built-in CLI Bridge profiles:
 

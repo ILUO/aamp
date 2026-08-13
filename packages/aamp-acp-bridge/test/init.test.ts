@@ -22,3 +22,15 @@ test('forced init explains a missing traex executable', () => {
   )
   assert.match(noAgentsFoundMessage(), /Install an agent first/)
 })
+
+test('interactive init accepts both canonical WorkBuddy products', () => {
+  assert.deepEqual(resolveInitScanTargets('workbuddy'), ['workbuddy'])
+  assert.deepEqual(resolveInitScanTargets('workbuddy_ai'), ['workbuddy_ai'])
+  for (const alias of ['workbuddy ai', 'workbuddy-ai', 'workbuddyai']) {
+    assert.throws(
+      () => resolveInitScanTargets(alias),
+      new RegExp(`Unknown ACP agent "${alias}"`),
+    )
+  }
+  assert.match(noAgentsFoundMessage('workbuddy_ai'), /WorkBuddy AI/)
+})

@@ -191,3 +191,26 @@ Open WorkBuddy and sign in before starting the bridge so the embedded CLI can
 reuse its local authentication state. Automatic WorkBuddy detection is limited
 to the standard macOS application path; on other platforms or for a custom
 installation, provide an explicit `acpCommand`.
+
+### WorkBuddy AI
+
+The international macOS application is a separate canonical Agent:
+
+```text
+workbuddy_ai
+```
+
+It is detected only at:
+
+```text
+/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy
+```
+
+`init --agent workbuddy_ai` uses:
+
+```text
+'/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy' --acp
+```
+
+WorkBuddy and WorkBuddy AI are discovered independently and may both be
+configured. Open WorkBuddy AI and sign in before starting its bridge.

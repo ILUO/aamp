@@ -5,11 +5,13 @@ const CODEX_APP_CLI = '/Applications/Codex.app/Contents/Resources/codex'
 const CODEX_APP_ACP_COMMAND = `env CODEX_PATH=${CODEX_APP_CLI} npx -y @agentclientprotocol/codex-acp`
 export const WORKBUDDY_APP_CLI = '/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy'
 const WORKBUDDY_APP_ACP_COMMAND = `${WORKBUDDY_APP_CLI} --acp`
+export const WORKBUDDY_AI_APP_CLI = '/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy'
+const WORKBUDDY_AI_APP_ACP_COMMAND = `'${WORKBUDDY_AI_APP_CLI}' --acp`
 
 export const KNOWN_AGENTS: readonly string[] = [
   'claude', 'codex', 'gemini', 'goose', 'openclaw',
   'opencode', 'cursor', 'copilot', 'kimi', 'kiro',
-  'hermes', 'traex', 'workbuddy',
+  'hermes', 'traex', 'workbuddy', 'workbuddy_ai',
 ]
 
 export interface AgentResolution {
@@ -24,9 +26,32 @@ export interface AgentDetectionOptions {
   versionFor?: (command: string) => string
 }
 
+function workbuddyApp(name: string): {
+  cli: string
+  acpCommand: string
+  displayName: string
+} | undefined {
+  if (name === 'workbuddy') {
+    return {
+      cli: WORKBUDDY_APP_CLI,
+      acpCommand: WORKBUDDY_APP_ACP_COMMAND,
+      displayName: 'WorkBuddy',
+    }
+  }
+  if (name === 'workbuddy_ai') {
+    return {
+      cli: WORKBUDDY_AI_APP_CLI,
+      acpCommand: WORKBUDDY_AI_APP_ACP_COMMAND,
+      displayName: 'WorkBuddy AI',
+    }
+  }
+  return undefined
+}
+
 function baseAcpCommand(name: string): string {
   if (name === 'hermes') return 'hermes acp'
   if (name === 'traex') return 'traex acp serve'
+  if (name === 'workbuddy_ai') return WORKBUDDY_AI_APP_ACP_COMMAND
   return name
 }
 
@@ -58,12 +83,13 @@ export function detectKnownAgent(
   const pathExists = options.pathExists ?? existsSync
   const versionFor = options.versionFor ?? detectVersion
 
-  if (name === 'workbuddy') {
-    if (platform !== 'darwin' || !pathExists(WORKBUDDY_APP_CLI)) return undefined
+  const workbuddy = workbuddyApp(name)
+  if (workbuddy) {
+    if (platform !== 'darwin' || !pathExists(workbuddy.cli)) return undefined
     return {
-      command: WORKBUDDY_APP_CLI,
-      acpCommand: WORKBUDDY_APP_ACP_COMMAND,
-      version: versionFor(WORKBUDDY_APP_CLI),
+      command: workbuddy.cli,
+      acpCommand: workbuddy.acpCommand,
+      version: versionFor(workbuddy.cli),
     }
   }
 
@@ -99,11 +125,12 @@ export function missingAgentWarning(
   options: Pick<AgentDetectionOptions, 'platform'> = {},
 ): string {
   const platform = options.platform ?? process.platform
-  if (name === 'workbuddy' && platform === 'darwin') {
-    return `WorkBuddy was not found at ${WORKBUDDY_APP_CLI}.`
+  const workbuddy = workbuddyApp(name)
+  if (workbuddy && platform === 'darwin') {
+    return `${workbuddy.displayName} was not found at ${workbuddy.cli}.`
   }
-  if (name === 'workbuddy') {
-    return 'WorkBuddy auto-detection is only supported on macOS; configure acpCommand explicitly.'
+  if (workbuddy) {
+    return `${workbuddy.displayName} auto-detection is only supported on macOS; configure acpCommand explicitly.`
   }
   if (name === 'codex' && platform === 'darwin') {
     return `codex was not found on PATH or at ${CODEX_APP_CLI}.`

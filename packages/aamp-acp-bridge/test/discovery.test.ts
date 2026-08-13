@@ -51,3 +51,10 @@ test('does not expose legacy Trae or Coco names as native candidates', () => {
     assert.equal(ids.includes(legacyName), false)
   }
 })
+
+test('exposes both WorkBuddy products as distinct native candidates', () => {
+  const ids = discoverAcpBridgeAgents('/definitely/missing/config.json')
+    .candidates.map((candidate) => candidate.id)
+  assert.equal(ids.filter((id) => id === 'workbuddy').length, 1)
+  assert.equal(ids.filter((id) => id === 'workbuddy_ai').length, 1)
+})
