@@ -3325,7 +3325,6 @@ ensure_codex_cli_updated() {
     comparison_status=$?
   fi
   if [ "$comparison_status" -eq 1 ]; then
-    printf '%s\n' "$version_line"
     agent_detail "Codex CLI is already current: current=${version_before:-unknown} latest=${latest_version:-unknown}"
     return 0
   fi
@@ -3466,7 +3465,7 @@ run_traex_login_status() {
   trae_bin="$(find_traex_cli || true)"
   [ -n "$trae_bin" ] || return 127
   TRAE_CLI_BIN="$trae_bin"
-  agent_log "checking Trae CLI login status: $trae_bin"
+  agent_detail "checking Trae CLI login status: $trae_bin"
   if run_trae_login_status_for_bin "$trae_bin"; then
     return 0
   else

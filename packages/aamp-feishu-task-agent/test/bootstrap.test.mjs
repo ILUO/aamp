@@ -356,6 +356,42 @@ printf 'status=%s\\nselected=%s\\n' "$status" "$(resolve_trae_cli)"
   assert.equal(existsSync(calls), false)
 })
 
+test('successful Trae login status probe stays quiet while recording diagnostics', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const loggingStart = source.indexOf('write_one_click_log()')
+  const loggingEnd = source.indexOf('\nrecord_version_line()', loggingStart)
+  const loginStart = source.indexOf('run_quiet_command_with_timeout()')
+  const loginEnd = source.indexOf('\nrun_traex_login()', loginStart)
+  assert.notEqual(loggingStart, -1)
+  assert.notEqual(loggingEnd, -1)
+  assert.notEqual(loginStart, -1)
+  assert.notEqual(loginEnd, -1)
+
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-traex-status-quiet-'))
+  const fakeTrae = path.join(root, 'traex')
+  const logFile = path.join(root, 'one-click.log')
+  writeFileSync(fakeTrae, '#!/usr/bin/env bash\nexit 0\n')
+  chmodSync(fakeTrae, 0o755)
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+PATH="$1:${path.dirname(process.execPath)}:/usr/bin:/bin"
+ONE_CLICK_LOG="$2"
+AAMP_ONE_CLICK_VERBOSE="false"
+AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS=5
+TRAE_CLI_BIN=""
+FAKE_TRAE="$3"
+find_traex_cli() { printf '%s\\n' "$FAKE_TRAE"; }
+${source.slice(loggingStart, loggingEnd)}
+${source.slice(loginStart, loginEnd)}
+run_traex_login_status
+`, 'bash', path.dirname(fakeTrae), logFile, fakeTrae], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.match(readFileSync(logFile, 'utf8'), /checking Trae CLI login status/)
+})
+
 test('bootstrap returns structured cancellation when Coco upgrade is declined', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const start = source.indexOf('resolve_trae_cli_candidate()')
@@ -1436,8 +1472,9 @@ test('Codex update is skipped when the selected CLI is already latest', () => {
     { encoding: 'utf8' },
   )
 
-  assert.match(output, /当前 Codex CLI 版本是：1\.2\.3，最新版本是：1\.2\.3/)
+  assert.doesNotMatch(output, /当前 Codex CLI 版本是：1\.2\.3，最新版本是：1\.2\.3/)
   assert.doesNotMatch(output, /正在更新 Codex CLI/)
+  assert.match(readFileSync(detailFile, 'utf8'), /Codex CLI is already current: current=1\.2\.3 latest=1\.2\.3/)
   assert.equal(existsSync(updateMarker), false)
 })
 
