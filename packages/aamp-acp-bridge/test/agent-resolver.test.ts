@@ -91,7 +91,7 @@ test('registers WorkBuddy and WorkBuddy AI as distinct canonical agents', () => 
   }
 })
 
-test('WorkBuddy products launch ACP with their desktop config directories', () => {
+test('WorkBuddy products launch ACP with isolated config and no Marketplace initialization', () => {
   const cases = [
     ['workbuddy', join(homedir(), '.workbuddy'), WORKBUDDY_APP_CLI],
     ['workbuddy_ai', join(homedir(), '.workbuddy-ai'), WORKBUDDY_AI_APP_CLI],
@@ -101,6 +101,7 @@ test('WorkBuddy products launch ACP with their desktop config directories', () =
     assert.deepEqual(parseAcpCommand(defaultAcpCommand(name)), [
       'env',
       `CODEBUDDY_CONFIG_DIR=${configDir}`,
+      'CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1',
       cli,
       '--acp',
     ])
@@ -117,6 +118,19 @@ test('migrates exact legacy WorkBuddy defaults and preserves custom commands', (
     assert.equal(defaultAcpCommand(name, legacyCommand), defaultAcpCommand(name))
     const customCommand = `${legacyCommand} --model custom`
     assert.equal(defaultAcpCommand(name, customCommand), customCommand)
+  }
+})
+
+test('migrates WorkBuddy defaults created before the Marketplace bypass', () => {
+  for (const name of ['workbuddy', 'workbuddy_ai']) {
+    const currentCommand = defaultAcpCommand(name)
+    const previousGeneratedCommand = currentCommand.replace(
+      ' CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1',
+      '',
+    )
+
+    assert.notEqual(previousGeneratedCommand, currentCommand)
+    assert.equal(defaultAcpCommand(name, previousGeneratedCommand), currentCommand)
   }
 })
 
@@ -155,6 +169,7 @@ test('WorkBuddy AI ACP command keeps the application path as one shell word', {
     [
       'env',
       `CODEBUDDY_CONFIG_DIR=${join(homedir(), '.workbuddy-ai')}`,
+      'CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1',
       WORKBUDDY_AI_APP_CLI,
       '--acp',
     ],

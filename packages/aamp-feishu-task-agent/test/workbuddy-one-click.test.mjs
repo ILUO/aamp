@@ -33,7 +33,7 @@ function bootstrapWorkBuddyFunctions(source) {
   ].join('\n')
 }
 
-test('WorkBuddy discovery builds the native ACP command without invoking the CLI', () => {
+test('WorkBuddy discovery skips built-in Marketplace initialization without invoking the CLI', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const helpers = bootstrapWorkBuddyFunctions(source)
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-workbuddy-bootstrap-'))
@@ -72,7 +72,10 @@ test('WorkBuddy discovery builds the native ACP command without invoking the CLI
   ], [fakeCli])
 
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stdout, `workbuddy|${fakeCli} --acp`)
+  assert.equal(
+    result.stdout,
+    `workbuddy|env CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1 ${fakeCli} --acp`,
+  )
   assert.equal(existsSync(callLog), false)
 })
 

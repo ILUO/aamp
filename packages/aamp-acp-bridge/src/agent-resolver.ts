@@ -19,15 +19,29 @@ const WORKBUDDY_APP_CONFIG_DIR = join(homedir(), '.workbuddy')
 const WORKBUDDY_AI_APP_CONFIG_DIR = join(homedir(), '.workbuddy-ai')
 const WORKBUDDY_APP_LEGACY_ACP_COMMAND = `${WORKBUDDY_APP_CLI} --acp`
 const WORKBUDDY_AI_APP_LEGACY_ACP_COMMAND = `'${WORKBUDDY_AI_APP_CLI}' --acp`
+const WORKBUDDY_APP_PRE_MARKETPLACE_BYPASS_ACP_COMMAND = [
+  'env',
+  `CODEBUDDY_CONFIG_DIR=${shellWord(WORKBUDDY_APP_CONFIG_DIR)}`,
+  shellWord(WORKBUDDY_APP_CLI),
+  '--acp',
+].join(' ')
+const WORKBUDDY_AI_APP_PRE_MARKETPLACE_BYPASS_ACP_COMMAND = [
+  'env',
+  `CODEBUDDY_CONFIG_DIR=${shellWord(WORKBUDDY_AI_APP_CONFIG_DIR)}`,
+  shellWord(WORKBUDDY_AI_APP_CLI),
+  '--acp',
+].join(' ')
 const WORKBUDDY_APP_ACP_COMMAND = [
   'env',
   `CODEBUDDY_CONFIG_DIR=${shellWord(WORKBUDDY_APP_CONFIG_DIR)}`,
+  'CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1',
   shellWord(WORKBUDDY_APP_CLI),
   '--acp',
 ].join(' ')
 const WORKBUDDY_AI_APP_ACP_COMMAND = [
   'env',
   `CODEBUDDY_CONFIG_DIR=${shellWord(WORKBUDDY_AI_APP_CONFIG_DIR)}`,
+  'CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1',
   shellWord(WORKBUDDY_AI_APP_CLI),
   '--acp',
 ].join(' ')
@@ -48,14 +62,17 @@ export interface AgentResolution {
 function workbuddyApp(name: string): {
   cli: string
   acpCommand: string
-  legacyAcpCommand: string
+  migratableAcpCommands: readonly string[]
   displayName: string
 } | undefined {
   if (name === 'workbuddy') {
     return {
       cli: WORKBUDDY_APP_CLI,
       acpCommand: WORKBUDDY_APP_ACP_COMMAND,
-      legacyAcpCommand: WORKBUDDY_APP_LEGACY_ACP_COMMAND,
+      migratableAcpCommands: [
+        WORKBUDDY_APP_LEGACY_ACP_COMMAND,
+        WORKBUDDY_APP_PRE_MARKETPLACE_BYPASS_ACP_COMMAND,
+      ],
       displayName: 'WorkBuddy',
     }
   }
@@ -63,7 +80,10 @@ function workbuddyApp(name: string): {
     return {
       cli: WORKBUDDY_AI_APP_CLI,
       acpCommand: WORKBUDDY_AI_APP_ACP_COMMAND,
-      legacyAcpCommand: WORKBUDDY_AI_APP_LEGACY_ACP_COMMAND,
+      migratableAcpCommands: [
+        WORKBUDDY_AI_APP_LEGACY_ACP_COMMAND,
+        WORKBUDDY_AI_APP_PRE_MARKETPLACE_BYPASS_ACP_COMMAND,
+      ],
       displayName: 'WorkBuddy AI',
     }
   }
@@ -202,9 +222,9 @@ export function defaultAcpCommand(name: string, previousCommand?: string): strin
     && previousCommand.trim().length > 0
     ? previousCommand
     : undefined
-  const legacyWorkbuddyCommand = workbuddyApp(name)?.legacyAcpCommand
+  const migratableWorkbuddyCommands = workbuddyApp(name)?.migratableAcpCommands ?? []
   if (nonblankPreviousCommand && nonblankPreviousCommand !== baseCommand) {
-    const isMigratableDefault = nonblankPreviousCommand === legacyWorkbuddyCommand
+    const isMigratableDefault = migratableWorkbuddyCommands.includes(nonblankPreviousCommand)
       || (name === 'codex' && nonblankPreviousCommand === CODEX_APP_CLI)
     if (!isMigratableDefault) return nonblankPreviousCommand
   }

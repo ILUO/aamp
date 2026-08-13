@@ -4028,7 +4028,7 @@ build_acp_agent_command() {
     local workbuddy_bin
     workbuddy_bin="$(find_workbuddy_cli)" \
       || agent_fail "WorkBuddy 不可用。请确认已安装到 /Applications/WorkBuddy.app。"
-    ACP_AGENT_COMMAND="$workbuddy_bin --acp"
+    ACP_AGENT_COMMAND="env CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1 $workbuddy_bin --acp"
     agent_detail "using native WorkBuddy ACP command: $ACP_AGENT_COMMAND"
     return 0
   fi
@@ -4039,7 +4039,7 @@ build_acp_agent_command() {
       || agent_fail "WorkBuddy AI CLI 不可用：${WORKBUDDY_AI_APP_CLI}。请确认该文件存在且可执行。"
     workbuddy_ai_word="$(acp_command_word "$workbuddy_ai_bin")" \
       || agent_fail "WorkBuddy AI 路径包含不受支持的换行符。"
-    ACP_AGENT_COMMAND="$workbuddy_ai_word --acp"
+    ACP_AGENT_COMMAND="env CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1 $workbuddy_ai_word --acp"
     agent_detail "using native WorkBuddy AI ACP command: $ACP_AGENT_COMMAND"
     return 0
   fi

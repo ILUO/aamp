@@ -34,7 +34,7 @@ function workbuddyFunctions(source) {
   ].join('\n')
 }
 
-test('discovers both WorkBuddy products and quotes WorkBuddy AI without invoking either CLI', () => {
+test('discovers both WorkBuddy products and skips WorkBuddy AI Marketplace initialization', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-workbuddy-ai-bootstrap-'))
   const workbuddyCli = path.join(root, 'WorkBuddy.app', 'codebuddy')
@@ -70,11 +70,14 @@ test('discovers both WorkBuddy products and quotes WorkBuddy AI without invoking
     'ensure_agent_login',
     'build_acp_agent_command',
     'eval "set -- $ACP_AGENT_COMMAND"',
-    'printf "%s|%s|%s" "${DETECTED_AGENTS[*]}" "$1" "$2"',
+    'printf "%s|%s|%s|%s|%s" "${DETECTED_AGENTS[*]}" "$1" "$2" "${3-}" "${4-}"',
   ], [workbuddyCli, workbuddyAiCli])
 
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stdout, `workbuddy workbuddy_ai|${workbuddyAiCli}|--acp`)
+  assert.equal(
+    result.stdout,
+    `workbuddy workbuddy_ai|env|CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1|${workbuddyAiCli}|--acp`,
+  )
   assert.equal(existsSync(callLog), false)
 })
 
