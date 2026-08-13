@@ -74,6 +74,7 @@ function runDiscoveryFixture(names) {
     'resolve_codex_cli_for_acp() { return 1; }',
     'find_cursor_agent_cli() { return 1; }',
     'find_workbuddy_cli() { return 1; }',
+    'find_workbuddy_ai_cli() { return 1; }',
     'agent_fail() { printf "%s\\n" "$*" >&2; exit 64; }',
     resolutionFunctions(source),
     functionRange(source, 'agent_cli_detected()', 'move_agent_menu_cursor_up()'),
@@ -105,6 +106,7 @@ function runDiscoveryNoExecFixture(names) {
     'resolve_codex_cli_for_acp() { return 1; }',
     'find_cursor_agent_cli() { return 1; }',
     'find_workbuddy_cli() { return 1; }',
+    'find_workbuddy_ai_cli() { return 1; }',
     'agent_fail() { printf "%s\\n" "$*" >&2; exit 64; }',
     resolutionFunctions(source),
     functionRange(source, 'agent_cli_detected()', 'move_agent_menu_cursor_up()'),
@@ -132,6 +134,7 @@ function runAliasedFixture({ agent, sharedTarget }) {
     'TRAE_CLI_BIN=""',
     'TRAECODE_CLI_BIN=""',
     'WORKBUDDY_APP_CLI="/missing/WorkBuddy.app/codebuddy"',
+    'WORKBUDDY_AI_APP_CLI="/missing/WorkBuddy AI.app/codebuddy"',
     'is_macos() { return 0; }',
     'ensure_codem_local_bin_on_path() { :; }',
     'find_cursor_agent_cli() { return 1; }',
@@ -159,6 +162,7 @@ function runPreparedFixture({ names, agent, pathWithSpace = false }) {
     'TRAECODE_CLI_BIN=""',
     'ACP_AGENT_COMMAND=""',
     'WORKBUDDY_APP_CLI="/missing/WorkBuddy.app/codebuddy"',
+    'WORKBUDDY_AI_APP_CLI="/missing/WorkBuddy AI.app/codebuddy"',
     'is_macos() { return 0; }',
     'ensure_codem_local_bin_on_path() { :; }',
     'find_cursor_agent_cli() { return 1; }',
@@ -644,7 +648,7 @@ test('controller displays all canonical agent types verbatim', () => {
   const source = readFileSync(controller, 'utf8')
   const helpers = functionRange(source, 'function agentSelectionDisplayName(', 'function bindingCancellationReason(')
   const values = new Function(`${helpers}\nreturn { agentSelectionDisplayName, agentBindingDisplayName };`)()
-  for (const agent of ['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy']) {
+  for (const agent of ['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai']) {
     assert.equal(values.agentSelectionDisplayName(agent), agent)
     assert.equal(values.agentBindingDisplayName(agent), agent)
   }

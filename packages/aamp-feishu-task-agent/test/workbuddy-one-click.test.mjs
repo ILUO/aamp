@@ -49,6 +49,7 @@ test('WorkBuddy discovery builds the native ACP command without invoking the CLI
   const result = runShell([
     'set -euo pipefail',
     'WORKBUDDY_APP_CLI="$1"',
+    'WORKBUDDY_AI_APP_CLI="/missing/WorkBuddy AI.app/codebuddy"',
     'AGENT="workbuddy"',
     'DETECTED_AGENTS=()',
     'ACP_AGENT_COMMAND=""',
@@ -92,6 +93,7 @@ test('WorkBuddy explicit preparation distinguishes unsupported platform and miss
 
   const unsupported = runShell([
     'WORKBUDDY_APP_CLI="/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"',
+    'WORKBUDDY_AI_APP_CLI="/missing/WorkBuddy AI.app/codebuddy"',
     'is_macos() { return 1; }',
     ...common,
   ])
@@ -100,6 +102,7 @@ test('WorkBuddy explicit preparation distinguishes unsupported platform and miss
 
   const missing = runShell([
     'WORKBUDDY_APP_CLI="/missing/WorkBuddy.app/codebuddy"',
+    'WORKBUDDY_AI_APP_CLI="/missing/WorkBuddy AI.app/codebuddy"',
     'is_macos() { return 0; }',
     ...common,
   ])
@@ -118,7 +121,7 @@ test('WorkBuddy is a canonical controller binding with actionable failure guidan
   assert.match(source, /const AGENT_TYPES = \[[^\]]*'workbuddy'/)
   assert.match(source, /codex\/cursor\/coco\/traex\/traecli\/workbuddy/)
   assert.match(source, /function agentFailureMessage\(agentType, message\)/)
-  assert.match(source, /如果尚未登录，请打开 WorkBuddy 完成登录后重试/)
+  assert.match(source, /如果尚未登录，请打开 \$\{productName\} 完成登录后重试/)
 })
 
 test('WorkBuddy pending bindings can be loaded and listed without exposing secrets', () => {

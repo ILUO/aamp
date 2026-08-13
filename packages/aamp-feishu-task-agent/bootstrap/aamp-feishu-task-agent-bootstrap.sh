@@ -62,6 +62,7 @@ AAMP_TRAECODE_READINESS_HELPER="${AAMP_TRAECODE_READINESS_HELPER:-}"
 AAMP_TRAECODE_UPDATE_TTY="${AAMP_TRAECODE_UPDATE_TTY:-/dev/tty}"
 TRAEX_INSTALLER_URL="${TRAEX_INSTALLER_URL:-https://code.byted.org/api/tos-proxy/download/traex_install.sh}"
 WORKBUDDY_APP_CLI="/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
+WORKBUDDY_AI_APP_CLI="/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
 LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
 LARK_CLI_MIN_VERSION="${LARK_CLI_MIN_VERSION:-1.0.64}"
 FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-im:message,im:message:send_as_bot,im:message:readonly,im:resource,cardkit:card:write,task:task,task:comment,task:task:readonly,task:comment:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly,search:docs:read,base:app:copy,base:app:create,base:app:read,base:app:update,base:block:create,base:block:delete,base:block:read,base:block:update,base:dashboard:create,base:dashboard:delete,base:dashboard:read,base:dashboard:update,base:field:create,base:field:delete,base:field:read,base:field:update,base:form:create,base:form:delete,base:form:read,base:form:update,base:history:read,base:record:create,base:record:delete,base:record:read,base:record:update,base:role:create,base:role:delete,base:role:read,base:role:update,base:table:create,base:table:delete,base:table:read,base:table:update,base:view:read,base:view:write_only,base:workflow:create,base:workflow:read,base:workflow:update,board:whiteboard:node:create,board:whiteboard:node:read,calendar:calendar.event:create,calendar:calendar.event:delete,calendar:calendar.event:read,calendar:calendar.event:reply,calendar:calendar.event:update,calendar:calendar.free_busy:read,calendar:calendar:create,calendar:calendar:delete,calendar:calendar:read,calendar:calendar:update,contact:user.base:readonly,contact:user.basic_profile:readonly,docs:document.media:download,docs:document.media:upload,docs:document:export,docs:document:import,docx:document:create,docx:document:readonly,docx:document:write_only,drive:drive.metadata:readonly,drive:file:download,drive:file:upload,im:chat.managers:write_only,im:chat.members:read,im:chat.members:write_only,im:chat.moderation:read,im:chat:moderation:write_only,im:message.pins:read,im:message.pins:write_only,im:message.reactions:read,im:message.reactions:write_only,im:message:recall,mail:user_mailbox.event.mail_address:read,mail:user_mailbox.mail_contact:read,mail:user_mailbox.message.address:read,mail:user_mailbox.message.body:read,mail:user_mailbox.message.subject:read,mindnote:node:create,mindnote:node:read,minutes:minutes.basic:read,minutes:minutes.media:export,minutes:minutes:readonly,sheets:spreadsheet.meta:read,sheets:spreadsheet.meta:write_only,sheets:spreadsheet:create,sheets:spreadsheet:read,sheets:spreadsheet:write_only,slides:presentation:create,slides:presentation:read,slides:presentation:update,slides:presentation:write_only,task:custom_field:read,task:custom_field:write,task:section:read,task:section:write,vc:meeting.bot.join:write,vc:meeting.meetingevent:read,vc:meeting.message:write,vc:record:readonly,wiki:member:create,wiki:member:retrieve,wiki:member:update,wiki:node:copy,wiki:node:create,wiki:node:move,wiki:node:read,wiki:node:retrieve,wiki:space:read,wiki:space:retrieve,wiki:space:write_only}"
@@ -146,7 +147,7 @@ Running the standalone one-click script without a subcommand is the same as
 "feishu-task-agent install".
 
 Options:
-  --agent codex|cursor|coco|traex|traecli|workbuddy
+  --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai
                                Use this Agent for every new binding in the command.
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
@@ -1195,8 +1196,8 @@ npm_install_register_helper() {
 
 validate_agent_name() {
   case "$1" in
-    codex|cursor|coco|traex|traecli|workbuddy) ;;
-    *) agent_fail "--agent must be codex, cursor, coco, traex, traecli, or workbuddy" ;;
+    codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai) ;;
+    *) agent_fail "--agent must be codex, cursor, coco, traex, traecli, workbuddy, or workbuddy_ai" ;;
   esac
 }
 
@@ -1235,6 +1236,9 @@ agent_cli_detected() {
     workbuddy)
       find_workbuddy_cli >/dev/null 2>&1
       ;;
+    workbuddy_ai)
+      find_workbuddy_ai_cli >/dev/null 2>&1
+      ;;
     *)
       return 1
       ;;
@@ -1259,9 +1263,12 @@ discover_interactive_agents() {
   if agent_cli_detected workbuddy; then
     DETECTED_AGENTS+=("workbuddy")
   fi
+  if agent_cli_detected workbuddy_ai; then
+    DETECTED_AGENTS+=("workbuddy_ai")
+  fi
 
   if [ "${#DETECTED_AGENTS[@]}" -eq 0 ]; then
-    agent_fail "暂未检测到本地智能体。请先安装 Codex、Cursor、Trae CLI 或 WorkBuddy 后重试。"
+    agent_fail "暂未检测到本地智能体。请先安装 Codex、Cursor、Trae CLI、WorkBuddy 或 WorkBuddy AI 后重试。"
   fi
 }
 
@@ -1296,7 +1303,7 @@ select_agent_interactively() {
   discover_interactive_agents
 
   if ! exec 3<>/dev/tty; then
-    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|coco|traex|traecli|workbuddy"
+    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai"
   fi
 
   tty_state="$(stty -g <&3)"
@@ -2869,6 +2876,12 @@ find_workbuddy_cli() {
   printf '%s\n' "$WORKBUDDY_APP_CLI"
 }
 
+find_workbuddy_ai_cli() {
+  is_macos || return 1
+  [ -x "$WORKBUDDY_AI_APP_CLI" ] || return 1
+  printf '%s\n' "$WORKBUDDY_AI_APP_CLI"
+}
+
 resolve_cursor_cli_for_acp() {
   command -v cursor
 }
@@ -2938,6 +2951,13 @@ ensure_agent_cli() {
     is_macos || agent_fail "WorkBuddy 一键探测仅支持 macOS。"
     find_workbuddy_cli >/dev/null 2>&1 \
       || agent_fail "未检测到 WorkBuddy。请确认已安装到 /Applications/WorkBuddy.app 后重新运行脚本。"
+    return 0
+  fi
+
+  if [ "$AGENT" = "workbuddy_ai" ]; then
+    is_macos || agent_fail "WorkBuddy AI 一键探测仅支持 macOS。"
+    find_workbuddy_ai_cli >/dev/null 2>&1 \
+      || agent_fail "未检测到 WorkBuddy AI CLI：${WORKBUDDY_AI_APP_CLI}。请确认该文件存在且可执行后重新运行脚本。"
     return 0
   fi
 
@@ -3910,6 +3930,9 @@ ensure_agent_login() {
     workbuddy)
       agent_detail "WorkBuddy authentication is managed by the desktop app"
       ;;
+    workbuddy_ai)
+      agent_detail "WorkBuddy AI authentication is managed by the desktop app"
+      ;;
     codem)
       ensure_codem_local_bin_on_path
       codem --version >/dev/null
@@ -4007,6 +4030,17 @@ build_acp_agent_command() {
       || agent_fail "WorkBuddy 不可用。请确认已安装到 /Applications/WorkBuddy.app。"
     ACP_AGENT_COMMAND="$workbuddy_bin --acp"
     agent_detail "using native WorkBuddy ACP command: $ACP_AGENT_COMMAND"
+    return 0
+  fi
+
+  if [ "$AGENT" = "workbuddy_ai" ]; then
+    local workbuddy_ai_bin workbuddy_ai_word
+    workbuddy_ai_bin="$(find_workbuddy_ai_cli)" \
+      || agent_fail "WorkBuddy AI CLI 不可用：${WORKBUDDY_AI_APP_CLI}。请确认该文件存在且可执行。"
+    workbuddy_ai_word="$(acp_command_word "$workbuddy_ai_bin")" \
+      || agent_fail "WorkBuddy AI 路径包含不受支持的换行符。"
+    ACP_AGENT_COMMAND="$workbuddy_ai_word --acp"
+    agent_detail "using native WorkBuddy AI ACP command: $ACP_AGENT_COMMAND"
     return 0
   fi
 
@@ -4257,6 +4291,9 @@ run_internal_discover_agents() {
   fi
   if agent_cli_detected workbuddy; then
     agents+=("workbuddy")
+  fi
+  if agent_cli_detected workbuddy_ai; then
+    agents+=("workbuddy_ai")
   fi
   local joined=""
   if [ "${#agents[@]}" -gt 0 ]; then

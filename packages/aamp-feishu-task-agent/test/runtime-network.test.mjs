@@ -232,7 +232,10 @@ test('single-agent startup preserves the actionable agent.failed message', () =>
 
   assert.match(controller, /preserveAgentStartFailure\(error, process\.events\)/)
   assert.match(controller, /agentStartFailureMessage\(\s*error\?\.agentStartEvents \|\| group\.process\?\.events,/)
-  assert.match(controller, /WorkBuddy \(\?:is not logged in\|login expired\)/)
+  assert.match(controller, /agentType === 'workbuddy_ai'/)
+  assert.match(controller, /打开 \$\{productName\} 完成登录后重试/)
+  assert.match(controller, /text\.startsWith\(`\$\{productName\} is not logged in\.`\)/)
+  assert.match(controller, /text\.startsWith\(`\$\{productName\} login expired\.`\)/)
 })
 
 test('endpoint probe records DNS, proxy presence, HTTP status, and retries', async () => {

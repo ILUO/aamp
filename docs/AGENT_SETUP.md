@@ -46,13 +46,14 @@ Use this order:
 | `traex` (Trae CLI Next（内部版）) | `aamp-acp-bridge` with native `traex acp serve` | explicit custom ACP command |
 | `traecli` (TraeCode CLI) | `aamp-acp-bridge` with native `traecli acp serve` | no CLI Bridge fallback |
 | `workbuddy` | `aamp-acp-bridge` | `aamp-acp-bridge` with explicit `acpCommand` |
+| `workbuddy_ai` | `aamp-acp-bridge` | `aamp-acp-bridge` with explicit `acpCommand` |
 | `openclaw` | `aamp-openclaw-plugin` | `aamp-acp-bridge`, then `aamp-cli-bridge` |
 | known ACP-compatible agent | `aamp-acp-bridge` | `aamp-cli-bridge` |
 | custom ACP-compatible agent | `aamp-acp-bridge` with explicit `acpCommand` | `aamp-cli-bridge` |
 | CLI-callable agent | `aamp-cli-bridge` with a built-in or custom profile | ask for the command/profile details |
 
-Prefer `aamp-acp-bridge` for Codex, Claude, and WorkBuddy because it preserves richer ACP
-task events. Use `aamp-cli-bridge` when the agent is only available as a direct
+Prefer `aamp-acp-bridge` for Codex, Claude, WorkBuddy, and WorkBuddy AI because
+it preserves richer ACP task events. Use `aamp-cli-bridge` when the agent is only available as a direct
 CLI command, or when the installed/published ACP bridge does not expose the
 JSON automation commands used below.
 

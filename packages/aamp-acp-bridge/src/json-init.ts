@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import { z } from 'zod'
-import type { AgentConfig, BridgeConfig, SenderPolicy } from './config.js'
+import { defaultAgentSlug, type AgentConfig, type BridgeConfig, type SenderPolicy } from './config.js'
 import { defaultAcpCommand } from './agent-resolver.js'
 import { createPairingCode, defaultPairingFile, defaultSenderPoliciesFile, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
 import { getDefaultCredentialsPath, resolveCredentialsFile } from './storage.js'
@@ -109,7 +109,7 @@ export async function runJsonInit(configPath: string, rawInput: unknown) {
       ?? defaultSenderPoliciesFile(requestedAgent.name)
     const slug = requestedAgent.slug
       ?? previousAgent?.slug
-      ?? `${requestedAgent.name}-bridge`
+      ?? defaultAgentSlug(requestedAgent.name)
     const description = requestedAgent.description
       ?? previousAgent?.description
       ?? `${requestedAgent.name} via ACP bridge`

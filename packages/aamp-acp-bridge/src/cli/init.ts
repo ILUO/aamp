@@ -3,7 +3,7 @@ import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import * as qrcode from 'qrcode-terminal'
-import type { AgentConfig, BridgeConfig, SenderPolicy } from '../config.js'
+import { defaultAgentSlug, type AgentConfig, type BridgeConfig, type SenderPolicy } from '../config.js'
 import {
   KNOWN_AGENTS,
   defaultAcpCommand,
@@ -596,7 +596,7 @@ export async function runInit(configPath: string, opts: RunInitOptions = {}): Pr
   const previousSenderPolicies = loadPreviousSenderPolicies(configPath)
 
   for (const name of selected) {
-    const slug = `${name}-bridge`
+    const slug = defaultAgentSlug(name)
     const acpCommand = resolveInitAcpCommand(configPath, name)
     const credFile = getDefaultCredentialsPath(name)
     const pairingFile = defaultPairingFile(name)

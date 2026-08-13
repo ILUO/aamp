@@ -27,8 +27,9 @@ command without arguments shows help. Running the standalone Bootstrap without
 arguments is equivalent to `install`.
 
 The supported canonical agent names are `codex`, `cursor`, `coco`, `traex`,
-`traecli`, and `workbuddy`. `--agent codex|cursor|coco|traex|traecli|workbuddy`
-fixes the Agent for every new binding in that command instead of prompting.
+`traecli`, `workbuddy`, and `workbuddy_ai`.
+`--agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai` fixes the Agent
+for every new binding in that command instead of prompting.
 Selection menus, saved bindings, and startup output display these canonical
 `agent_type` values verbatim. The removed `trae` value is not accepted as a
 command-line alias or stored binding type; affected bindings must be created
@@ -70,6 +71,14 @@ It does not run a WorkBuddy login command. Open WorkBuddy and complete login
 before starting a binding. Startup verifies login by creating and immediately
 closing a temporary ACP session without sending a model prompt. Nonstandard
 paths and non-macOS installations are not auto-detected.
+
+`workbuddy_ai` is the international WorkBuddy AI application. It is detected
+only at
+`/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy`.
+Its persisted and displayed Agent type remains the literal `workbuddy_ai`.
+When both WorkBuddy applications are installed, `workbuddy` and
+`workbuddy_ai` are offered independently. The Task Agent does not run a login
+command for either product; complete login in the selected desktop app.
 
 ## Commands
 

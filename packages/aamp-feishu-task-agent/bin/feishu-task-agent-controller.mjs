@@ -70,7 +70,7 @@ const NETWORK_PROBE_TIMEOUT_MS = Math.max(1_000, Number(process.env.AAMP_TASK_NE
 const FEISHU_START_CONCURRENCY = 4;
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
-const AGENT_TYPES = ['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy'];
+const AGENT_TYPES = ['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai'];
 const PROFILE_DOMAINS = [
   'base', 'calendar', 'contact', 'docs', 'im', 'mail', 'mindnotes', 'minutes',
   'note', 'sheets', 'slides', 'task', 'vc', 'wiki',
@@ -498,7 +498,9 @@ function validateBinding(binding, index) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(binding.binding_id)) {
     throw new Error(`bindings[${index}].binding_id 必须是 UUID`);
   }
-  if (!AGENT_TYPES.includes(binding.agent_type)) throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor/coco/traex/traecli/workbuddy`);
+  if (!AGENT_TYPES.includes(binding.agent_type)) {
+    throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor/coco/traex/traecli/workbuddy/workbuddy_ai`);
+  }
   assertString(binding.aamp_host, `bindings[${index}].aamp_host`);
   assertString(binding.environment?.name, `bindings[${index}].environment.name`);
   assertString(binding.bot?.app_id, `bindings[${index}].bot.app_id`);
@@ -684,9 +686,15 @@ function agentFailureMessage(agentType, message) {
   if (agentType === 'traecli') {
     return `${text}\n请执行 'traecli doctor --json' 检查 TraeCode CLI，修复后重试。`;
   }
-  if (agentType !== 'workbuddy') return text;
-  if (/^WorkBuddy (?:is not logged in|login expired)\./i.test(text)) return text;
-  return `${text}\n如果尚未登录，请打开 WorkBuddy 完成登录后重试。`;
+  const productName = agentType === 'workbuddy'
+    ? 'WorkBuddy'
+    : agentType === 'workbuddy_ai'
+      ? 'WorkBuddy AI'
+      : '';
+  if (!productName) return text;
+  if (text.startsWith(`${productName} is not logged in.`)
+    || text.startsWith(`${productName} login expired.`)) return text;
+  return `${text}\n如果尚未登录，请打开 ${productName} 完成登录后重试。`;
 }
 
 function resolvePreparedAgentBindings(bindings, host, requestedAgentType, preparedAgentType) {
@@ -2603,7 +2611,9 @@ function displayBindings(bindings) {
 async function discoverAgents() {
   const result = await runBootstrapHelper('__discover-agents', '');
   const agents = (result.agents || []).filter((agent) => AGENT_TYPES.includes(agent));
-  if (!agents.length) throw new Error('暂未检测到本地智能体。请先安装 Codex、Cursor、Trae CLI、TraeCode CLI 或 WorkBuddy 后重试。');
+  if (!agents.length) {
+    throw new Error('暂未检测到本地智能体。请先安装 Codex、Cursor、Trae CLI、TraeCode CLI、WorkBuddy 或 WorkBuddy AI 后重试。');
+  }
   return agents;
 }
 

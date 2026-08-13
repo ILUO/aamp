@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { loadConfig } from '../src/config.js'
+import { defaultAgentSlug, loadConfig } from '../src/config.js'
 
 function configWithCommand(acpCommand: string) {
   return {
@@ -38,4 +38,17 @@ test('bridge config preserves a quoted multi-token ACP command verbatim', () => 
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('default Agent slugs are schema-safe without changing canonical names', () => {
+  assert.equal(defaultAgentSlug('workbuddy_ai'), 'workbuddy-ai-bridge')
+  assert.equal(defaultAgentSlug('traex'), 'traex-bridge')
+  assert.equal(defaultAgentSlug('My_Custom Agent'), 'my-custom-agent-bridge')
+})
+
+test('default Agent slug rejects names without ASCII alphanumeric content', () => {
+  assert.throws(
+    () => defaultAgentSlug('___ --- 你好'),
+    /Cannot derive a valid default Agent slug/,
+  )
 })

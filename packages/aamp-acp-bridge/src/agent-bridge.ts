@@ -15,7 +15,7 @@ import {
   type AcpToolUpdate,
 } from './acpx-client.js'
 import { buildPrompt, parseResponse, type ResultAttachmentRef } from './prompt-builder.js'
-import type { AgentConfig } from './config.js'
+import { defaultAgentSlug, type AgentConfig } from './config.js'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -157,25 +157,34 @@ export interface AgentBridgeStartOptions {
   debug?: boolean
 }
 
+function workbuddyProductName(agentName: string): string | undefined {
+  const normalized = agentName.trim().toLowerCase()
+  if (normalized === 'workbuddy') return 'WorkBuddy'
+  if (normalized === 'workbuddy_ai') return 'WorkBuddy AI'
+  return undefined
+}
+
 export function requiresStartupReadinessProbe(agent: Pick<AgentConfig, 'name'>): boolean {
-  return agent.name.trim().toLowerCase() === 'workbuddy'
+  return workbuddyProductName(agent.name) !== undefined
 }
 
 export function formatAgentReadinessError(agentName: string, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  if (agentName.trim().toLowerCase() === 'workbuddy') {
+  const productName = workbuddyProductName(agentName)
+  if (productName) {
     if (ACP_AUTH_FAILURE_PATTERN.test(message)) {
-      return 'WorkBuddy is not logged in. Open WorkBuddy and sign in, then retry.'
+      return `${productName} is not logged in. Open ${productName} and sign in, then retry.`
     }
-    return `WorkBuddy ACP readiness check failed: ${message}`
+    return `${productName} ACP readiness check failed: ${message}`
   }
   return message
 }
 
 export function formatTaskAgentError(agentName: string, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  if (agentName.trim().toLowerCase() === 'workbuddy' && ACP_AUTH_FAILURE_PATTERN.test(message)) {
-    return 'WorkBuddy login expired. Open WorkBuddy and sign in, then retry the task.'
+  const productName = workbuddyProductName(agentName)
+  if (productName && ACP_AUTH_FAILURE_PATTERN.test(message)) {
+    return `${productName} login expired. Open ${productName} and sign in, then retry the task.`
   }
   return message
 }
@@ -1447,7 +1456,7 @@ export class AgentBridge {
 
   private async registerIdentity(credFile: string): Promise<AgentIdentity> {
     // Self-register
-    const slug = this.agentConfig.slug ?? `${this.agentConfig.name}-bridge`
+    const slug = this.agentConfig.slug ?? defaultAgentSlug(this.agentConfig.name)
     const description = this.agentConfig.description ?? `${this.agentConfig.name} via ACP bridge`
 
     const creds = await AampClient.registerMailbox({

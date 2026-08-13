@@ -76,8 +76,9 @@ test('stripAampInternalDispatchContext removes session compatibility field witho
   })
 })
 
-test('only WorkBuddy requires the startup ACP readiness probe', () => {
+test('both WorkBuddy products require the startup ACP readiness probe', () => {
   assert.equal(requiresStartupReadinessProbe({ name: 'workbuddy' }), true)
+  assert.equal(requiresStartupReadinessProbe({ name: 'workbuddy_ai' }), true)
   assert.equal(requiresStartupReadinessProbe({ name: 'traex' }), false)
   assert.equal(requiresStartupReadinessProbe({ name: 'codex' }), false)
 })
@@ -92,6 +93,22 @@ test('WorkBuddy authentication failures have actionable startup and task message
   assert.equal(
     formatTaskAgentError('workbuddy', failure),
     'WorkBuddy login expired. Open WorkBuddy and sign in, then retry the task.',
+  )
+})
+
+test('WorkBuddy AI authentication failures name the international app', () => {
+  const failure = new Error('acpx failed (1): stderr: Authentication required')
+  assert.equal(
+    formatAgentReadinessError('workbuddy_ai', failure),
+    'WorkBuddy AI is not logged in. Open WorkBuddy AI and sign in, then retry.',
+  )
+  assert.equal(
+    formatTaskAgentError('workbuddy_ai', failure),
+    'WorkBuddy AI login expired. Open WorkBuddy AI and sign in, then retry the task.',
+  )
+  assert.equal(
+    formatAgentReadinessError('workbuddy_ai', new Error('ACP readiness probe timed out after 15000ms')),
+    'WorkBuddy AI ACP readiness check failed: ACP readiness probe timed out after 15000ms',
   )
 })
 

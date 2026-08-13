@@ -37,6 +37,18 @@ export type SenderPolicy = z.infer<typeof senderPolicySchema>
 export type AgentConfig = z.infer<typeof agentConfigSchema>
 export type BridgeConfig = z.infer<typeof bridgeConfigSchema>
 
+export function defaultAgentSlug(agentName: string): string {
+  const normalizedName = agentName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  if (!normalizedName) {
+    throw new Error(`Cannot derive a valid default Agent slug from name: ${JSON.stringify(agentName)}`)
+  }
+  return `${normalizedName}-bridge`
+}
+
 function normalizeSenderPolicies(
   senderPolicies: SenderPolicy[] | undefined,
   senderWhitelist: string[] | undefined,

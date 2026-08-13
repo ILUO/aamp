@@ -122,7 +122,7 @@ test('CLI doctor rejects unsupported exits and oversized output safely', () => {
   writeFileSync(unsupported, '#!/bin/sh\nprintf "{}"\nexit 9\n')
   chmodSync(unsupported, 0o755)
   assert.equal(
-    spawnSync(process.execPath, [helper, 'doctor', unsupported, '2']).status,
+    spawnSync(process.execPath, [helper, 'doctor', unsupported, '10']).status,
     70,
   )
 
@@ -130,7 +130,7 @@ test('CLI doctor rejects unsupported exits and oversized output safely', () => {
   writeFileSync(noisy, `#!${process.execPath}\nprocess.stdout.write('x'.repeat(2 * 1024 * 1024))\n`)
   chmodSync(noisy, 0o755)
   assert.equal(
-    spawnSync(process.execPath, [helper, 'doctor', noisy, '2'], { timeout: 5_000 }).status,
+    spawnSync(process.execPath, [helper, 'doctor', noisy, '10'], { timeout: 5_000 }).status,
     70,
   )
 
@@ -156,7 +156,7 @@ process.stderr.write(JSON.stringify({ error: '/Users/test/private-error' }))
 process.exit(9)
 `)
   chmodSync(unsupported, 0o755)
-  const result = spawnSync(process.execPath, [helper, 'doctor', unsupported, '2'], {
+  const result = spawnSync(process.execPath, [helper, 'doctor', unsupported, '10'], {
     encoding: 'utf8',
     env: { ...process.env, HOME: '/Users/test' },
   })
