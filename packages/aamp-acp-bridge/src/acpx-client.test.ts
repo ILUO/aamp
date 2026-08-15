@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { AcpxClient } from './acpx-client.js'
 
 const tempDirectories: string[] = []
+const testDirectory = dirname(fileURLToPath(import.meta.url))
 
 afterEach(() => {
   for (const directory of tempDirectories.splice(0)) {
@@ -76,6 +78,103 @@ exit 0
   chmodSync(join(binDirectory, 'acpx'), 0o755)
   return { cwd, logFile }
 }
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function waitForState(statePath: string, state: string): Promise<number> {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    if (existsSync(statePath)) {
+      const record = readFileSync(statePath, 'utf8')
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { pid?: unknown; state?: unknown })
+        .find((entry) => entry.state === state)
+      if (record && Number.isSafeInteger(record.pid) && (record.pid as number) > 1) {
+        return record.pid as number
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`timed out waiting for child state ${state}`)
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline && processExists(pid)) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  if (processExists(pid)) throw new Error('owned fixture process did not exit')
+}
+
+function createTermResistantAcpx(): { cwd: string; statePath: string } {
+  const cwd = mkdtempSync(join(tmpdir(), 'aamp-acpx-stop-test-'))
+  tempDirectories.push(cwd)
+  const binDirectory = join(cwd, 'node_modules', '.bin')
+  const statePath = join(cwd, 'child-state.jsonl')
+  const fixturePath = join(testDirectory, '..', 'test', 'acpx-stop-ignore-term-child.mjs')
+  mkdirSync(binDirectory, { recursive: true })
+  writeFileSync(join(binDirectory, 'acpx'), [
+    '#!/bin/sh',
+    `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} ${shellQuote(statePath)}`,
+    '',
+  ].join('\n'))
+  chmodSync(join(binDirectory, 'acpx'), 0o755)
+  return { cwd, statePath }
+}
+
+test('stop waits for a TERM-resistant owned child to close after SIGKILL', { timeout: 10_000 }, async () => {
+  const { cwd, statePath } = createTermResistantAcpx()
+  const client = new AcpxClient(cwd)
+  const execution = client.ensureSession('fake-agent --acp', 'stop-owned-child')
+  const executionOutcome = execution.then(
+    () => ({ kind: 'fulfilled' as const }),
+    () => ({ kind: 'rejected' as const }),
+  )
+  let pid = 0
+
+  try {
+    pid = await waitForState(statePath, 'ready')
+    let stopSettled = false
+    const stopping = Promise.resolve(client.stop()).finally(() => {
+      stopSettled = true
+    })
+    await waitForState(statePath, 'sigterm-ignored')
+
+    assert.equal(stopSettled, false, 'stop must retain ownership until child close')
+    assert.equal(processExists(pid), true, 'TERM-resistant fixture must still be alive before KILL')
+    await stopping
+    assert.equal(processExists(pid), false, 'stop must settle only after the owned PID is gone')
+    assert.equal((await executionOutcome).kind, 'rejected')
+  } finally {
+    if (pid > 1 && processExists(pid)) {
+      try { process.kill(-pid, 'SIGKILL') } catch {
+        try { process.kill(pid, 'SIGKILL') } catch { /* exact owned fixture cleanup */ }
+      }
+      await waitForProcessExit(pid)
+    }
+    await executionOutcome
+  }
+})
+
+test('stop is safe after a child has already closed normally', async () => {
+  const { cwd } = createFakeAcpx('success')
+  const client = new AcpxClient(cwd)
+
+  await client.ensureSession('fake-agent --acp', 'normally-closed-child')
+  await Promise.resolve(client.stop())
+})
 
 test('probeAgent creates a fresh ACP session and closes it after success', async () => {
   const { cwd, logFile } = createFakeAcpx('success')

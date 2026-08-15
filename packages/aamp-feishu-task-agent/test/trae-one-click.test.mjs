@@ -243,9 +243,9 @@ test('controller normalizes only new Coco bindings to the prepared traex type', 
   const source = readFileSync(controller, 'utf8')
   const helper = functionRange(source, 'function resolvePreparedAgentBindings(', 'function printBindingStarted(')
   const helpers = new Function(
-    'AGENT_TYPES',
+    'TASK_AGENT_TYPES',
     `${helper}\nreturn { resolvePreparedAgentBindings, commitPreparedAgentBindings };`,
-  )(['codex', 'cursor', 'coco', 'traex'])
+  )(['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai', 'aime'])
   const host = 'https://meshmail.ai'
   const pending = [{ agent_type: 'coco', aamp_host: host, state: 'pending' }]
   const ready = [{ agent_type: 'coco', aamp_host: host, state: 'ready', agent_target_email: 'coco@example.com' }]

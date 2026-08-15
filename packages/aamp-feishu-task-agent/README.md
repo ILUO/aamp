@@ -27,8 +27,8 @@ command without arguments shows help. Running the standalone Bootstrap without
 arguments is equivalent to `install`.
 
 The supported canonical agent names are `codex`, `cursor`, `coco`, `traex`,
-`traecli`, `workbuddy`, and `workbuddy_ai`.
-`--agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai` fixes the Agent
+`traecli`, `workbuddy`, `workbuddy_ai`, and `aime`.
+`--agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|aime` fixes the Agent
 for every new binding in that command instead of prompting.
 Selection menus, saved bindings, and startup output display these canonical
 `agent_type` values verbatim. The removed `trae` value is not accepted as a
@@ -79,6 +79,25 @@ Its persisted and displayed Agent type remains the literal `workbuddy_ai`.
 When both WorkBuddy applications are installed, `workbuddy` and
 `workbuddy_ai` are offered independently. The Task Agent does not run a login
 command for either product; complete login in the selected desktop app.
+
+`aime` is the ByteDance-internal remote AIME Agent. It is offered only when a
+short `ping aime.bytedance.net` probe succeeds; an explicit `--agent aime`
+selection uses the same gate before any AIME install or login. The launcher
+installs the exact `aime-acp@0.1.0` package from `https://bnpm.byted.org` into
+the isolated npm prefix, then runs its absolute binary with `--site cn`.
+Readiness is authoritative only after `auth status`/`auth login` and
+`doctor --site cn --json` succeed; ping is only the one-click visibility gate.
+The generated bridge config rejects attachments and limits AIME task dispatch
+to one task at a time because AIME is remote and does not use the local
+workspace. All other Agents default to local execution; AIME is explicitly
+configured as remote. It reads requested Feishu/Lark data with its own
+remote-native capabilities and identity, without a local `lark-cli` profile or
+user OAuth. The local Feishu Bridge still uses Bot App credentials and is the
+only writer of the current Task's comment, status, and delivery. Remote
+attachments and local file delivery are unsupported; use text or HTTP(S) links.
+`aamp-feishu-task-bridge` is deprecated and is not an AIME implementation
+target. AIME `auth`/`doctor` success proves adapter readiness only, not access
+to a particular Feishu group.
 
 ## Commands
 

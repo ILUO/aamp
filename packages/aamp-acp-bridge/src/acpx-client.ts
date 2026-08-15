@@ -309,7 +309,8 @@ function throwIfAuthenticationFailure(...values: unknown[]): void {
  */
 export class AcpxClient {
   private cwd: string
-  private activeProcesses = new Set<ChildProcessWithoutNullStreams>()
+  private activeProcesses = new Map<ChildProcessWithoutNullStreams, Promise<void>>()
+  private stopInFlight: Promise<void> | undefined
 
   constructor(cwd?: string) {
     this.cwd = cwd ?? process.cwd()
@@ -415,19 +416,30 @@ export class AcpxClient {
     }
 
     const attach = (proc: ChildProcessWithoutNullStreams) => {
+      let resolveClosed!: () => void
+      const closed = new Promise<void>((resolve) => { resolveClosed = resolve })
+      let closeObserved = false
+      let processErrored = false
       ownedProcesses.add(proc)
-      this.activeProcesses.add(proc)
+      this.activeProcesses.set(proc, closed)
       const forgetProcess = () => {
+        if (closeObserved) return
+        closeObserved = true
         const forcedKillTimer = forcedKillTimers.get(proc)
         if (forcedKillTimer) clearTimeout(forcedKillTimer)
         forcedKillTimers.delete(proc)
         ownedProcesses.delete(proc)
         this.activeProcesses.delete(proc)
+        resolveClosed()
       }
       proc.stdout.on('data', (chunk: Buffer) => handlers.onStdout?.(chunk))
       proc.stderr.on('data', (chunk: Buffer) => handlers.onStderr?.(chunk))
       proc.on('close', (code) => {
         forgetProcess()
+        if (processErrored) {
+          resolveExitedIfComplete()
+          return
+        }
         if (settled) {
           resolveExitedIfComplete()
           return
@@ -437,7 +449,8 @@ export class AcpxClient {
         resolveExitedIfComplete()
       })
       proc.on('error', (err) => {
-        forgetProcess()
+        processErrored = true
+        if (!proc.pid) forgetProcess()
         if (!cancelled && !startedFallback && this.isSpawnNotFoundError(err)) {
           startedFallback = true
           attach(this.spawnNpxAcpx(args))
@@ -477,11 +490,49 @@ export class AcpxClient {
     }
   }
 
-  stop(): void {
-    for (const proc of [...this.activeProcesses]) {
-      this.terminateProcessTree(proc)
+  stop(): Promise<void> {
+    if (this.stopInFlight) return this.stopInFlight
+    let retained!: Promise<void>
+    retained = this.stopActiveProcesses().finally(() => {
+      if (this.stopInFlight === retained) this.stopInFlight = undefined
+    })
+    this.stopInFlight = retained
+    return retained
+  }
+
+  private async stopActiveProcesses(): Promise<void> {
+    for (const proc of this.activeProcesses.keys()) {
+      this.terminateProcessTree(proc, 'SIGTERM')
     }
-    this.activeProcesses.clear()
+    if (await this.waitForActiveProcessesToClose(1_000)) return
+
+    for (const proc of this.activeProcesses.keys()) {
+      this.terminateProcessTree(proc, 'SIGKILL')
+    }
+    if (!(await this.waitForActiveProcessesToClose(1_000))) {
+      throw new Error('acpx child process did not close after SIGKILL')
+    }
+  }
+
+  private async waitForActiveProcessesToClose(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (this.activeProcesses.size > 0) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const closed = await Promise.race([
+          Promise.all([...this.activeProcesses.values()]).then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), remaining)
+          }),
+        ])
+        if (!closed) return false
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+    }
+    return true
   }
 
   private terminateProcessTree(

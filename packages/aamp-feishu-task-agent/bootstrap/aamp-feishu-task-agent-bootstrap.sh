@@ -7,6 +7,9 @@ APP_ID=""
 APP_SECRET=""
 BOT_NAME=""
 LARK_CLI_PROFILE=""
+AGENT_EXECUTION_LOCATION=""
+AGENT_ATTACHMENT_POLICY=""
+AGENT_TASK_DISPATCH_CONCURRENCY=""
 AAMP_HOST="https://meshmail.ai"
 DEBUG_MODE="false"
 AAMP_TASK_START_MODE="install"
@@ -15,6 +18,7 @@ AAMP_TASK_ENTRY="${AAMP_TASK_ENTRY:-}"
 AAMP_TASK_INTERNAL="${AAMP_TASK_INTERNAL:-false}"
 AAMP_TASK_INTERNAL_RESULT_FD="${AAMP_TASK_INTERNAL_RESULT_FD:-3}"
 AAMP_TASK_INTERNAL_INPUT_FD="${AAMP_TASK_INTERNAL_INPUT_FD:-4}"
+AAMP_TASK_INTERNAL_EXECUTION_LOCATION="${AAMP_TASK_INTERNAL_EXECUTION_LOCATION:-}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
@@ -73,6 +77,8 @@ FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs
 FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.21}"
+AIME_ACP_PKG="${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.0-dev.7}"
+AIME_ACP_REGISTRY="${AIME_ACP_REGISTRY:-https://bnpm.byted.org}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
@@ -131,6 +137,13 @@ sanitize_inherited_npm_exec_env() {
   done < <(env)
 }
 
+remote_internal_helper() {
+  [ "$AAMP_TASK_INTERNAL" = "true" ] && {
+    [ "$AAMP_TASK_INTERNAL_EXECUTION_LOCATION" = "remote" ] \
+      || [ "$AGENT_EXECUTION_LOCATION" = "remote" ]
+  }
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -147,7 +160,7 @@ Running the standalone one-click script without a subcommand is the same as
 "feishu-task-agent install".
 
 Options:
-  --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai
+  --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|aime
                                Use this Agent for every new binding in the command.
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
@@ -163,6 +176,9 @@ USAGE
 
 write_one_click_log() {
   local line="$1"
+  if remote_internal_helper; then
+    line="[aamp-one-click] REMOTE_HELPER_OUTPUT_REDACTED"
+  fi
   if [ -n "$ONE_CLICK_LOG" ]; then
     printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$line" >>"$ONE_CLICK_LOG" 2>/dev/null || true
   fi
@@ -170,14 +186,22 @@ write_one_click_log() {
 
 agent_log() {
   local line
-  line="[aamp-one-click] $*"
+  if remote_internal_helper; then
+    line="[aamp-one-click] Remote Agent preparation in progress."
+  else
+    line="[aamp-one-click] $*"
+  fi
   printf '%s\n' "$line"
   write_one_click_log "$line"
 }
 
 agent_detail() {
   local line
-  line="[aamp-one-click] $*"
+  if remote_internal_helper; then
+    line="[aamp-one-click] Remote Agent preparation detail redacted."
+  else
+    line="[aamp-one-click] $*"
+  fi
   write_one_click_log "$line"
   if [ "$AAMP_ONE_CLICK_VERBOSE" = "true" ]; then
     printf '%s\n' "$line"
@@ -222,6 +246,9 @@ agent_success() {
 agent_fail() {
   local reason="$*"
   local line
+  if remote_internal_helper; then
+    reason="REMOTE_AGENT_PREPARATION_FAILED: Remote Agent preparation failed. Check local redacted diagnostics."
+  fi
   line="[aamp-one-click] ERROR: $reason"
   write_one_click_log "$line"
   if [ -n "$ERRORS_LOG" ]; then
@@ -847,12 +874,16 @@ ensure_task_agent_global_install() {
 
 short_command_is_current() {
   local target="$1"
+  local source_file="${2:-}"
   local installed_name installed_version
   [ -x "$target" ] || return 1
   installed_name="$(script_file_task_agent_name "$target" || true)"
   installed_version="$(script_file_task_agent_version "$target" || true)"
   [ "$installed_name" = "$AAMP_TASK_AGENT_NAME" ] || return 1
-  [ "$installed_version" = "$AAMP_TASK_AGENT_VERSION" ]
+  [ "$installed_version" = "$AAMP_TASK_AGENT_VERSION" ] || return 1
+  if [ -n "$source_file" ] && [ -r "$source_file" ]; then
+    cmp -s "$source_file" "$target"
+  fi
 }
 
 write_task_update_cache() {
@@ -930,13 +961,13 @@ install_short_command_current() {
   local target="$1"
   local source_file="${BASH_SOURCE[0]:-}"
   local tmp="${target}.tmp.$$"
-  if short_command_is_current "$target"; then
-    agent_detail "short command already current: $target"
-    return 0
-  fi
   case "$source_file" in
     ""|/dev/fd/*|/private/dev/fd/*|/proc/*) source_file="" ;;
   esac
+  if short_command_is_current "$target" "$source_file"; then
+    agent_detail "short command already current: $target"
+    return 0
+  fi
   if [ -n "$source_file" ] && [ -f "$source_file" ] && [ -r "$source_file" ]; then
     mkdir -p "$(dirname "$target")"
     cp "$source_file" "$tmp" 2>>"$ONE_CLICK_LOG" || return 1
@@ -967,6 +998,7 @@ ensure_selected_agent_for_start() {
     select_agent_interactively
   fi
   validate_agent_name "$AGENT"
+  ensure_agent_selection_available "$AGENT"
 }
 
 resolve_latest_task_agent_version() {
@@ -1051,12 +1083,109 @@ run_task_agent_update_command() {
   install_aamp_logs_bin "$installed_version" || agent_fail "failed to synchronize aamp-logs $installed_version"
   printf '当前版本：%s\n' "$installed_version"
 }
-npm_install_global() {
+classify_remote_npm_cache_error() {
+  node -e '
+let carry = "";
+let lineSawEnoent = false;
+let lineSawTarballData = false;
+let matched = false;
+const scan = (part, endOfLine) => {
+  const text = (carry + part).toLowerCase();
+  const sawEnoent = lineSawEnoent || text.includes("enoent");
+  const sawTarballData = lineSawTarballData || text.includes("tarball data");
+  if (text.includes("invalid response body")
+    || text.includes("_cacache")
+    || (sawEnoent && text.includes("content-v2"))
+    || (sawTarballData && text.includes("corrupted"))
+    || text.includes("tar_bad_archive")
+    || text.includes("zlib: unexpected end of file")) matched = true;
+  lineSawEnoent = sawEnoent;
+  lineSawTarballData = sawTarballData;
+  carry = text.slice(-64);
+  if (endOfLine) {
+    carry = "";
+    lineSawEnoent = false;
+    lineSawTarballData = false;
+  }
+};
+process.stdin.on("data", (chunk) => {
+  const parts = chunk.toString("latin1").split(/\r?\n/);
+  parts.forEach((part, index) => scan(part, index < parts.length - 1));
+});
+process.stdin.on("end", () => { process.exitCode = matched ? 0 : 1; });
+process.stdin.on("error", () => { process.exitCode = 2; });
+'
+}
+
+REMOTE_NPM_INSTALL_STATUS=1
+REMOTE_NPM_CACHE_ERROR=false
+run_remote_npm_install_attempt() {
+  local registry="$1"
+  shift
+  local pipeline_status=()
+  sanitize_inherited_npm_exec_env
+  set +e
+  "$NPM_BIN" install -g \
+    --registry "$registry" \
+    --cache "$NPM_CACHE_DIR" \
+    --prefix "$NPM_GLOBAL_PREFIX" \
+    "$@" 2>&1 | classify_remote_npm_cache_error
+  pipeline_status=("${PIPESTATUS[@]}")
+  set -e
+  REMOTE_NPM_INSTALL_STATUS="${pipeline_status[0]:-1}"
+  REMOTE_NPM_CACHE_ERROR=false
+  if [ "${pipeline_status[1]:-2}" -eq 0 ]; then
+    REMOTE_NPM_CACHE_ERROR=true
+  fi
+  return 0
+}
+
+npm_install_global_from_registry_remote() {
+  local registry="$1"
+  shift
+  finish_remote_npm_install() {
+    trap - EXIT HUP INT TERM
+    unset -f finish_remote_npm_install
+  }
+  trap finish_remote_npm_install EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  run_remote_npm_install_attempt "$registry" "$@"
+  if [ "$REMOTE_NPM_INSTALL_STATUS" -eq 0 ]; then
+    hash -r 2>/dev/null || true
+    finish_remote_npm_install
+    return 0
+  fi
+
+  if [ "$REMOTE_NPM_CACHE_ERROR" != "true" ]; then
+    finish_remote_npm_install
+    return 1
+  fi
+
+  reset_npm_cache_for_retry
+  run_remote_npm_install_attempt "$registry" "$@"
+  if [ "$REMOTE_NPM_INSTALL_STATUS" -ne 0 ]; then
+    finish_remote_npm_install
+    return 1
+  fi
+  hash -r 2>/dev/null || true
+  finish_remote_npm_install
+}
+
+npm_install_global_from_registry() {
+  if remote_internal_helper; then
+    npm_install_global_from_registry_remote "$@"
+    return $?
+  fi
+
+  local registry="$1"
+  shift
   local npm_log
   npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npm-install.XXXXXX")"
   sanitize_inherited_npm_exec_env
   if "$NPM_BIN" install -g \
-    --registry "$NPM_REGISTRY" \
+    --registry "$registry" \
     --cache "$NPM_CACHE_DIR" \
     --prefix "$NPM_GLOBAL_PREFIX" \
     "$@" >"$npm_log" 2>&1; then
@@ -1074,7 +1203,7 @@ npm_install_global() {
   npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npm-install-retry.XXXXXX")"
   sanitize_inherited_npm_exec_env
   "$NPM_BIN" install -g \
-    --registry "$NPM_REGISTRY" \
+    --registry "$registry" \
     --cache "$NPM_CACHE_DIR" \
     --prefix "$NPM_GLOBAL_PREFIX" \
     "$@" >"$npm_log" 2>&1 || {
@@ -1083,6 +1212,10 @@ npm_install_global() {
     }
   cat "$npm_log"
   hash -r 2>/dev/null || true
+}
+
+npm_install_global() {
+  npm_install_global_from_registry "$NPM_REGISTRY" "$@"
 }
 
 npx_package() {
@@ -1194,11 +1327,26 @@ npm_install_register_helper() {
     }
 }
 
+aime_internal_network_reachable() {
+  command -v ping >/dev/null 2>&1 || return 1
+  if is_macos; then
+    ping -c 1 -W 1000 aime.bytedance.net >/dev/null 2>&1
+  else
+    ping -c 1 -W 1 aime.bytedance.net >/dev/null 2>&1
+  fi
+}
+
 validate_agent_name() {
   case "$1" in
-    codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai) ;;
-    *) agent_fail "--agent must be codex, cursor, coco, traex, traecli, workbuddy, or workbuddy_ai" ;;
+    codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|aime) ;;
+    *) agent_fail "--agent must be codex, cursor, coco, traex, traecli, workbuddy, workbuddy_ai, or aime" ;;
   esac
+}
+
+ensure_agent_selection_available() {
+  [ "$1" = "aime" ] || return 0
+  aime_internal_network_reachable \
+    || agent_fail "AIME 仅在公司内网可用；当前无法 ping 通 aime.bytedance.net。"
 }
 
 agent_display_name() {
@@ -1239,6 +1387,9 @@ agent_cli_detected() {
     workbuddy_ai)
       find_workbuddy_ai_cli >/dev/null 2>&1
       ;;
+    aime)
+      aime_internal_network_reachable
+      ;;
     *)
       return 1
       ;;
@@ -1265,6 +1416,9 @@ discover_interactive_agents() {
   fi
   if agent_cli_detected workbuddy_ai; then
     DETECTED_AGENTS+=("workbuddy_ai")
+  fi
+  if agent_cli_detected aime; then
+    DETECTED_AGENTS+=("aime")
   fi
 
   if [ "${#DETECTED_AGENTS[@]}" -eq 0 ]; then
@@ -1303,7 +1457,7 @@ select_agent_interactively() {
   discover_interactive_agents
 
   if ! exec 3<>/dev/tty; then
-    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai"
+    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|aime"
   fi
 
   tty_state="$(stty -g <&3)"
@@ -2579,8 +2733,13 @@ NODE
 
   bot_name="${bot_name:-$default_name}"
   BOT_NAME="$bot_name"
-  LARK_CLI_PROFILE="$(task_profile_name_for_app_id "$APP_ID")"
-  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  if [ "$AGENT_EXECUTION_LOCATION" = "remote" ]; then
+    LARK_CLI_PROFILE=""
+  else
+    LARK_CLI_PROFILE="$(task_profile_name_for_app_id "$APP_ID")"
+    source_lark_env
+    ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  fi
   if [ "$AAMP_TASK_INTERNAL" = "true" ]; then
     agent_detail "Feishu Bot 已授权：$BOT_NAME ($APP_ID)"
     return 0
@@ -2882,6 +3041,69 @@ find_workbuddy_ai_cli() {
   printf '%s\n' "$WORKBUDDY_AI_APP_CLI"
 }
 
+aime_acp_package_spec() {
+  printf '%s\n' "${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.0-dev.7}"
+}
+
+aime_acp_package_version() {
+  local spec
+  spec="$(aime_acp_package_spec)"
+  case "$spec" in
+    *@?*) printf '%s\n' "${spec##*@}" ;;
+    *) return 1 ;;
+  esac
+}
+
+aime_acp_registry() {
+  printf '%s\n' "${AIME_ACP_REGISTRY:-https://bnpm.byted.org}"
+}
+
+aime_acp_site() {
+  printf '%s\n' 'cn'
+}
+
+aime_acp_cli_path() {
+  printf '%s/bin/aime-acp\n' "$NPM_GLOBAL_PREFIX"
+}
+
+aime_acp_package_dir() {
+  local spec package_name
+  spec="$(aime_acp_package_spec)"
+  package_name="${spec%@*}"
+  [ -n "$package_name" ] || return 1
+  printf '%s/lib/node_modules/%s\n' "$NPM_GLOBAL_PREFIX" "$package_name"
+}
+
+aime_acp_installed_version() {
+  local package_json
+  package_json="$(aime_acp_package_dir)/package.json"
+  [ -r "$package_json" ] || return 1
+  node -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (typeof value.version !== "string") process.exit(1);
+process.stdout.write(value.version);
+' "$package_json"
+}
+
+aime_acp_install_is_current() {
+  local installed_version
+  [ -x "$(aime_acp_cli_path)" ] || return 1
+  installed_version="$(aime_acp_installed_version || true)"
+  [ "$installed_version" = "$(aime_acp_package_version)" ]
+}
+
+ensure_aime_acp_cli() {
+  if aime_acp_install_is_current; then
+    return 0
+  fi
+  agent_log "正在安装固定版本 AIME ACP 到隔离运行环境。"
+  npm_install_global_from_registry "$(aime_acp_registry)" "$(aime_acp_package_spec)" \
+    || agent_fail "AIME_ACP_INSTALL_FAILED: AIME ACP installation failed. Confirm company network access and retry."
+  aime_acp_install_is_current \
+    || agent_fail "AIME_ACP_INSTALL_INVALID: AIME ACP installation validation failed."
+}
+
 resolve_cursor_cli_for_acp() {
   command -v cursor
 }
@@ -2958,6 +3180,13 @@ ensure_agent_cli() {
     is_macos || agent_fail "WorkBuddy AI 一键探测仅支持 macOS。"
     find_workbuddy_ai_cli >/dev/null 2>&1 \
       || agent_fail "未检测到 WorkBuddy AI CLI：${WORKBUDDY_AI_APP_CLI}。请确认该文件存在且可执行后重新运行脚本。"
+    return 0
+  fi
+
+  if [ "$AGENT" = "aime" ]; then
+    aime_internal_network_reachable \
+      || agent_fail "AIME 仅在公司内网可用；当前无法 ping 通 aime.bytedance.net。"
+    ensure_aime_acp_cli
     return 0
   fi
 
@@ -3886,6 +4115,68 @@ ensure_traecode_ready() {
   ensure_traecode_doctor
 }
 
+run_aime_auth_status() {
+  "$(aime_acp_cli_path)" auth status --site "$(aime_acp_site)" --json
+}
+
+run_aime_auth_login() {
+  "$(aime_acp_cli_path)" auth login --site "$(aime_acp_site)"
+}
+
+run_aime_doctor() {
+  "$(aime_acp_cli_path)" doctor --site "$(aime_acp_site)" --json
+}
+
+ensure_aime_ready() {
+  local auth_output auth_status auth_kind login_status doctor_status
+  set +e
+  auth_output="$(run_aime_auth_status)"
+  auth_status=$?
+  set -e
+  auth_kind="$(printf '%s' "$auth_output" | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const value = JSON.parse(input.trim());
+    if (value?.ok === true && value?.status === "authenticated") process.stdout.write("authenticated");
+    else if (value?.ok === true && value?.status === "unauthenticated") process.stdout.write("unauthenticated");
+    else process.stdout.write("error");
+  } catch {
+    process.stdout.write("error");
+  }
+});
+')"
+  if [ "$auth_status" -eq 0 ] && [ "$auth_kind" = "authenticated" ]; then
+    agent_detail "AIME managed-user authentication is ready"
+  elif [ "$auth_status" -eq 1 ] && [ "$auth_kind" = "unauthenticated" ]; then
+    agent_log "AIME 尚未登录，正在启动独立登录流程。"
+    set +e
+    run_aime_auth_login
+    login_status=$?
+    set -e
+    case "$login_status" in
+      0) ;;
+      2)
+        agent_fail "AIME 登录仍在等待完成。请继续完成浏览器授权，或重新执行 'aime-acp auth login --site cn' 后重试。"
+        ;;
+      *)
+        agent_fail "AIME 登录失败。请执行 'aime-acp auth login --site cn' 后重试。"
+        ;;
+    esac
+  else
+    agent_fail "AIME 认证状态检查失败。请执行 'aime-acp auth status --site cn --json' 查看安全诊断。"
+  fi
+
+  set +e
+  run_aime_doctor >/dev/null
+  doctor_status=$?
+  set -e
+  [ "$doctor_status" -eq 0 ] \
+    || agent_fail "AIME doctor 未通过。请确认公司内网与账号状态，并执行 'aime-acp doctor --site cn --json' 查看安全诊断。"
+}
+
 ensure_agent_login() {
   case "$AGENT" in
     codex)
@@ -3931,6 +4222,9 @@ ensure_agent_login() {
       ;;
     workbuddy_ai)
       agent_detail "WorkBuddy AI authentication is managed by the desktop app"
+      ;;
+    aime)
+      ensure_aime_ready
       ;;
     codem)
       ensure_codem_local_bin_on_path
@@ -4044,6 +4338,17 @@ build_acp_agent_command() {
       || agent_fail "WorkBuddy AI 配置目录包含不受支持的换行符。"
     ACP_AGENT_COMMAND="env CODEBUDDY_CONFIG_DIR=$workbuddy_ai_config_dir_word CODEBUDDY_SKIP_BUILTIN_MARKETPLACE=1 $workbuddy_ai_word --acp"
     agent_detail "using native WorkBuddy AI ACP command: $ACP_AGENT_COMMAND"
+    return 0
+  fi
+
+  if [ "$AGENT" = "aime" ]; then
+    local aime_bin aime_word
+    aime_bin="$(aime_acp_cli_path)"
+    [ -x "$aime_bin" ] || agent_fail "AIME_ACP_UNAVAILABLE: AIME ACP executable is unavailable after preparation."
+    aime_word="$(acp_command_word "$aime_bin")" \
+      || agent_fail "AIME_ACP_PATH_INVALID: AIME ACP executable path is invalid."
+    ACP_AGENT_COMMAND="$aime_word --site $(aime_acp_site)"
+    agent_detail "AIME ACP configured for site $(aime_acp_site)"
     return 0
   fi
 
@@ -4298,6 +4603,9 @@ run_internal_discover_agents() {
   if agent_cli_detected workbuddy_ai; then
     agents+=("workbuddy_ai")
   fi
+  if agent_cli_detected aime; then
+    agents+=("aime")
+  fi
   local joined=""
   if [ "${#agents[@]}" -gt 0 ]; then
     joined="$(IFS=,; printf '%s' "${agents[*]}")"
@@ -4311,16 +4619,25 @@ process.stdout.write(JSON.stringify({ agents }));
 prepare_internal_agent_environment() {
   [ -n "$AGENT" ] || agent_fail "internal Agent preparation requires --agent"
   validate_agent_name "$AGENT"
-  source_lark_env
+  ensure_agent_selection_available "$AGENT"
+  load_agent_metadata
+  if [ "$AGENT_EXECUTION_LOCATION" = "local" ]; then
+    source_lark_env
+  fi
   ensure_agent_cli
 }
 
 run_internal_register_binding() {
   [ -n "$AGENT" ] || agent_fail "internal Bot registration requires --agent"
   validate_agent_name "$AGENT"
-  source_lark_env
+  ensure_agent_selection_available "$AGENT"
+  load_agent_metadata
   register_feishu_app
-  emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\"}"
+  if [ "$AGENT_EXECUTION_LOCATION" = "remote" ]; then
+    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"auth_mode\":\"app-secret\"}"
+  else
+    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\",\"auth_mode\":\"lark-cli\"}"
+  fi
 }
 
 run_internal_prepare_agent() {
@@ -4334,13 +4651,21 @@ run_internal_prepare_agent() {
   maybe_mock_fail "agent-login"
   ensure_acpx
   build_acp_agent_command
-  emit_internal_result "{\"agent_type\":\"$(json_escape "$AGENT")\",\"acp_command\":\"$(json_escape "$ACP_AGENT_COMMAND")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
+  if [ "$AGENT_EXECUTION_LOCATION" = "remote" ]; then
+    emit_internal_result "{\"agent_type\":\"$(json_escape "$AGENT")\",\"acp_command\":\"$(json_escape "$ACP_AGENT_COMMAND")\"}"
+  else
+    emit_internal_result "{\"agent_type\":\"$(json_escape "$AGENT")\",\"acp_command\":\"$(json_escape "$ACP_AGENT_COMMAND")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
+  fi
 }
 
 run_internal_probe_profile() {
   AAMP_TASK_INTERNAL_BINDING_JSON=""
   IFS= read -r AAMP_TASK_INTERNAL_BINDING_JSON <&"$AAMP_TASK_INTERNAL_INPUT_FD" || true
   [ -n "$AAMP_TASK_INTERNAL_BINDING_JSON" ] || agent_fail "missing internal binding payload"
+  AGENT="$(binding_json_field agent_type)"
+  validate_agent_name "$AGENT"
+  load_agent_metadata
+  [ "$AGENT_EXECUTION_LOCATION" != "remote" ] || agent_fail "remote bindings do not use lark-cli profiles"
   APP_ID="$(binding_json_field bot.app_id)"
   LARK_CLI_PROFILE="$(binding_json_field bot.lark_cli_profile)"
   [ -n "$APP_ID" ] && [ -n "$LARK_CLI_PROFILE" ] || agent_fail "binding is missing Feishu app or profile"
@@ -4363,6 +4688,10 @@ run_internal_ensure_profile() {
   AAMP_TASK_INTERNAL_BINDING_JSON=""
   IFS= read -r AAMP_TASK_INTERNAL_BINDING_JSON <&"$AAMP_TASK_INTERNAL_INPUT_FD" || true
   [ -n "$AAMP_TASK_INTERNAL_BINDING_JSON" ] || agent_fail "missing internal binding payload"
+  AGENT="$(binding_json_field agent_type)"
+  validate_agent_name "$AGENT"
+  load_agent_metadata
+  [ "$AGENT_EXECUTION_LOCATION" != "remote" ] || agent_fail "remote bindings do not use lark-cli profiles"
   APP_ID="$(binding_json_field bot.app_id)"
   APP_SECRET="$(binding_json_field bot.app_secret)"
   BOT_NAME="$(binding_json_field bot.display_name)"
@@ -4404,6 +4733,26 @@ run_internal_action() {
 
 task_agent_controller_path() {
   printf '%s/bin/feishu-task-agent-controller.mjs\n' "$(task_agent_global_package_dir)"
+}
+
+task_agent_metadata_path() {
+  printf '%s/bin/agent-metadata.mjs\n' "$(task_agent_global_package_dir)"
+}
+
+load_agent_metadata() {
+  local metadata_path metadata_json
+  metadata_path="$(task_agent_metadata_path)"
+  [ -r "$metadata_path" ] || agent_fail "Task Agent metadata is missing: $metadata_path"
+  metadata_json="$(node "$metadata_path" --json "$AGENT")" \
+    || agent_fail "failed to resolve Task Agent metadata for $AGENT"
+  AGENT_EXECUTION_LOCATION="$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(value.executionLocation)' "$metadata_json")"
+  AGENT_ATTACHMENT_POLICY="$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(value.attachmentPolicy || "")' "$metadata_json")"
+  AGENT_TASK_DISPATCH_CONCURRENCY="$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(value.taskDispatchConcurrency ? String(value.taskDispatchConcurrency) : "")' "$metadata_json")"
+  if [ -n "$AAMP_TASK_INTERNAL_EXECUTION_LOCATION" ] \
+    && [ "$AAMP_TASK_INTERNAL_EXECUTION_LOCATION" != "$AGENT_EXECUTION_LOCATION" ]; then
+    agent_fail "Task Agent execution metadata mismatch"
+  fi
+  AAMP_TASK_INTERNAL_EXECUTION_LOCATION="$AGENT_EXECUTION_LOCATION"
 }
 
 run_task_agent_controller() {
@@ -4481,6 +4830,10 @@ main() {
       return 0
       ;;
   esac
+
+  if [ "$AGENT" = "aime" ]; then
+    ensure_agent_selection_available "$AGENT"
+  fi
 
   trap cleanup EXIT INT TERM HUP
   init_log_run
