@@ -217,6 +217,11 @@ test('release helper keeps --agent only as a deprecated compatibility option', (
   assert.doesNotMatch(source, /bash -s -- install --agent/)
 })
 
+test('local tgz startup command explicitly opts in to package overrides', () => {
+  const source = fs.readFileSync(helperPath, 'utf8')
+  assert.match(source, /AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true/)
+})
+
 test('release skill documents interactive agent selection without a startup flag', () => {
   const skill = fs.readFileSync(skillPath, 'utf8')
 

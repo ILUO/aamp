@@ -39,6 +39,8 @@ test('local release plan-only prints a file: startup command for the selected br
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /feishuBridge@/)
   assert.match(result.stdout, /export FEISHU_BRIDGE_PKG="file:\$PWD\/packages\/aamp-feishu-bridge"/)
+  assert.match(result.stdout, /AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true feishu-task-agent start/)
+  assert.doesNotMatch(result.stdout, /export AAMP_TASK_ALLOW_PACKAGE_OVERRIDES/)
   assert.match(result.stdout, /feishu-task-agent start/)
   assert.match(result.stdout, /export NPM_CONFIG_CACHE=.*aamp-local-runtime-npm-cache/)
   assert.doesNotMatch(result.stdout, /export ACP_BRIDGE_PKG/)
@@ -64,6 +66,7 @@ test('local release json output is parseable and carries the startup command', (
   const parsed = JSON.parse(result.stdout)
   assert.equal(parsed.packages[0].key, 'feishuBridge')
   assert.match(parsed.startupCommand, /FEISHU_BRIDGE_PKG="file:\$PWD\/packages\/aamp-feishu-bridge"/)
+  assert.match(parsed.startupCommand, /AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true/)
   assert.ok(Array.isArray(parsed.notes))
 })
 
@@ -73,6 +76,8 @@ test('local release skill documents restart-before-start and no-publish', () => 
   assert.match(skill, /stop the current Task Agent/i)
   assert.match(skill, /never publishes/i)
   assert.match(skill, /ACP_BRIDGE_PKG|FEISHU_BRIDGE_PKG/)
+  assert.match(skill, /AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true/)
+  assert.match(skill, /Do not replace it with a persistent `export`/)
 })
 
 test('local release helper discovers the repo root from its own location', () => {

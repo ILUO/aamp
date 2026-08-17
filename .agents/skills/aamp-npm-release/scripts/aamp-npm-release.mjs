@@ -1021,7 +1021,10 @@ function targetTgzPath(target, artifactsDir) {
 function buildLocalTestCommand(packageManager, targets, artifactsDir) {
   if (!targets.taskAgent?.tgz) return null
   const taskAgentTgz = targetTgzPath(targets.taskAgent, artifactsDir)
-  const envLines = ['AAMP_TASK_AUTO_UPDATE=false']
+  const envLines = [
+    'AAMP_TASK_AUTO_UPDATE=false',
+    'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true',
+  ]
   if (targets.acpBridge?.tgz) {
     envLines.push(`ACP_BRIDGE_PKG=${shellQuote(targetTgzPath(targets.acpBridge, artifactsDir))}`)
   }

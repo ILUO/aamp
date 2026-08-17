@@ -36,8 +36,10 @@ materialization is not reused.
 
 ## How the local override works
 
-The installed Task Agent shim (`$HOME/.aamp/bin/feishu-task-agent`) honors two
-environment variables that flow into the controller:
+Normal Task Agent starts ignore inherited package override variables so an old
+local debug export cannot replace a released bridge. The generated local test
+command sets `AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true` for that invocation and
+then passes two bridge variables into the controller:
 
 - `ACP_BRIDGE_PKG` → controller `AAMP_TASK_ACP_BRIDGE_PKG` → the ACP bridge package
 - `FEISHU_BRIDGE_PKG` → controller `AAMP_TASK_FEISHU_BRIDGE_PKG` → the Feishu bridge package
@@ -59,6 +61,11 @@ The task-agent shim has no override for the task-agent package itself. To test
 a local `aamp-feishu-task-agent` build, install it into the global prefix
 (`npm install -g --prefix "$HOME/.aamp/npm-global" --force <tgz>`) and set
 `AAMP_TASK_AUTO_UPDATE=false`.
+
+Do not permanently export package override variables in a shell profile. The
+helper's command scopes the opt-in to one Task Agent invocation. Existing
+`file:` directories or local `.tgz` files are accepted; remote URLs and missing
+paths are rejected.
 
 ## Choose packages from the change set
 
@@ -84,6 +91,9 @@ a local `aamp-feishu-task-agent` build, install it into the global prefix
    required steps: stop the currently running Task Agent first (it holds the
    runtime/agent leases), then run the command. `feishu-task-agent start` is
    interactive; it opens the multi-select for saved bindings.
+   Use the generated command verbatim: its inline
+   `AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true` applies only to that invocation.
+   Do not replace it with a persistent `export`.
 6. Suggest verification: send the agent a task that exercises the changed code
    path and confirm the Feishu comment shows the real text (for the
    help-text/timezone fix, "查询今天的日程" should show
@@ -149,6 +159,9 @@ node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs \
 - The local build only affects a future Task Agent start: the running bridge
   does not hot-swap. Always tell the user to stop the current Task Agent
   before starting with the new overrides.
+- Normal Task Agent starts intentionally ignore inherited package override
+  variables. Local overrides require the helper's one-shot opt-in and must
+  resolve to an existing `file:` directory or local `.tgz` file.
 - `file:` mode requires `dist` to exist. If a build was skipped and `dist` is
   stale or missing, the helper fails on the missing binary target; rebuild
   first or run with `--build` (the default).

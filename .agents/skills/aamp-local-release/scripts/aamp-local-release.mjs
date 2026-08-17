@@ -277,9 +277,9 @@ function buildStartupCommand(selectedSpecs, options, state) {
       lines.push(`export ${spec.envName}="file:$PWD/${spec.dir}"`)
     }
   }
-  lines.push('feishu-task-agent start')
+  lines.push('AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true feishu-task-agent start')
   lines.push('# fallback when ~/.aamp/bin is not on PATH:')
-  lines.push('"$HOME/.aamp/bin/feishu-task-agent" start')
+  lines.push('AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true "$HOME/.aamp/bin/feishu-task-agent" start')
   return lines.join('\n')
 }
 

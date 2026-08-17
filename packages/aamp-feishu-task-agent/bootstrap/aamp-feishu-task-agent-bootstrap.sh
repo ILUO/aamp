@@ -76,11 +76,21 @@ FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v
 FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs,im,mail,mindnotes,minutes,note,sheets,slides,task,vc,wiki}"
 FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
+AAMP_TASK_ALLOW_PACKAGE_OVERRIDES="${AAMP_TASK_ALLOW_PACKAGE_OVERRIDES:-false}"
+AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-${AAMP_TASK_ACP_BRIDGE_PKG:-}}"
+AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-${AAMP_TASK_FEISHU_BRIDGE_PKG:-}}"
+AAMP_TASK_REQUESTED_AIME_ACP_PKG="${AIME_ACP_PKG:-${AAMP_TASK_AIME_ACP_PKG:-}}"
+unset ACP_BRIDGE_PKG AAMP_TASK_ACP_BRIDGE_PKG
+unset FEISHU_BRIDGE_PKG AAMP_TASK_FEISHU_BRIDGE_PKG
+unset AIME_ACP_PKG AIME_ACP_REGISTRY AAMP_TASK_AIME_ACP_PKG
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.36}"
 AIME_ACP_PKG="${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.1-dev.1}"
 AIME_ACP_REGISTRY="${AIME_ACP_REGISTRY:-https://bnpm.byted.org}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
+AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="$ACP_BRIDGE_PKG"
+AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
+AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_VERSION="0.1.0-dev.202"
@@ -4801,6 +4811,42 @@ task_agent_metadata_path() {
   printf '%s/bin/agent-metadata.mjs\n' "$(task_agent_global_package_dir)"
 }
 
+local_package_override_is_supported() {
+  local spec local_path
+  spec="${1:-}"
+  case "$spec" in
+    file:*)
+      local_path="${spec#file:}"
+      [ -n "$local_path" ] && [ -d "$local_path" ]
+      ;;
+    *.tgz) [ -f "$spec" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+apply_task_agent_package_override_policy() {
+  ACP_BRIDGE_PKG="$AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG"
+  FEISHU_BRIDGE_PKG="$AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG"
+  AIME_ACP_PKG="$AAMP_TASK_DEFAULT_AIME_ACP_PKG"
+  [ "$AAMP_TASK_ALLOW_PACKAGE_OVERRIDES" = "true" ] || return 0
+
+  if [ -n "$AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG" ]; then
+    local_package_override_is_supported "$AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG" \
+      || agent_fail "Local ACP Bridge package override is invalid."
+    ACP_BRIDGE_PKG="$AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG"
+  fi
+  if [ -n "$AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG" ]; then
+    local_package_override_is_supported "$AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG" \
+      || agent_fail "Local Feishu Bridge package override is invalid."
+    FEISHU_BRIDGE_PKG="$AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG"
+  fi
+  if [ -n "$AAMP_TASK_REQUESTED_AIME_ACP_PKG" ]; then
+    local_package_override_is_supported "$AAMP_TASK_REQUESTED_AIME_ACP_PKG" \
+      || agent_fail "Local AIME ACP package override is invalid."
+    AIME_ACP_PKG="$AAMP_TASK_REQUESTED_AIME_ACP_PKG"
+  fi
+}
+
 load_agent_metadata() {
   local metadata_path metadata_json
   metadata_path="$(task_agent_metadata_path)"
@@ -4829,6 +4875,8 @@ run_task_agent_controller() {
   export AAMP_TASK_NPX_BIN="$NPX_BIN"
   export AAMP_TASK_ACP_BRIDGE_PKG="$ACP_BRIDGE_PKG"
   export AAMP_TASK_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
+  export AAMP_TASK_AIME_ACP_PKG="$AIME_ACP_PKG"
+  export AAMP_TASK_ALLOW_PACKAGE_OVERRIDES
   export AAMP_TASK_CODEX_ACP_PKG="$CODEX_ACP_PKG"
   export AAMP_TASK_AGENT_VERSION
   export AAMP_TASK_DEFAULT_AGENT="$AGENT"
@@ -4885,6 +4933,8 @@ main() {
     usage
     return 0
   fi
+
+  apply_task_agent_package_override_policy
 
   case "$AAMP_TASK_ACTION" in
     __discover-agents|__register-binding|__prepare-agent|__probe-profile|__ensure-profile)

@@ -95,6 +95,18 @@ function aimeAuthFunctions(source) {
   ].join('\n')
 }
 
+function bridgeOverridePolicyFunctions(source) {
+  return functionRange(
+    source,
+    'local_package_override_is_supported()',
+    'load_agent_metadata()',
+  )
+}
+
+function taskAgentControllerLaunchFunction(source) {
+  return functionRange(source, 'run_task_agent_controller()', 'cleanup()')
+}
+
 function writeFakeAimeCli(file) {
   writeExecutable(file, [
     'printf "%s\\n" "$*" >> "$AIME_CALL_LOG"',
@@ -625,6 +637,135 @@ test('AIME local tgz specs force installation even when a scoped package is alre
   ], ['/tmp/aamp-shared-prefix', tgz])
 
   assert.equal(result.status, 0, result.stderr)
+})
+
+test('normal Task Agent start ignores inherited local bridge package overrides', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const result = runShell([
+    'set -euo pipefail',
+    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
+    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
+    'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
+    'AAMP_TASK_REQUESTED_AIME_ACP_PKG=""',
+    'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG="/tmp/aamp-local-release/old-acp.tgz"',
+    'AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG="file:/tmp/old-feishu"',
+    'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=false',
+    'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
+    bridgeOverridePolicyFunctions(source),
+    'apply_task_agent_package_override_policy',
+    'printf "%s|%s" "$ACP_BRIDGE_PKG" "$FEISHU_BRIDGE_PKG"',
+  ])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(
+    result.stdout,
+    '@luckyterry/aamp-acp-bridge@0.1.28-dev.36|@zengxingyuan/aamp-feishu-bridge@0.1.51',
+  )
+})
+
+test('explicit local package override opt-in accepts only existing local artifacts', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-explicit-local-overrides-'))
+  const acpTgz = path.join(root, 'acp.tgz')
+  const feishuDir = path.join(root, 'feishu')
+  writeFileSync(acpTgz, 'local acp artifact')
+  mkdirSync(feishuDir)
+  const result = runShell([
+    'set -euo pipefail',
+    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
+    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
+    'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
+    'AAMP_TASK_REQUESTED_AIME_ACP_PKG=""',
+    'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG="$1"',
+    'AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG="file:$2"',
+    'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true',
+    'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
+    bridgeOverridePolicyFunctions(source),
+    'apply_task_agent_package_override_policy',
+    'printf "%s|%s" "$ACP_BRIDGE_PKG" "$FEISHU_BRIDGE_PKG"',
+  ], [acpTgz, feishuDir])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, `${acpTgz}|file:${feishuDir}`)
+})
+
+test('explicit local package override opt-in rejects missing artifacts without exposing paths', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const result = runShell([
+    'set -euo pipefail',
+    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
+    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
+    'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
+    'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG="/private/missing/credential-sentinel.tgz"',
+    'AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG=""',
+    'AAMP_TASK_REQUESTED_AIME_ACP_PKG=""',
+    'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true',
+    'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
+    bridgeOverridePolicyFunctions(source),
+    'apply_task_agent_package_override_policy',
+  ])
+
+  assert.equal(result.status, 64)
+  assert.match(result.stderr, /Local ACP Bridge package override is invalid/)
+  assert.doesNotMatch(result.stderr, /private|credential-sentinel/)
+})
+
+test('Task Agent controller explicitly propagates local AIME and bridge override state', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-controller-override-env-'))
+  const fakeNode = path.join(root, 'node')
+  const fakeController = path.join(root, 'controller.mjs')
+  const fakeBootstrap = path.join(root, 'bootstrap.sh')
+  const acpTgz = path.join(root, 'acp.tgz')
+  const aimeTgz = path.join(root, 'aime.tgz')
+  const feishuDir = path.join(root, 'feishu')
+  writeExecutable(fakeNode, [
+    'printf "%s|%s|%s|%s" \\',
+    '  "$AAMP_TASK_ACP_BRIDGE_PKG" \\',
+    '  "$AAMP_TASK_FEISHU_BRIDGE_PKG" \\',
+    '  "$AAMP_TASK_AIME_ACP_PKG" \\',
+    '  "$AAMP_TASK_ALLOW_PACKAGE_OVERRIDES"',
+  ].join('\n'))
+  writeFileSync(fakeController, '')
+  writeFileSync(fakeBootstrap, '')
+  writeFileSync(acpTgz, 'local acp artifact')
+  writeFileSync(aimeTgz, 'local aime artifact')
+  mkdirSync(feishuDir)
+
+  const result = runShell([
+    'set -euo pipefail',
+    'PATH="$1:$PATH"',
+    'FAKE_CONTROLLER="$2"',
+    'AAMP_TASK_COMMAND_PATH="$3"',
+    'ACP_BRIDGE_PKG="$4"',
+    'FEISHU_BRIDGE_PKG="file:$5"',
+    'AIME_ACP_PKG="$6"',
+    'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true',
+    'AAMP_TASK_AGENT_NAME=@luckyterry/aamp-feishu-task-agent',
+    'AAMP_TASK_AGENT_CHANNEL=dev',
+    'AAMP_TASK_ACTION=start',
+    'NPM_BIN=npm',
+    'NPX_BIN=npx',
+    'CODEX_ACP_PKG=@agentclientprotocol/codex-acp@1.0.2',
+    'AAMP_TASK_AGENT_VERSION=0.1.0-dev.202',
+    'AGENT=aime',
+    'AAMP_HOST=https://meshmail.ai',
+    'DEBUG_MODE=false',
+    'NPM_REGISTRY=https://registry.npmjs.org/',
+    'NPM_CACHE_DIR=/tmp/aamp-cache',
+    'NPM_GLOBAL_PREFIX=/tmp/aamp-prefix',
+    'AAMP_LARK_CLI_CONFIG_DIR=/tmp/lark-config',
+    'task_agent_controller_path() { printf "%s\n" "$FAKE_CONTROLLER"; }',
+    'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
+    taskAgentControllerLaunchFunction(source),
+    'run_task_agent_controller',
+  ], [root, fakeController, fakeBootstrap, acpTgz, feishuDir, aimeTgz])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(
+    result.stdout,
+    `${acpTgz}|file:${feishuDir}|${aimeTgz}|true`,
+  )
 })
 
 test('AIME readiness logs in once and requires doctor to pass', () => {
