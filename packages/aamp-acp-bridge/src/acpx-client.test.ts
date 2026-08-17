@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { AcpxClient } from './acpx-client.js'
+import { AcpxClient, selectFinalAssistantOutput } from './acpx-client.js'
 
 const tempDirectories: string[] = []
 const testDirectory = dirname(fileURLToPath(import.meta.url))
@@ -15,7 +15,7 @@ afterEach(() => {
   }
 })
 
-function createFakeAcpx(mode: 'success' | 'auth-failure' | 'auth-with-output' | 'json-auth-failure' | 'json-aime-auth-failure' | 'auth-discussion' | 'timeout' | 'close-retry'): { cwd: string; logFile: string } {
+function createFakeAcpx(mode: 'success' | 'auth-failure' | 'auth-with-output' | 'json-auth-failure' | 'json-aime-auth-failure' | 'json-aime-sources' | 'auth-discussion' | 'timeout' | 'close-retry'): { cwd: string; logFile: string } {
   const cwd = mkdtempSync(join(tmpdir(), 'aamp-acpx-readiness-test-'))
   tempDirectories.push(cwd)
   const binDirectory = join(cwd, 'node_modules', '.bin')
@@ -41,6 +41,12 @@ case "${mode}:$*" in
     ;;
   json-aime-auth-failure:*" prompt "*)
     printf '%s\\n' '{"jsonrpc":"2.0","id":"1","error":{"code":-32001,"message":"Managed user authentication is required. Run \`aime-acp auth login --site cn\`.","data":{"code":"AUTH_REQUIRED","retryable":false}}}'
+    exit 0
+    ;;
+  json-aime-sources:*" prompt "*)
+    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"aamp-aime","update":{"sessionUpdate":"agent_message_chunk","messageId":"aime-sources","content":{"type":"text","text":"AAMP_RESULT_JSON: {\\"output\\":\\"FEISHU_TASK_RESULT_JSON: {\\\\\\"schema\\\\\\":\\\\\\"feishu_task_result.v2\\\\\\",\\\\\\"status\\\\\\":\\\\\\"answered\\\\\\",\\\\\\"summary\\\\\\":\\\\\\"成都天气\\\\\\",\\\\\\"reply_written\\\\\\":false}\\"}"}}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"aamp-aime","update":{"sessionUpdate":"agent_message_chunk","messageId":"aime-sources","_meta":{"aime.acp.message_kind":"sources"},"content":{"type":"text","text":"Sources:\\n- [Guide](https://example.test/guide)"}}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":"1","result":{"stopReason":"end_turn"}}'
     exit 0
     ;;
   auth-discussion:*" prompt "*)
@@ -295,4 +301,35 @@ test('prompt preserves normal replies that merely discuss authentication errors'
   const result = await client.prompt('fake-agent --acp', 'aamp-workbuddy', 'explain auth errors')
 
   assert.equal(result.output, 'The phrase authentication required may appear in diagnostic logs.')
+})
+
+test('final assistant selection does not reserve the AIME Sources message id by itself', () => {
+  const messages = new Map([
+    ['aime-sources', 'AAMP_RESULT_JSON: legitimate final answer'],
+  ])
+
+  assert.equal(
+    selectFinalAssistantOutput(messages, ['aime-sources']),
+    'AAMP_RESULT_JSON: legitimate final answer',
+  )
+})
+
+test('prompt excludes only meta-marked AIME Sources while preserving the original protocol result', async () => {
+  const { cwd } = createFakeAcpx('json-aime-sources')
+  const client = new AcpxClient(cwd)
+  const chunks: string[] = []
+
+  const result = await client.prompt('fake-agent --acp', 'aamp-aime', 'weather', {
+    onTextChunk: ({ text }) => chunks.push(text),
+  })
+
+  assert.equal(
+    result.output,
+    'AAMP_RESULT_JSON: {"output":"FEISHU_TASK_RESULT_JSON: {\\"schema\\":\\"feishu_task_result.v2\\",\\"status\\":\\"answered\\",\\"summary\\":\\"成都天气\\",\\"reply_written\\":false}"}',
+  )
+  assert.equal(JSON.parse(result.output.slice('AAMP_RESULT_JSON: '.length)).output.startsWith('FEISHU_TASK_RESULT_JSON: '), true)
+  assert.deepEqual(chunks, [
+    result.output,
+    'Sources:\n- [Guide](https://example.test/guide)',
+  ])
 })

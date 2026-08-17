@@ -77,7 +77,7 @@ FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs
 FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.21}"
-AIME_ACP_PKG="${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.0-dev.7}"
+AIME_ACP_PKG="${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.0-dev.10}"
 AIME_ACP_REGISTRY="${AIME_ACP_REGISTRY:-https://bnpm.byted.org}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
@@ -3028,14 +3028,27 @@ find_workbuddy_ai_cli() {
 }
 
 aime_acp_package_spec() {
-  printf '%s\n' "${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.0-dev.7}"
+  printf '%s\n' "${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.0-dev.10}"
+}
+
+aime_acp_package_name() {
+  printf '%s\n' '@tengchengwei/aime-acp'
 }
 
 aime_acp_package_version() {
   local spec
   spec="$(aime_acp_package_spec)"
   case "$spec" in
+    *.tgz) return 1 ;;
     *@?*) printf '%s\n' "${spec##*@}" ;;
+    *) return 1 ;;
+  esac
+}
+
+aime_acp_package_spec_is_supported() {
+  case "$(aime_acp_package_spec)" in
+    *.tgz) return 0 ;;
+    @tengchengwei/aime-acp@?*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -3049,15 +3062,38 @@ aime_acp_site() {
 }
 
 aime_acp_cli_path() {
-  printf '%s/bin/aime-acp\n' "$NPM_GLOBAL_PREFIX"
+  printf '%s/dist/bin.js\n' "$(aime_acp_package_dir)"
+}
+
+remove_legacy_aime_acp() {
+  local legacy_dir legacy_bin canonical_dir resolved_bin
+  legacy_dir="$NPM_GLOBAL_PREFIX/lib/node_modules/aime-acp"
+  legacy_bin="$NPM_GLOBAL_PREFIX/bin/aime-acp"
+  canonical_dir="$(aime_acp_package_dir)"
+  canonical_dir="$(node -e '
+const fs = require("node:fs");
+try { process.stdout.write(fs.realpathSync(process.argv[1])); } catch {}
+' "$canonical_dir")"
+  if [ -e "$legacy_dir" ] || [ -L "$legacy_dir" ]; then
+    rm -rf -- "$legacy_dir"
+  fi
+  if [ -e "$legacy_bin" ] || [ -L "$legacy_bin" ]; then
+    resolved_bin="$(node -e '
+const fs = require("node:fs");
+const path = require("node:path");
+try { process.stdout.write(fs.realpathSync(process.argv[1])); } catch {}
+' "$legacy_bin")"
+    if [ -n "$canonical_dir" ] && [ -n "$resolved_bin" ]; then
+      case "$resolved_bin" in
+        "$canonical_dir"/*) return 0 ;;
+      esac
+    fi
+    rm -f -- "$legacy_bin"
+  fi
 }
 
 aime_acp_package_dir() {
-  local spec package_name
-  spec="$(aime_acp_package_spec)"
-  package_name="${spec%@*}"
-  [ -n "$package_name" ] || return 1
-  printf '%s/lib/node_modules/%s\n' "$NPM_GLOBAL_PREFIX" "$package_name"
+  printf '%s/lib/node_modules/%s\n' "$NPM_GLOBAL_PREFIX" "$(aime_acp_package_name)"
 }
 
 aime_acp_installed_version() {
@@ -3072,21 +3108,49 @@ process.stdout.write(value.version);
 ' "$package_json"
 }
 
-aime_acp_install_is_current() {
-  local installed_version
+aime_acp_installed_name() {
+  local package_json
+  package_json="$(aime_acp_package_dir)/package.json"
+  [ -r "$package_json" ] || return 1
+  node -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (typeof value.name !== "string") process.exit(1);
+process.stdout.write(value.name);
+' "$package_json"
+}
+
+aime_acp_install_is_valid() {
+  local installed_version installed_name
   [ -x "$(aime_acp_cli_path)" ] || return 1
+  installed_name="$(aime_acp_installed_name || true)"
+  [ "$installed_name" = "$(aime_acp_package_name)" ] || return 1
   installed_version="$(aime_acp_installed_version || true)"
-  [ "$installed_version" = "$(aime_acp_package_version)" ]
+  [ -n "$installed_version" ] || return 1
+  case "$(aime_acp_package_spec)" in
+    *.tgz) return 0 ;;
+    *) [ "$installed_version" = "$(aime_acp_package_version)" ] ;;
+  esac
+}
+
+aime_acp_install_is_current() {
+  case "$(aime_acp_package_spec)" in
+    *.tgz) return 1 ;;
+    *) aime_acp_install_is_valid ;;
+  esac
 }
 
 ensure_aime_acp_cli() {
+  aime_acp_package_spec_is_supported \
+    || agent_fail "AIME_ACP_PACKAGE_INVALID: AIME ACP must use @tengchengwei/aime-acp or a local tgz."
+  remove_legacy_aime_acp
   if aime_acp_install_is_current; then
     return 0
   fi
   agent_log "正在安装固定版本 AIME ACP 到隔离运行环境。"
   npm_install_global_from_registry "$(aime_acp_registry)" "$(aime_acp_package_spec)" \
     || agent_fail "AIME_ACP_INSTALL_FAILED: AIME ACP installation failed. Confirm company network access and retry."
-  aime_acp_install_is_current \
+  aime_acp_install_is_valid \
     || agent_fail "AIME_ACP_INSTALL_INVALID: AIME ACP installation validation failed."
 }
 

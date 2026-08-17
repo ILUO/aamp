@@ -83,9 +83,7 @@ describe('TurnRuntime load recovery', () => {
       session: { turnState: 'AwaitingUserInput' },
     });
     expect(manager.get('session-1').cursor.nextEventOffset).toBe(6);
-    expect(fake.streamCalls.map((call) => call.eventOffset)).toEqual([
-      0,
-    ]);
+    expect(fake.streamCalls.map((call) => call.eventOffset)).toEqual([0]);
     expect(values).toEqual([]);
     expect(clock.deadlineDurations.every((ms) => ms === 1_500)).toBe(true);
   });

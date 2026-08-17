@@ -186,7 +186,7 @@ The opt-in packaged verification can be run from this package with:
 npm run test:aime-packaged
 ```
 
-It runs a real `npm pack` of `aime-acp@0.1.0`, installs that tarball with
+It runs a real `npm pack` of the current `@tengchengwei/aime-acp` source version, installs that tarball with
 `acpx@0.11.2` in a clean project, and exercises the installed executable
 through the real `AcpxClient` and `AgentBridge`. AIME and AAMP are replaced
 only at their external test boundaries with deterministic fakes. This is a

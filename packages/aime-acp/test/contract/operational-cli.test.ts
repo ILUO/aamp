@@ -17,6 +17,7 @@ import {
 } from '../../src/aime/bytedcli-transport.js';
 import { ScriptedAimeTransport } from '../helpers/fake-aime.js';
 import { fakeAuth } from '../helpers/fake-auth.js';
+import { AIME_ACP_PACKAGE_VERSION } from '../../src/package-info.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,7 +58,12 @@ function dependencies() {
 describe('operational CLI router', () => {
   it.each([
     ['help', ['--help'], 'help', /Usage: aime-acp/],
-    ['version', ['--version'], 'version', /0\.1\.0/],
+    [
+      'version',
+      ['--version'],
+      'version',
+      new RegExp(AIME_ACP_PACKAGE_VERSION.replaceAll('.', '\\.')),
+    ],
   ] as const)(
     '%s bypasses ACP server construction',
     async (_name, argv, mode, expected) => {
@@ -209,7 +215,7 @@ describe('operational CLI router', () => {
           'Usage: aime-acp [--site cn|i18n-tt] [auth status|login|login begin|login --complete --resume-token-stdin|doctor]\nDoctor always probes an available AIME space; --space-id is server-only.\n',
         );
       } else if (kind === 'version') {
-        expect(stdout).toBe('0.1.0\n');
+        expect(stdout).toBe(`${AIME_ACP_PACKAGE_VERSION}\n`);
       } else if (kind === 'auth') {
         expect(JSON.parse(stdout)).toEqual({
           schemaVersion: 1,
@@ -226,7 +232,7 @@ describe('operational CLI router', () => {
           schemaVersion: 1,
           ok: true,
           site: 'cn',
-          packageVersion: '0.1.0',
+          packageVersion: AIME_ACP_PACKAGE_VERSION,
           bytedcliVersion: '0.123.0',
           acpSdkVersion: '0.28.1',
           compatible: true,

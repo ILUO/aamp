@@ -92,12 +92,14 @@ function textUpdate(
   sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk',
   text: string,
   messageId?: string,
+  meta?: Readonly<Record<string, unknown>>,
 ): SessionUpdate | undefined {
   if (text.length === 0) return undefined;
   return {
     sessionUpdate,
     content: { type: 'text', text },
     ...(messageId === undefined ? {} : { messageId }),
+    ...(meta === undefined ? {} : { _meta: meta }),
   };
 }
 
@@ -162,7 +164,12 @@ function sourceUpdate(
     (reference) =>
       `- [${reference.title.replaceAll(']', '\\]')}](${reference.uri})`,
   );
-  return textUpdate('agent_message_chunk', `Sources:\n${lines.join('\n')}`);
+  return textUpdate(
+    'agent_message_chunk',
+    `Sources:\n${lines.join('\n')}`,
+    'aime-sources',
+    { 'aime.acp.message_kind': 'sources' },
+  );
 }
 
 function terminalSourceUpdate(

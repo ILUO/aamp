@@ -1,6 +1,8 @@
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
 import { describe, expect, it } from 'vitest';
 
+import { AIME_ACP_PACKAGE_VERSION } from '../../src/package-info.js';
+
 import {
   JsonRpcResponseError,
   spawnAcp,
@@ -147,7 +149,7 @@ describe('built ACP subprocess contract', () => {
           loadSession: true,
           promptCapabilities: {},
         },
-        agentInfo: { name: 'aime-acp', version: '0.1.0' },
+        agentInfo: { name: 'aime-acp', version: AIME_ACP_PACKAGE_VERSION },
       });
       await expect(
         child.request('session/new', {

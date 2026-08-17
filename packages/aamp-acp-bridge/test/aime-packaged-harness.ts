@@ -33,7 +33,7 @@ const REPOSITORY_ROOT = resolve(BRIDGE_PACKAGE_ROOT, '../..')
 const AIME_PACKAGE_ROOT = join(REPOSITORY_ROOT, 'packages/aime-acp')
 export const FINAL_PACKAGED_AIME_IDENTITY = {
   packageVersion: '0.1.0',
-  filename: 'aime-acp-0.1.0.tgz',
+  filename: 'tengchengwei-aime-acp-0.1.0.tgz',
   productionBridgeCommit: 'b3c43ae9e2c3a8d8fa14ef4ef207e09cb079305d',
   coreCommit: '17119558e9df225707e288320b2fea2a1baaa5bf',
   tarballSha256: '723c15fa63e28d68c2621b859af7f25b2b7115c2aad01d01843c7b30105cf8b1',
@@ -308,7 +308,15 @@ function textEvents(startOffset: number, userId: string, assistantId: string, ou
       content: output.slice(split),
       is_finished: true,
     }),
-    event('session.progress_notice', startOffset + 8, { status: 'waiting_for_next' }),
+    event('session.reference', startOffset + 8, {
+      references: [{
+        id: `safe-reference-${startOffset}`,
+        title: 'Synthetic source',
+        uri: `https://example.test/source-${startOffset}`,
+        snippet: 'Synthetic source snippet',
+      }],
+    }),
+    event('session.progress_notice', startOffset + 9, { status: 'waiting_for_next' }),
   ]
 }
 
@@ -813,7 +821,7 @@ export async function runPackagedAimeBridgeProof(): Promise<PackagedAimeBridgeEv
     const install = npmInvocation(['install', '--ignore-scripts', '--no-audit', '--no-fund', `--registry=${REGISTRY}`, tarball, bridgeTarball, `acpx@${ACPX_VERSION}`])
     const installed = await runBounded(install.file, install.args, { cwd: root, env: npmEnv, timeoutMs: 120_000 })
     requireSuccess(installed, 'packaged bridge clean install')
-    const installedPackage = JSON.parse(await readFile(join(root, 'node_modules/aime-acp/package.json'), 'utf8')) as { version: string }
+    const installedPackage = JSON.parse(await readFile(join(root, 'node_modules/@tengchengwei/aime-acp/package.json'), 'utf8')) as { version: string }
     const installedAcpx = JSON.parse(await readFile(join(root, 'node_modules/acpx/package.json'), 'utf8')) as { version: string }
     const installedBytedcli = JSON.parse(await readFile(join(root, 'node_modules/@bytedance-dev/bytedcli/package.json'), 'utf8')) as { version: string }
     const installedBridgePackage = JSON.parse(await readFile(join(root, 'node_modules/@zengxingyuan/aamp-acp-bridge/package.json'), 'utf8')) as { version: string }
@@ -978,7 +986,7 @@ export async function runPackagedAimeBridgeProof(): Promise<PackagedAimeBridgeEv
     await appendScenarioPrompt(scenarioPath, {
       messageId: 'completed-follow-up-user',
       createdAt: '2033-05-18T03:33:20.200Z',
-      events: textEvents(9, 'completed-follow-up-user', 'completed-follow-up-assistant', completedFollowUpResponse.visible),
+      events: textEvents(10, 'completed-follow-up-user', 'completed-follow-up-assistant', completedFollowUpResponse.visible),
     })
     await client.emitDispatch(task('completed-follow-up-task', completedSessionKey))
     const completedSessionAfterFollowUp = JSON.parse(await readFile(completedSessionPath, 'utf8')) as Record<string, unknown>
@@ -1092,7 +1100,7 @@ export async function runPackagedAimeBridgeProof(): Promise<PackagedAimeBridgeEv
     await appendScenarioPrompt(scenarioPath, {
       messageId: 'concurrency-second-user',
       createdAt: '2033-05-18T03:33:26.000Z',
-      events: textEvents(9, 'concurrency-second-user', 'concurrency-second-assistant', concurrencySecondResponse.visible),
+      events: textEvents(10, 'concurrency-second-user', 'concurrency-second-assistant', concurrencySecondResponse.visible),
     })
     const secondDispatch = client.emitDispatch(task('concurrency-second-task', concurrencySessionKey))
     await until(() => client.hydrationOrders.some((value) => value.taskId === 'concurrency-second-task'), 'second concurrency hydration')

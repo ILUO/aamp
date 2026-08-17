@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { runDoctor } from '../../src/doctor.js';
 import { AimeAcpError } from '../../src/errors.js';
+import { AIME_ACP_PACKAGE_VERSION } from '../../src/package-info.js';
 
 function captureIo() {
   const stdout = new PassThrough();
@@ -50,7 +51,7 @@ describe('doctor', () => {
       schemaVersion: 1,
       ok: true,
       site: 'cn',
-      packageVersion: '0.1.0',
+      packageVersion: AIME_ACP_PACKAGE_VERSION,
       bytedcliVersion: '0.123.0',
       acpSdkVersion: '0.28.1',
       compatible: true,

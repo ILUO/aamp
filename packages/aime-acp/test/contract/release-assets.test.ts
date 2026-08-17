@@ -48,7 +48,7 @@ describe('release assets', () => {
   it('documents the exact install, auth, doctor, and acpx commands', async () => {
     const readme = await source('README.md');
     for (const command of [
-      'npm install -g aime-acp@0.1.0 --registry=https://bnpm.byted.org',
+      'npm install -g @tengchengwei/aime-acp@0.1.0 --registry=https://bnpm.byted.org',
       'aime-acp auth login --site cn',
       'aime-acp auth status --site cn --json',
       'aime-acp doctor --site cn --json',
@@ -137,7 +137,7 @@ describe('release assets', () => {
     ]) {
       expect(checklist).toContain(heading);
     }
-    expect(checklist).toContain('aime-acp-0.1.0.tgz');
+    expect(checklist).toContain('tengchengwei-aime-acp-<version>.tgz');
     expect(checklist).toContain('SHA-256');
     expect(checklist).toContain('dist.integrity');
     expect(checklist).toContain(

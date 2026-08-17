@@ -981,7 +981,7 @@ test('short command refreshes when same-version bootstrap content changes', () =
   writeFileSync(staleCommand, `#!/usr/bin/env bash
 AAMP_TASK_AGENT_NAME="\${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_VERSION="0.1.0-dev.175"
-AIME_ACP_PKG="\${AIME_ACP_PKG:-aime-acp@0.1.0}"
+AIME_ACP_PKG="\${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.0}"
 `)
   writeFileSync(sourceCommand, `#!/usr/bin/env bash
 AAMP_TASK_AGENT_NAME="\${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"

@@ -17,6 +17,10 @@ import {
 
 import type { AimeTransport } from '../aime/transport.js';
 import { AimeAcpError, toSafeError } from '../errors.js';
+import {
+  AIME_ACP_PACKAGE_NAME,
+  AIME_ACP_PACKAGE_VERSION,
+} from '../package-info.js';
 import { OrderedNotifications } from './notifications.js';
 import { convertPromptContent } from './prompt-content.js';
 
@@ -160,7 +164,11 @@ export function createAcpHandlers(deps: HandlerDependencies): AcpHandlers {
             loadSession: true,
             promptCapabilities: {},
           },
-          agentInfo: { name: 'aime-acp', version: '0.1.0' },
+          agentInfo: {
+            name:
+              AIME_ACP_PACKAGE_NAME.split('/').at(-1) ?? AIME_ACP_PACKAGE_NAME,
+            version: AIME_ACP_PACKAGE_VERSION,
+          },
         };
       } catch (error) {
         return requestError(error, deps.authLoginCommand);
@@ -220,7 +228,9 @@ export function createAcpHandlers(deps: HandlerDependencies): AcpHandlers {
 
 export function createAcpApp(deps: HandlerDependencies): AgentApp {
   const handlers = createAcpHandlers(deps);
-  return agent({ name: 'aime-acp' })
+  return agent({
+    name: AIME_ACP_PACKAGE_NAME.split('/').at(-1) ?? AIME_ACP_PACKAGE_NAME,
+  })
     .onRequest('initialize', ({ params }) => handlers.initialize(params))
     .onRequest('session/new', ({ params }) => handlers.newSession(params))
     .onRequest('session/load', ({ params, client }) =>

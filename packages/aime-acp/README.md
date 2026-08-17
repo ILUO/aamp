@@ -19,7 +19,7 @@ flow has completed.
 Install from the ByteDance npm registry:
 
 ```bash
-npm install -g aime-acp@0.1.0 --registry=https://bnpm.byted.org
+npm install -g @tengchengwei/aime-acp@0.1.0 --registry=https://bnpm.byted.org
 ```
 
 The package embeds the exact-pinned `@bytedance-dev/bytedcli@0.123.0` Node API.
@@ -260,7 +260,7 @@ retryability, and allowlisted metadata. Troubleshooting by code:
 | `AIME_STREAM_INTERRUPTED` | The event stream exceeded recovery limits; load the remote session before continuing. |
 | `AIME_PROTOCOL_DRIFT` | The pinned AIME response/event contract changed; update and requalify the adapter. |
 | `AIME_EMPTY_RESPONSE` | AIME completed without agent text; retry or inspect the remote session. |
-| `AIME_SDK_INCOMPATIBLE` | Installed SDK surface does not match the pin; reinstall `aime-acp@0.1.0`. |
+| `AIME_SDK_INCOMPATIBLE` | Installed SDK surface does not match the pin; reinstall the exact `@tengchengwei/aime-acp` version selected by the Task Agent bootstrap. |
 | `AIME_NETWORK_UNREACHABLE` | Check approved network/proxy access with `doctor`; DNS alone is not sufficient. |
 
 Server stdout is reserved for newline-delimited ACP JSON-RPC. Safe operational

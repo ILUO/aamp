@@ -1,4 +1,4 @@
-# aime-acp 0.1.0 release checklist
+# aime-acp release checklist
 
 Record evidence in an approved release report. A checked box requires the
 named artifact and command output; startup or authentication alone is not an
@@ -9,7 +9,7 @@ end-to-end result.
 - [ ] Git revision: `<full commit>`
 - [ ] Node/npm/platform: `<versions and platform>`
 - [ ] Registry: `https://bnpm.byted.org`
-- [ ] Package: `aime-acp-0.1.0.tgz`
+- [ ] Package: `tengchengwei-aime-acp-<version>.tgz`
 - [ ] Tarball SHA-256: `<sha256>`
 - [ ] `npm pack --json` integrity: `<integrity>`
 - [ ] Published `dist.integrity`: `<not published until approval>`
@@ -83,9 +83,9 @@ Do not publish without explicit package-owner approval.
 Only after approval:
 
 ```bash
-npm publish aime-acp-0.1.0.tgz --registry=https://bnpm.byted.org --tag latest
-npm view aime-acp@0.1.0 version dist.integrity --registry=https://bnpm.byted.org
+npm publish tengchengwei-aime-acp-<version>.tgz --registry=https://bnpm.byted.org --tag latest
+npm view @tengchengwei/aime-acp@<version> version dist.integrity --registry=https://bnpm.byted.org
 ```
 
-Verify registry version `0.1.0` and match `dist.integrity` to the approved
+Verify the registry version and match `dist.integrity` to the approved
 artifact before announcing a release.

@@ -378,14 +378,13 @@ test('Trae one-click package pins move together', () => {
   const acpPackage = JSON.parse(readFileSync(path.resolve(__dirname, '../../aamp-acp-bridge/package.json'), 'utf8'))
   const acpLock = JSON.parse(readFileSync(path.resolve(__dirname, '../../aamp-acp-bridge/package-lock.json'), 'utf8'))
   const taskLock = JSON.parse(readFileSync(path.resolve(__dirname, '../package-lock.json'), 'utf8'))
-  assert.equal(acpPackage.version, '0.1.28-dev.21')
   assert.equal(acpLock.version, acpPackage.version)
   assert.equal(acpLock.packages[''].version, acpPackage.version)
-  assert.equal(packageJson.version, '0.1.0-dev.175')
   assert.equal(taskLock.version, packageJson.version)
   assert.equal(taskLock.packages[''].version, packageJson.version)
-  assert.match(bootstrapSource, /ACP_BRIDGE_PKG="\$\{ACP_BRIDGE_PKG:-@zengxingyuan\/aamp-acp-bridge@0\.1\.28-dev\.21\}"/)
-  assert.match(controllerSource, /@zengxingyuan\/aamp-acp-bridge@0\.1\.28-dev\.21/)
+  const pinnedAcp = `${acpPackage.name}@${acpPackage.version}`
+  assert.equal(bootstrapSource.includes(`ACP_BRIDGE_PKG="\${ACP_BRIDGE_PKG:-${pinnedAcp}}"`), true)
+  assert.equal(controllerSource.includes(pinnedAcp), true)
 })
 
 test('Trae one-click user-facing agent guidance is not stale', () => {

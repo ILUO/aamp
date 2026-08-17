@@ -83,8 +83,11 @@ command for either product; complete login in the selected desktop app.
 `aime` is the ByteDance-internal remote AIME Agent. It is offered only when a
 short `ping aime.bytedance.net` probe succeeds; an explicit `--agent aime`
 selection uses the same gate before any AIME install or login. The launcher
-installs the exact `aime-acp@0.1.0` package from `https://bnpm.byted.org` into
-the isolated npm prefix, then runs its absolute binary with `--site cn`.
+installs the exact AIME version pinned by the bootstrap as
+`@tengchengwei/aime-acp@<version>` from `https://bnpm.byted.org` into
+the shared `$HOME/.aamp/npm-global` prefix, removes the obsolete unscoped
+`aime-acp` package when present, then runs the scoped package's absolute
+`dist/bin.js` entry with `--site cn`.
 Readiness is authoritative only after `auth status`/`auth login` and
 `doctor --site cn --json` succeed; ping is only the one-click visibility gate.
 The generated bridge config rejects attachments and limits AIME task dispatch

@@ -231,7 +231,10 @@ describe('reduceAimeEvent', () => {
       title: 'knowledge_use',
       status: 'in_progress',
       content: [
-        { type: 'content', content: { type: 'text', text: 'Viewing related skills' } },
+        {
+          type: 'content',
+          content: { type: 'text', text: 'Viewing related skills' },
+        },
       ],
     });
   });
@@ -278,6 +281,8 @@ describe('reduceAimeEvent', () => {
     expect(terminal.terminal).toBe('idle');
     expect(terminal.update).toMatchObject({
       sessionUpdate: 'agent_message_chunk',
+      messageId: 'aime-sources',
+      _meta: { 'aime.acp.message_kind': 'sources' },
       content: {
         type: 'text',
         text: 'Sources:\n- [Guide](https://example.test/guide)',

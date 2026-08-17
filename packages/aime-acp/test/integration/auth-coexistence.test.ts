@@ -26,6 +26,9 @@ const smokeLifecycleHarness = fileURLToPath(
 const smokeFlowHarness = fileURLToPath(
   new URL('./smoke-flow-harness.mjs', import.meta.url),
 );
+const packageVersion = JSON.parse(
+  await readFile(new URL('../../package.json', import.meta.url), 'utf8'),
+).version as string;
 
 async function runSharedAuth(
   fixture: PackageFixture,
@@ -130,7 +133,7 @@ describe('cross-process auth handoff', () => {
         schemaVersion: 1,
         ok: false,
         site: 'cn',
-        packageVersion: '0.1.0',
+        packageVersion,
         bytedcliVersion: '0.123.0',
         timingMs: expect.any(Number),
         errorCode: 'INVALID_ARGUMENT',

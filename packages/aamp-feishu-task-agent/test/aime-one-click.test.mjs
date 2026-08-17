@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import crypto from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -120,12 +120,15 @@ function writeFakeAimeCli(file) {
 function createInstalledAime(root) {
   const prefix = path.join(root, 'npm-global')
   const packageDir = path.join(prefix, 'lib/node_modules/@tengchengwei/aime-acp')
-  const cli = path.join(prefix, 'bin/aime-acp')
+  const scopedCli = path.join(packageDir, 'dist/bin.js')
+  const legacyCli = path.join(prefix, 'bin/aime-acp')
   mkdirSync(packageDir, { recursive: true })
-  mkdirSync(path.dirname(cli), { recursive: true })
+  mkdirSync(path.dirname(scopedCli), { recursive: true })
+  mkdirSync(path.dirname(legacyCli), { recursive: true })
   writeFileSync(path.join(packageDir, 'package.json'), '{"name":"@tengchengwei/aime-acp","version":"0.1.0-dev.7"}\n')
-  writeFakeAimeCli(cli)
-  return { cli, prefix }
+  writeFakeAimeCli(scopedCli)
+  writeFakeAimeCli(legacyCli)
+  return { cli: scopedCli, prefix }
 }
 
 function installTaskAgentMetadata(prefix) {
@@ -418,6 +421,8 @@ test('a local binding without a lark-cli profile remains invalid', () => {
 
 test('AIME preparation installs the fixed package into the isolated prefix and builds an absolute ACP command', () => {
   const source = readFileSync(bootstrap, 'utf8')
+  const pinnedAime = /AIME_ACP_PKG="\$\{AIME_ACP_PKG:-@tengchengwei\/aime-acp@([^}]+)\}"/.exec(source)?.[1]
+  assert.ok(pinnedAime)
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-install-'))
   const prefix = path.join(root, 'npm-global')
   const cache = path.join(root, 'npm-cache')
@@ -433,10 +438,10 @@ test('AIME preparation installs the fixed package into the isolated prefix and b
     '  if [ "$previous" = "--prefix" ]; then prefix="$argument"; fi',
     '  previous="$argument"',
     'done',
-    'mkdir -p "$prefix/bin" "$prefix/lib/node_modules/@tengchengwei/aime-acp"',
-    'printf "%s\\n" \"{\\\"name\\\":\\\"@tengchengwei/aime-acp\\\",\\\"version\\\":\\\"0.1.0-dev.7\\\"}\" > "$prefix/lib/node_modules/@tengchengwei/aime-acp/package.json"',
-    'cp "$FAKE_AIME_TEMPLATE" "$prefix/bin/aime-acp"',
-    'chmod +x "$prefix/bin/aime-acp"',
+    'mkdir -p "$prefix/bin" "$prefix/lib/node_modules/@tengchengwei/aime-acp/dist"',
+    `printf "%s\\n" \"{\\\"name\\\":\\\"@tengchengwei/aime-acp\\\",\\\"version\\\":\\\"${pinnedAime}\\\"}\" > "$prefix/lib/node_modules/@tengchengwei/aime-acp/package.json"`,
+    'cp "$FAKE_AIME_TEMPLATE" "$prefix/lib/node_modules/@tengchengwei/aime-acp/dist/bin.js"',
+    'chmod +x "$prefix/lib/node_modules/@tengchengwei/aime-acp/dist/bin.js"',
   ].join('\n'))
 
   const result = runShell([
@@ -450,7 +455,11 @@ test('AIME preparation installs the fixed package into the isolated prefix and b
     'AIME_CALL_LOG="$6"',
     'export FAKE_AIME_TEMPLATE FAKE_NPM_LOG AIME_CALL_LOG',
     'mkdir -p "$NPM_CACHE_DIR"',
+    'mkdir -p "$NPM_GLOBAL_PREFIX/lib/node_modules/aime-acp" "$NPM_GLOBAL_PREFIX/bin"',
+    'printf legacy > "$NPM_GLOBAL_PREFIX/lib/node_modules/aime-acp/package.json"',
+    'printf legacy > "$NPM_GLOBAL_PREFIX/bin/aime-acp"',
     'aime_internal_network_reachable() { return 0; }',
+    'remote_internal_helper() { return 1; }',
     'sanitize_inherited_npm_exec_env() { :; }',
     'npm_log_indicates_cache_error() { return 1; }',
     'reset_npm_cache_for_retry() { :; }',
@@ -460,16 +469,18 @@ test('AIME preparation installs the fixed package into the isolated prefix and b
     aimeInstallFunctions(source),
     'ensure_agent_cli',
     'ensure_agent_cli',
+    'test ! -e "$NPM_GLOBAL_PREFIX/lib/node_modules/aime-acp"',
+    'test ! -e "$NPM_GLOBAL_PREFIX/bin/aime-acp"',
     'build_acp_agent_command',
     'eval "set -- $ACP_AGENT_COMMAND"',
     'printf "%s|%s|%s" "$1" "$2" "$3"',
   ], [prefix, cache, fakeNpm, fakeCliTemplate, npmLog, path.join(root, 'aime-calls.log')])
 
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stdout, `${prefix}/bin/aime-acp|--site|cn`)
+  assert.equal(result.stdout, `${prefix}/lib/node_modules/@tengchengwei/aime-acp/dist/bin.js|--site|cn`)
   const installs = readFileSync(npmLog, 'utf8').trim().split('\n')
   assert.deepEqual(installs, [
-    `install -g --registry https://bnpm.byted.org --cache ${cache} --prefix ${prefix} @tengchengwei/aime-acp@0.1.0-dev.7`,
+    `install -g --registry https://bnpm.byted.org --cache ${cache} --prefix ${prefix} @tengchengwei/aime-acp@${pinnedAime}`,
   ])
 })
 
@@ -491,14 +502,63 @@ test('AIME command preparation keeps the exact ACP command private and logs only
   ], [prefix, detailLog])
 
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stdout, `'${prefix}/bin/aime-acp' --site cn`)
+  assert.equal(result.stdout, `'${prefix}/lib/node_modules/@tengchengwei/aime-acp/dist/bin.js' --site cn`)
   const details = readFileSync(detailLog, 'utf8')
   assert.equal(details, 'AIME ACP configured for site cn\n')
   assert.equal(details.includes(prefix), false)
   assert.equal(details.includes(result.stdout), false)
 })
 
-test('AIME preparation accepts an explicit personal trial package without changing defaults', () => {
+test('AIME legacy cleanup preserves the canonical scoped package CLI symlink', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-canonical-bin-'))
+  const prefix = path.join(root, 'npm-global')
+  const packageDir = path.join(prefix, 'lib/node_modules/@tengchengwei/aime-acp')
+  const scopedCli = path.join(packageDir, 'dist/bin.js')
+  const globalCli = path.join(prefix, 'bin/aime-acp')
+  mkdirSync(path.dirname(scopedCli), { recursive: true })
+  mkdirSync(path.dirname(globalCli), { recursive: true })
+  writeExecutable(scopedCli, '#!/usr/bin/env node\n')
+  symlinkSync('../lib/node_modules/@tengchengwei/aime-acp/dist/bin.js', globalCli)
+
+  const result = runShell([
+    'set -euo pipefail',
+    'NPM_GLOBAL_PREFIX="$1"',
+    aimeAuthFunctions(source),
+    'remove_legacy_aime_acp',
+    'test -L "$NPM_GLOBAL_PREFIX/bin/aime-acp"',
+    'readlink "$NPM_GLOBAL_PREFIX/bin/aime-acp"',
+  ], [prefix])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout.trim(), '../lib/node_modules/@tengchengwei/aime-acp/dist/bin.js')
+})
+
+test('AIME legacy cleanup removes an obsolete bin when the canonical package is absent', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-obsolete-bin-'))
+  const prefix = path.join(root, 'npm-global')
+  const legacyDir = path.join(prefix, 'lib/node_modules/aime-acp')
+  const legacyCli = path.join(legacyDir, 'dist/bin.js')
+  const globalCli = path.join(prefix, 'bin/aime-acp')
+  mkdirSync(path.dirname(legacyCli), { recursive: true })
+  mkdirSync(path.dirname(globalCli), { recursive: true })
+  writeExecutable(legacyCli, '#!/usr/bin/env node\n')
+  symlinkSync('../lib/node_modules/aime-acp/dist/bin.js', globalCli)
+
+  const result = runShell([
+    'set -euo pipefail',
+    'NPM_GLOBAL_PREFIX="$1"',
+    aimeAuthFunctions(source),
+    'remove_legacy_aime_acp',
+    'test ! -e "$NPM_GLOBAL_PREFIX/lib/node_modules/aime-acp"',
+    'test ! -L "$NPM_GLOBAL_PREFIX/bin/aime-acp"',
+  ], [prefix])
+
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('AIME preparation rejects a non-canonical registry package before installation', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const result = runShell([
     'set -euo pipefail',
@@ -506,14 +566,46 @@ test('AIME preparation accepts an explicit personal trial package without changi
     'AIME_ACP_PKG="@luckyterry/aime-acp@0.1.0-dev.1"',
     'AIME_ACP_REGISTRY="https://bnpm.byted.org"',
     aimeAuthFunctions(source),
-    'printf "%s|%s|%s" "$(aime_acp_package_spec)" "$(aime_acp_package_version)" "$(aime_acp_package_dir)"',
+    'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
+    'npm_install_global_from_registry() { exit 91; }',
+    'ensure_aime_acp_cli',
   ], ['/tmp/aamp-aime-personal-trial'])
+
+  assert.equal(result.status, 64)
+  assert.match(result.stderr, /AIME_ACP_PACKAGE_INVALID/)
+})
+
+test('AIME local tgz specs still resolve the installed scoped package directory', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const result = runShell([
+    'set -euo pipefail',
+    'NPM_GLOBAL_PREFIX="$1"',
+    'AIME_ACP_PKG="$2"',
+    aimeAuthFunctions(source),
+    'printf "%s|%s" "$(aime_acp_package_dir)" "$(aime_acp_package_version || true)"',
+  ], ['/tmp/aamp-shared-prefix', '/tmp/tengchengwei-aime-acp-0.1.0-dev.10.tgz'])
 
   assert.equal(result.status, 0, result.stderr)
   assert.equal(
     result.stdout,
-    '@luckyterry/aime-acp@0.1.0-dev.1|0.1.0-dev.1|/tmp/aamp-aime-personal-trial/lib/node_modules/@luckyterry/aime-acp',
+    '/tmp/aamp-shared-prefix/lib/node_modules/@tengchengwei/aime-acp|',
   )
+})
+
+test('AIME local tgz specs force installation even when a scoped package is already present', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const result = runShell([
+    'set -euo pipefail',
+    'NPM_GLOBAL_PREFIX="$1"',
+    'AIME_ACP_PKG="$2"',
+    'mkdir -p "$NPM_GLOBAL_PREFIX/lib/node_modules/@tengchengwei/aime-acp/dist"',
+    'printf "{\"name\":\"@tengchengwei/aime-acp\",\"version\":\"0.1.0-dev.10\"}\n" > "$NPM_GLOBAL_PREFIX/lib/node_modules/@tengchengwei/aime-acp/package.json"',
+    'touch "$NPM_GLOBAL_PREFIX/lib/node_modules/@tengchengwei/aime-acp/dist/bin.js"',
+    aimeAuthFunctions(source),
+    'if aime_acp_install_is_current; then exit 41; fi',
+  ], ['/tmp/aamp-shared-prefix', '/tmp/tengchengwei-aime-acp-0.1.0-dev.10.tgz'])
+
+  assert.equal(result.status, 0, result.stderr)
 })
 
 test('AIME readiness logs in once and requires doctor to pass', () => {
@@ -1395,7 +1487,7 @@ test('production cleanup stops the complete remote AIME helper process group', (
       CACHE_MUTATION: cacheMutation,
       NPM_GLOBAL_PREFIX: prefix,
       NPM_CONFIG_CACHE: cacheDir,
-      AIME_ACP_PKG: '@private/aime-acp@9.9.9',
+      AIME_ACP_PKG: '@tengchengwei/aime-acp@9.9.9',
       AIME_ACP_REGISTRY: 'https://private.registry.invalid',
       AAMP_TASK_AGENT_NAME: '@larktask/aamp-feishu-task-agent',
       AAMP_TASK_AUTO_UPDATE: 'false',
@@ -1457,7 +1549,7 @@ test('remote AIME npm classification stays bounded for noisy output', () => {
       NPM_CALL_LOG: npmCallLog,
       NPM_GLOBAL_PREFIX: prefix,
       NPM_CONFIG_CACHE: path.join(root, 'npm-cache'),
-      AIME_ACP_PKG: '@private/aime-acp@9.9.9',
+      AIME_ACP_PKG: '@tengchengwei/aime-acp@9.9.9',
       AIME_ACP_REGISTRY: 'https://private.registry.invalid',
       AAMP_TASK_AGENT_NAME: '@larktask/aamp-feishu-task-agent',
       AAMP_TASK_AUTO_UPDATE: 'false',

@@ -109,7 +109,9 @@ function step(value: RecordValue): NormalizedPlanStep {
     ...(id === undefined ? {} : { id }),
     ...(value.status === undefined ? {} : { status: nonEmpty(value.status) }),
     ...(value.title === undefined ? {} : { title: nonEmpty(value.title) }),
-    ...(value.summary === undefined ? {} : { summary: nonEmpty(value.summary) }),
+    ...(value.summary === undefined
+      ? {}
+      : { summary: nonEmpty(value.summary) }),
   };
 }
 

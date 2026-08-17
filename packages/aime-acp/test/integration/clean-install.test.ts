@@ -14,7 +14,10 @@ import { parseJsonLines, requireSuccess } from './process.js';
 
 const packageJson = JSON.parse(
   await readFile(new URL('../../package.json', import.meta.url), 'utf8'),
-) as { readonly scripts?: Readonly<Record<string, string>> };
+) as {
+  readonly version: string;
+  readonly scripts?: Readonly<Record<string, string>>;
+};
 
 describe('clean installed package', () => {
   it('keeps network-backed integration tests outside recursive prepack checks', () => {
@@ -57,7 +60,7 @@ describe('clean installed package', () => {
       '@agentclientprotocol/sdk',
     );
 
-    expect(installedPackage.version).toBe('0.1.0');
+    expect(installedPackage.version).toBe(packageJson.version);
     expect([...(await installedEntries(fixture))].sort()).toEqual([
       'LICENSE',
       'README.md',
@@ -128,7 +131,7 @@ describe('clean installed package', () => {
       expect.objectContaining({
         schemaVersion: 1,
         ok: true,
-        packageVersion: '0.1.0',
+        packageVersion: packageJson.version,
         bytedcliVersion: '0.123.0',
         acpSdkVersion: '0.28.1',
         compatible: true,
@@ -161,7 +164,7 @@ describe('clean installed package', () => {
             loadSession: true,
             promptCapabilities: {},
           },
-          agentInfo: { name: 'aime-acp', version: '0.1.0' },
+          agentInfo: { name: 'aime-acp', version: packageJson.version },
         },
       },
     ]);

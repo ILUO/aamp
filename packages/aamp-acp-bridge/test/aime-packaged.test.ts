@@ -207,7 +207,7 @@ test('packaged aime-acp preserves the generic AAMP bridge contract', { timeout: 
     'cancel-drain-follow-up',
     'same-session-concurrency',
   ])
-  assert.equal(evidence.packageVersion, '0.1.0')
+  assert.equal(evidence.packageVersion, FINAL_PACKAGED_AIME_IDENTITY.packageVersion)
   assert.equal(evidence.acpxVersion, '0.11.2')
   assert.equal(evidence.bytedcliVersion, '0.123.0')
   assert.deepEqual(evidence.completedResultContract, {

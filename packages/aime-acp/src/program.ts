@@ -16,6 +16,7 @@ import {
 } from './auth/provider.js';
 import type { BootstrapConfig } from './config.js';
 import { runDoctor } from './doctor.js';
+import { AIME_ACP_PACKAGE_VERSION } from './package-info.js';
 import { runServer } from './server.js';
 
 export interface ProgramStreams {
@@ -210,7 +211,7 @@ export async function runProgram(
     return 0;
   }
   if (config.mode === 'version') {
-    write(streams.stdout, '0.1.0');
+    write(streams.stdout, AIME_ACP_PACKAGE_VERSION);
     return 0;
   }
   if (config.mode === 'auth') {

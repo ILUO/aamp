@@ -27,6 +27,11 @@ const acpxVersion = '0.11.2';
 const registry = 'https://bnpm.byted.org';
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const smokeDirectory = dirname(fileURLToPath(import.meta.url));
+const packageMetadata = JSON.parse(
+  await readFile(join(packageRoot, 'package.json'), 'utf8'),
+);
+const packageVersion = packageMetadata.version;
+const packageTarball = `tengchengwei-aime-acp-${packageVersion}.tgz`;
 const sentinels = [
   'CREDENTIAL_SENTINEL',
   'credential-do-not-emit',
@@ -235,7 +240,7 @@ async function main() {
     requireSuccess(packed, 'npm pack');
     const packResult = parseFinalJson(packed.stdout);
     const artifact = Array.isArray(packResult) ? packResult[0] : packResult;
-    if (artifact?.filename !== 'aime-acp-0.1.0.tgz') {
+    if (artifact?.filename !== packageTarball) {
       throw new Error('unexpected package artifact');
     }
     tarballPath = join(root, artifact.filename);
@@ -256,13 +261,16 @@ async function main() {
     requireSuccess(installed, 'npm install packaged smoke project');
 
     const installedPackage = JSON.parse(
-      await readFile(join(root, 'node_modules/aime-acp/package.json'), 'utf8'),
+      await readFile(
+        join(root, 'node_modules/@tengchengwei/aime-acp/package.json'),
+        'utf8',
+      ),
     );
     const installedAcpx = JSON.parse(
       await readFile(join(root, 'node_modules/acpx/package.json'), 'utf8'),
     );
     if (
-      installedPackage.version !== '0.1.0' ||
+      installedPackage.version !== packageVersion ||
       installedAcpx.version !== acpxVersion
     ) {
       throw new Error('installed package versions do not match the smoke pin');
@@ -307,7 +315,7 @@ async function main() {
     await rename(installedBytedcli, originalBytedcli);
     await symlink(fakePackageDirectory, installedBytedcli, 'dir');
     const installedRequire = createRequire(
-      join(root, 'node_modules/aime-acp/dist/bin.js'),
+      join(root, 'node_modules/@tengchengwei/aime-acp/dist/bin.js'),
     );
     const resolvedFakeEntry = installedRequire.resolve(
       '@bytedance-dev/bytedcli',
@@ -416,9 +424,9 @@ async function main() {
       `${JSON.stringify({
         schemaVersion: 1,
         ok: true,
-        packageVersion: '0.1.0',
+        packageVersion,
         acpxVersion,
-        tarball: 'aime-acp-0.1.0.tgz',
+        tarball: packageTarball,
         sha256: digest,
         frames: frames.length,
         final: 'AIME_ACP_OK',

@@ -52,6 +52,18 @@ export interface AcpResult {
   streamedAssistantText: boolean
 }
 
+export function selectFinalAssistantOutput(
+  assistantMessages: ReadonlyMap<string, string>,
+  messageOrder: readonly string[],
+  excludedMessageKeys: ReadonlySet<string> = new Set(),
+): string {
+  return [...messageOrder]
+    .reverse()
+    .filter((messageKey) => !excludedMessageKeys.has(messageKey))
+    .map((messageKey) => assistantMessages.get(messageKey)?.trim() ?? '')
+    .find((message) => message.length > 0) ?? ''
+}
+
 export interface AcpAgentProbeOptions {
   sessionName?: string
   timeoutMs?: number
@@ -90,6 +102,12 @@ function extractContentText(content: unknown): string {
   if (resource && typeof resource.text === 'string') return resource.text
 
   return ''
+}
+
+function isAimeSourcesEvent(event: AcpEvent): boolean {
+  if (event.messageId !== 'aime-sources') return false
+  const meta = asRecord(event._meta)
+  return meta?.['aime.acp.message_kind'] === 'sources'
 }
 
 function extractToolLocations(value: unknown): Array<{ path: string; line?: number }> | undefined {
@@ -714,6 +732,7 @@ export class AcpxClient {
     let streamedAssistantText = false
     const assistantMessages = new Map<string, string>()
     const assistantMessageOrder: string[] = []
+    const excludedAssistantMessageKeys = new Set<string>()
     let lastAssistantMessageKey: string | undefined
     let lastThoughtMessageKey: string | undefined
     let thoughtMessageCount = 0
@@ -747,7 +766,10 @@ export class AcpxClient {
           const textChunk = extractContentText(event.content)
           if (textChunk) {
             const explicitMessageId = asString(event.messageId)
-            const messageKey = explicitMessageId
+            const aimeSourcesEvent = isAimeSourcesEvent(event)
+            const messageKey = aimeSourcesEvent
+              ? 'metadata:aime-sources'
+              : explicitMessageId
               ?? (previousEventType === 'agent_message_chunk' && lastAssistantMessageKey
                 ? lastAssistantMessageKey
                 : `anonymous:${assistantMessageOrder.length}`)
@@ -757,13 +779,17 @@ export class AcpxClient {
               assistantMessageOrder.push(messageKey)
             }
 
+            if (aimeSourcesEvent) {
+              excludedAssistantMessageKeys.add(messageKey)
+            }
+
             assistantMessages.set(messageKey, `${assistantMessages.get(messageKey) ?? ''}${textChunk}`)
             lastAssistantMessageKey = messageKey
             streamedAssistantText = true
             handlers?.onTextChunk?.({
               channel: 'assistant',
               text: textChunk,
-              messageId: messageKey,
+              messageId: explicitMessageId ?? messageKey,
             })
           }
           previousEventType = event.type
@@ -837,10 +863,11 @@ export class AcpxClient {
             processLine(stdoutBuffer.replace(/\r$/, ''))
           }
 
-          const finalAssistantOutput = [...assistantMessageOrder]
-            .reverse()
-            .map((messageKey) => assistantMessages.get(messageKey)?.trim() ?? '')
-            .find((message) => message.length > 0) ?? ''
+          const finalAssistantOutput = selectFinalAssistantOutput(
+            assistantMessages,
+            assistantMessageOrder,
+            excludedAssistantMessageKeys,
+          )
           const output = finalAssistantOutput
             || sanitizePromptOutput(rawStdout)
             || sanitizePromptOutput(stderr)

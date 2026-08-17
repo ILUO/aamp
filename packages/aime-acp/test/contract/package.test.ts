@@ -7,6 +7,7 @@ const pkg = JSON.parse(
 
 describe('package contract', () => {
   it('pins the only production SDK dependencies and exposes one bin', () => {
+    expect(pkg.name).toBe('@tengchengwei/aime-acp');
     expect(pkg.bin).toEqual({ 'aime-acp': 'dist/bin.js' });
     expect(pkg.engines).toEqual({ node: '>=20' });
     expect(pkg.dependencies).toEqual({

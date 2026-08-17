@@ -350,6 +350,8 @@ describe('TurnRuntime happy path', () => {
     expect(sink.values.at(-1)).toEqual(
       expect.objectContaining({
         sessionUpdate: 'agent_message_chunk',
+        messageId: 'aime-sources',
+        _meta: { 'aime.acp.message_kind': 'sources' },
         content: {
           type: 'text',
           text: 'Sources:\n- [Guide](https://example.test/guide)',

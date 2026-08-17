@@ -226,6 +226,8 @@ function sourceUpdate(
   if (unique.size === 0) return undefined;
   return {
     sessionUpdate: 'agent_message_chunk',
+    messageId: 'aime-sources',
+    _meta: { 'aime.acp.message_kind': 'sources' },
     content: {
       type: 'text',
       text: `Sources:\n${[...unique.values()]
@@ -345,7 +347,9 @@ export class TurnRuntime {
           });
           const iterator = stream[Symbol.asyncIterator]();
           const readSegment = async (): Promise<void> => {
-            for await (const item of { [Symbol.asyncIterator]: () => iterator }) {
+            for await (const item of {
+              [Symbol.asyncIterator]: () => iterator,
+            }) {
               eventTimestamp(item);
               const prepared = recoveryCandidate.cursor.prepare(item);
               prepared.commit();
@@ -488,7 +492,9 @@ export class TurnRuntime {
       }
       active.userMessageId = sent.messageId;
       active.sentAtMs = strictTimestamp(sent.createdAt);
-      this.debug(`[turn] send ok messageId=${sent.messageId} ms=${this.clock.now() - startedAt}`);
+      this.debug(
+        `[turn] send ok messageId=${sent.messageId} ms=${this.clock.now() - startedAt}`,
+      );
       session.turnState = 'Streaming';
       operation = 'stream';
       const foreground = this.consumeCurrentTurn(session)
@@ -500,7 +506,9 @@ export class TurnRuntime {
           active.signalForegroundDone();
         });
       const consumed = await this.raceCancellation(active, foreground);
-      this.debug(`[turn] foreground done result=${consumed === CANCELLED ? 'cancelled' : 'end_turn'} ms=${this.clock.now() - startedAt}`);
+      this.debug(
+        `[turn] foreground done result=${consumed === CANCELLED ? 'cancelled' : 'end_turn'} ms=${this.clock.now() - startedAt}`,
+      );
       if (consumed === CANCELLED) return { stopReason: 'cancelled' };
       result = consumed;
     } catch (error) {
@@ -718,9 +726,10 @@ export class TurnRuntime {
     let segmentIndex = 0;
 
     while (true) {
-      const segmentStartedAt = this.clock.now();
       segmentIndex += 1;
-      this.debug(`[turn] segment ${segmentIndex} start offset=${firstSegment ? session.cursor.nextEventOffset : active.replayFloor} ms=${this.clock.now() - startedAt}`);
+      this.debug(
+        `[turn] segment ${segmentIndex} start offset=${firstSegment ? session.cursor.nextEventOffset : active.replayFloor} ms=${this.clock.now() - startedAt}`,
+      );
       const segmentStartVersion = session.cursor.version;
       const segmentStartOffset = firstSegment
         ? session.cursor.nextEventOffset
@@ -745,7 +754,9 @@ export class TurnRuntime {
         while (true) {
           const item = await this.clock.deadline(iterator.next(), 20_000);
           if (item.done) break;
-          this.debug(`[turn] segment ${segmentIndex} event kind=${item.value.kind} status=${item.value.kind === 'progress' ? (item.value as { status?: string }).status ?? '' : ''} ms=${this.clock.now() - startedAt}`);
+          this.debug(
+            `[turn] segment ${segmentIndex} event kind=${item.value.kind} status=${item.value.kind === 'progress' ? ((item.value as { status?: string }).status ?? '') : ''} ms=${this.clock.now() - startedAt}`,
+          );
           let terminal: Awaited<ReturnType<TurnRuntime['consumeEvent']>>;
           try {
             terminal = await this.consumeEvent(
@@ -783,7 +794,9 @@ export class TurnRuntime {
         throw segmentError;
       }
       const committedNewEvent = session.cursor.version > segmentStartVersion;
-      this.debug(`[turn] segment ${segmentIndex} done committed=${committedNewEvent} consecutiveEmpty=${consecutiveEmpty + (committedNewEvent ? 0 : 1)} elapsed=${this.clock.now() - startedAt}ms error=${segmentError ? (segmentError as Error).message.slice(0, 80) : 'none'}`);
+      this.debug(
+        `[turn] segment ${segmentIndex} done committed=${committedNewEvent} consecutiveEmpty=${consecutiveEmpty + (committedNewEvent ? 0 : 1)} elapsed=${this.clock.now() - startedAt}ms error=${segmentError ? (segmentError as Error).message.slice(0, 80) : 'none'}`,
+      );
       if (committedNewEvent) {
         retries = 0;
         backoffIndex = 0;
@@ -796,7 +809,9 @@ export class TurnRuntime {
         const remote = await this.transport.getSession(session.sessionId, {
           withMessages: true,
         });
-        this.debug(`[turn] segment ${segmentIndex} session check status=${remote.status} assistantFinished=${active.assistantFinished} emitted=${active.emittedPresentableContent}`);
+        this.debug(
+          `[turn] segment ${segmentIndex} session check status=${remote.status} assistantFinished=${active.assistantFinished} emitted=${active.emittedPresentableContent}`,
+        );
         if (!remoteRunning(remote.status) && active.assistantFinished) {
           if (!active.emittedPresentableContent) return EMPTY_TERMINAL;
           this.sessions.completeTurn(session, 'Idle');

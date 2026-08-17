@@ -4,6 +4,7 @@ import type { AimeTransport } from './aime/transport.js';
 import type { ManagedUserAuthGuard } from './auth/identity-guard.js';
 import type { AimeSite } from './config.js';
 import { toSafeError } from './errors.js';
+import { AIME_ACP_PACKAGE_VERSION } from './package-info.js';
 
 export interface DoctorStreams {
   readonly stdout: NodeJS.WritableStream;
@@ -14,7 +15,7 @@ export interface DoctorResult {
   readonly schemaVersion: 1;
   readonly ok: boolean;
   readonly site: AimeSite;
-  readonly packageVersion: '0.1.0';
+  readonly packageVersion: string;
   readonly bytedcliVersion: '0.123.0';
   readonly acpSdkVersion: '0.28.1';
   readonly compatible: boolean;
@@ -74,7 +75,7 @@ export async function runDoctor(
       schemaVersion: 1,
       ok: true,
       site: input.site,
-      packageVersion: '0.1.0',
+      packageVersion: AIME_ACP_PACKAGE_VERSION,
       bytedcliVersion: '0.123.0',
       acpSdkVersion: '0.28.1',
       compatible,
@@ -89,7 +90,7 @@ export async function runDoctor(
       schemaVersion: 1,
       ok: false,
       site: input.site,
-      packageVersion: '0.1.0',
+      packageVersion: AIME_ACP_PACKAGE_VERSION,
       bytedcliVersion: '0.123.0',
       acpSdkVersion: '0.28.1',
       compatible,

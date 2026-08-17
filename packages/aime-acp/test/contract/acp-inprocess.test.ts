@@ -19,6 +19,7 @@ import {
 } from '../../src/acp/handlers.js';
 import type { AimeTransport } from '../../src/aime/transport.js';
 import { AimeAcpError } from '../../src/errors.js';
+import { AIME_ACP_PACKAGE_VERSION } from '../../src/package-info.js';
 import { runServer } from '../../src/server.js';
 import { SessionManager } from '../../src/session/session-manager.js';
 
@@ -149,7 +150,7 @@ describe('typed ACP app', () => {
         loadSession: true,
         promptCapabilities: {},
       },
-      agentInfo: { name: 'aime-acp', version: '0.1.0' },
+      agentInfo: { name: 'aime-acp', version: AIME_ACP_PACKAGE_VERSION },
     });
 
     expect(checkCompatibility).toHaveBeenCalledOnce();
@@ -830,7 +831,7 @@ describe('ACP stdio server', () => {
           loadSession: true,
           promptCapabilities: {},
         },
-        agentInfo: { name: 'aime-acp', version: '0.1.0' },
+        agentInfo: { name: 'aime-acp', version: AIME_ACP_PACKAGE_VERSION },
       },
     });
   });

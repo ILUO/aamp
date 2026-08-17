@@ -8,6 +8,10 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const expectedBytedcliVersion = '0.123.0';
+const packageMetadata = JSON.parse(
+  await readFile(new URL('../../package.json', import.meta.url), 'utf8'),
+);
+const packageVersion = packageMetadata.version;
 const allowedSites = new Set(['cn', 'i18n-tt']);
 const requiredHomeMarker = '.aime-acp-real-auth-smoke-home';
 const safeErrorCodes = new Set([
@@ -59,7 +63,7 @@ function safeResult(ok, site, startedAt, errorCode) {
     schemaVersion: 1,
     ok,
     site,
-    packageVersion: '0.1.0',
+    packageVersion,
     bytedcliVersion: expectedBytedcliVersion,
     timingMs: Date.now() - startedAt,
     ...(errorCode === undefined ? {} : { errorCode }),
