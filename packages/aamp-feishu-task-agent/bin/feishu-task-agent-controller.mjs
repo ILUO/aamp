@@ -179,17 +179,17 @@ function addSecret(value) {
 function redact(value) {
   let output = String(value ?? '');
   for (const secret of secrets) output = output.split(secret).join('[REDACTED]');
+  output = output.replace(/\b(Bearer|Basic)\s+[^\s,}]+/gi, '$1 [REDACTED]');
   output = output
     .replace(/([?&]pair_code=)[^&\s"']+/gi, '$1[REDACTED]')
-    .replace(/("?(?:app_secret|appSecret|smtpPassword|mailboxToken|access_token|device_code|pairCode)"?\s*[:=]\s*"?)[^",\s}]+/gi, '$1[REDACTED]')
+    .replace(/("?(?:app_secret|appSecret|smtpPassword|mailboxToken|access_token|accessToken|refresh_token|refreshToken|id_token|idToken|session_token|sessionToken|device_code|pairCode|api_key|apiKey|api-key|private_key|privateKey|private-key|auth_token|auth-token|password|authorization|cookie|credential|secret|token|session)"?\s*[:=]\s*"?)(?:(?:Bearer|Basic)\s+)?[^",\s}]+/gi, '$1[REDACTED]')
     .replace(/(--app-secret\s+)[^\s]+/gi, '$1[REDACTED]');
   return output;
 }
 
-const REMOTE_OUTPUT_REDACTION = '[REMOTE OUTPUT REDACTED]';
 const REMOTE_EVENT_PATH_PREFIX = 'aamp-runtime:';
-const REMOTE_AGENT_FAILED = 'REMOTE_AGENT_FAILED: Remote Agent execution failed. Check local redacted diagnostics.';
-const REMOTE_AGENT_PREPARATION_FAILED = 'REMOTE_AGENT_PREPARATION_FAILED: Remote Agent preparation failed. Check local redacted diagnostics.';
+const REMOTE_AGENT_FAILED = 'REMOTE_AGENT_FAILED: Remote Agent execution failed.';
+const REMOTE_AGENT_PREPARATION_FAILED = 'REMOTE_AGENT_PREPARATION_FAILED: Remote Agent preparation failed.';
 const REMOTE_FAILURE_CODES = new Set([
   'AIME_ACCESS_DENIED',
   'AIME_EMPTY_RESPONSE',
@@ -231,35 +231,11 @@ function encodeRemoteEventPath(value, options = {}) {
 }
 
 function safeRemoteFailure(value) {
-  const message = String(value || '');
+  const message = redact(value);
   const candidate = /\b(?:AIME|AUTH|REMOTE)_[A-Z0-9_]+\b/.exec(message)?.[0];
   const code = candidate && REMOTE_FAILURE_CODES.has(candidate) ? candidate : 'REMOTE_AGENT_FAILED';
-  if (code === 'AUTH_REQUIRED') {
-    return { code, message: 'AUTH_REQUIRED: Remote Agent authentication is required.' };
-  }
-  if (code === 'AUTH_IDENTITY_CHANGED') {
-    return {
-      code,
-      message: 'AUTH_IDENTITY_CHANGED: Restart the binding after verifying the remote account.',
-    };
-  }
-  if (code === 'REMOTE_ARTIFACT_UNSUPPORTED') {
-    return {
-      code,
-      message: 'REMOTE_ARTIFACT_UNSUPPORTED: Remote Agent file delivery is not supported.',
-    };
-  }
-  if (code === 'REMOTE_AGENT_FAILED') return { code, message: REMOTE_AGENT_FAILED };
-  if (code.startsWith('AUTH_')) {
-    return {
-      code,
-      message: `${code}: Remote Agent authentication failed. Check local redacted diagnostics.`,
-    };
-  }
-  return {
-    code,
-    message: `${code}: Remote Agent execution failed. Check local redacted diagnostics.`,
-  };
+  if (message.trim()) return { code, message };
+  return { code, message: code === 'REMOTE_AGENT_FAILED' ? REMOTE_AGENT_FAILED : `${code}: Remote Agent execution failed.` };
 }
 
 function trustedAgentExecutionLocations(entries = []) {
@@ -413,16 +389,17 @@ function projectRemoteOperationalEvent(document, options = {}) {
 }
 
 function safeOperationalLine(line, options = {}) {
-  if (!isRemoteExecution(options)) return redact(line);
   if (!String(line || '').trim()) return '';
+  const text = String(line).trim();
+  if (!isRemoteExecution(options)) return redact(text);
   try {
-    const document = JSON.parse(String(line).trim());
+    const document = JSON.parse(text);
     const localEvent = projectTrustedLocalAgentEvent(document, options);
     if (localEvent) return JSON.stringify(localEvent);
     const projected = projectRemoteOperationalEvent(document, options);
-    return projected ? JSON.stringify(projected) : REMOTE_OUTPUT_REDACTION;
+    return projected ? JSON.stringify(projected) : redact(text);
   } catch {
-    return REMOTE_OUTPUT_REDACTION;
+    return redact(text);
   }
 }
 
@@ -1328,11 +1305,11 @@ async function runBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
   const processRecord = trackTransientProcess(child, `Bootstrap helper ${action}`, helperProcessGroup);
   let result = '';
   const relayWrites = [];
-  const relayedStreams = new Set();
+  const remoteDiagnostics = [];
   const relayRemoteLine = (streamName, line) => {
-    if (!String(line || '').trim() || relayedStreams.has(streamName)) return;
-    relayedStreams.add(streamName);
+    if (!String(line || '').trim()) return;
     const safeLine = safeOperationalLine(line, helperOutputOptions);
+    remoteDiagnostics.push(safeLine);
     const target = streamName === 'stderr' ? process.stderr : process.stdout;
     target.write(`${safeLine}\n`);
     if (process.env.ONE_CLICK_LOG && process.env.ONE_CLICK_LOG !== '/dev/null') {
@@ -1351,13 +1328,17 @@ async function runBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
   await Promise.allSettled(relayWrites);
   throwIfStopping();
   if (exit.code !== 0) {
-    if (remoteHelper) throw new Error(REMOTE_AGENT_PREPARATION_FAILED);
+    if (remoteHelper) {
+      throw new Error(remoteDiagnostics.at(-1) || REMOTE_AGENT_PREPARATION_FAILED);
+    }
     throw exit.error || new Error(`Bootstrap helper ${action} failed${exit.signal ? ` (${exit.signal})` : ''}`);
   }
   try {
     return JSON.parse(result.trim() || '{}');
   } catch {
-    if (remoteHelper) throw new Error(REMOTE_AGENT_PREPARATION_FAILED);
+    if (remoteHelper) {
+      throw new Error(remoteDiagnostics.at(-1) || REMOTE_AGENT_PREPARATION_FAILED);
+    }
     throw new Error(`Bootstrap helper ${action} returned invalid result`);
   }
 }
@@ -1590,7 +1571,11 @@ async function startManagedProcess({
     record.emitter.emit('output', safeLine);
     if (streamName === 'stdout' && safeLine.trim()) {
       try {
-        const event = JSON.parse(safeLine.trim());
+        const rawEvent = JSON.parse(String(line).trim());
+        const event = executionLocation === 'remote'
+          ? (projectTrustedLocalAgentEvent(rawEvent, outputOptions)
+            || projectRemoteOperationalEvent(rawEvent, outputOptions))
+          : JSON.parse(safeLine.trim());
         if (event && typeof event.type === 'string') {
           record.events.push(event);
           record.emitter.emit('event', event);

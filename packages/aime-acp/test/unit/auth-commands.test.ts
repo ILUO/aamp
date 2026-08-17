@@ -149,7 +149,7 @@ describe('auth commands', () => {
     );
   });
 
-  it('rechecks status after a successful blocking login and filters progress', async () => {
+  it('rechecks status after a successful blocking login and shows the challenge URL without secrets', async () => {
     const io = captureIo();
     const auth = fakeAuth();
     auth.status = vi
@@ -171,8 +171,8 @@ describe('auth commands', () => {
       ): Promise<LoginOutcome> => {
         onEvent({
           type: 'challenge',
-          url: 'https://do-not-print-this.example',
-          displayCode: 'DO-NOT-PRINT',
+          url: 'https://login.example.test/verify?ticket=safe-ticket',
+          displayCode: 'SAFE-CODE',
         });
         return { status: 'success' };
       },
@@ -187,9 +187,11 @@ describe('auth commands', () => {
       command: 'auth.login',
       status: 'authenticated',
     });
-    expect(`${io.stdoutText()}${io.stderrText()}`).not.toContain(
-      'do-not-print-this',
+    expect(io.stderrText()).toContain(
+      'Open: https://login.example.test/verify?ticket=safe-ticket',
     );
+    expect(io.stderrText()).toContain('Code: SAFE-CODE');
+    expect(io.stderrText()).not.toContain('resume-token');
   });
 
   it.each([['expired'], ['denied']] as const)(

@@ -335,7 +335,7 @@ test('remote AIME profile actions reject before touching a retained legacy profi
       },
     })
     assert.notEqual(result.status, 0)
-    assert.match(result.stderr, /REMOTE_AGENT_PREPARATION_FAILED/)
+    assert.match(result.stderr, /remote bindings do not use lark-cli profiles/)
     assert.deepEqual(readFileSync(profileFile), sentinel)
     assert.equal(statSync(profileFile).mode & 0o777, originalMode)
   }

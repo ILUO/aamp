@@ -201,14 +201,21 @@ function writeProgress(
   event: SafeLoginEvent,
   streams: AuthCommandStreams,
 ): void {
+  if (event.type === 'challenge') {
+    write(streams.stderr, 'Login challenge received.');
+    if (event.url !== undefined) write(streams.stderr, `Open: ${event.url}`);
+    if (event.displayCode !== undefined)
+      write(streams.stderr, `Code: ${event.displayCode}`);
+    if (event.expiresAt !== undefined)
+      write(streams.stderr, `Expires: ${event.expiresAt}`);
+    return;
+  }
   const message =
-    event.type === 'challenge'
-      ? 'Login challenge received.'
-      : event.type === 'browser'
-        ? 'Login browser step received.'
-        : event.type === 'waiting'
-          ? 'Waiting for login completion.'
-          : 'Login completed.';
+    event.type === 'browser'
+      ? 'Login browser step received.'
+      : event.type === 'waiting'
+        ? 'Waiting for login completion.'
+        : 'Login completed.';
   write(streams.stderr, message);
 }
 

@@ -176,9 +176,6 @@ USAGE
 
 write_one_click_log() {
   local line="$1"
-  if remote_internal_helper; then
-    line="[aamp-one-click] REMOTE_HELPER_OUTPUT_REDACTED"
-  fi
   if [ -n "$ONE_CLICK_LOG" ]; then
     printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$line" >>"$ONE_CLICK_LOG" 2>/dev/null || true
   fi
@@ -186,22 +183,14 @@ write_one_click_log() {
 
 agent_log() {
   local line
-  if remote_internal_helper; then
-    line="[aamp-one-click] Remote Agent preparation in progress."
-  else
-    line="[aamp-one-click] $*"
-  fi
+  line="[aamp-one-click] $*"
   printf '%s\n' "$line"
   write_one_click_log "$line"
 }
 
 agent_detail() {
   local line
-  if remote_internal_helper; then
-    line="[aamp-one-click] Remote Agent preparation detail redacted."
-  else
-    line="[aamp-one-click] $*"
-  fi
+  line="[aamp-one-click] $*"
   write_one_click_log "$line"
   if [ "$AAMP_ONE_CLICK_VERBOSE" = "true" ]; then
     printf '%s\n' "$line"
@@ -246,9 +235,6 @@ agent_success() {
 agent_fail() {
   local reason="$*"
   local line
-  if remote_internal_helper; then
-    reason="REMOTE_AGENT_PREPARATION_FAILED: Remote Agent preparation failed. Check local redacted diagnostics."
-  fi
   line="[aamp-one-click] ERROR: $reason"
   write_one_click_log "$line"
   if [ -n "$ERRORS_LOG" ]; then

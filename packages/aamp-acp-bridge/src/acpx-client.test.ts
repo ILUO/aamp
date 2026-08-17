@@ -15,7 +15,7 @@ afterEach(() => {
   }
 })
 
-function createFakeAcpx(mode: 'success' | 'auth-failure' | 'auth-with-output' | 'json-auth-failure' | 'auth-discussion' | 'timeout' | 'close-retry'): { cwd: string; logFile: string } {
+function createFakeAcpx(mode: 'success' | 'auth-failure' | 'auth-with-output' | 'json-auth-failure' | 'json-aime-auth-failure' | 'auth-discussion' | 'timeout' | 'close-retry'): { cwd: string; logFile: string } {
   const cwd = mkdtempSync(join(tmpdir(), 'aamp-acpx-readiness-test-'))
   tempDirectories.push(cwd)
   const binDirectory = join(cwd, 'node_modules', '.bin')
@@ -37,6 +37,10 @@ case "${mode}:$*" in
   json-auth-failure:*" prompt "*)
     printf '%s\\n' 'partial assistant reply'
     printf '%s\\n' '{"jsonrpc":"2.0","id":"1","error":{"message":"Authentication required"}}'
+    exit 0
+    ;;
+  json-aime-auth-failure:*" prompt "*)
+    printf '%s\\n' '{"jsonrpc":"2.0","id":"1","error":{"code":-32001,"message":"Managed user authentication is required. Run \`aime-acp auth login --site cn\`.","data":{"code":"AUTH_REQUIRED","retryable":false}}}'
     exit 0
     ;;
   auth-discussion:*" prompt "*)
@@ -269,6 +273,18 @@ test('prompt rejects a bare authentication message from a JSON-RPC error', async
   await assert.rejects(
     client.prompt('fake-agent --acp', 'aamp-workbuddy', 'hello'),
     /^Error: Authentication required$/,
+  )
+})
+
+test('prompt rejects a structured AIME AUTH_REQUIRED response with safe login guidance', async () => {
+  const { cwd } = createFakeAcpx('json-aime-auth-failure')
+  const client = new AcpxClient(cwd)
+
+  await assert.rejects(
+    client.prompt('fake-agent --acp', 'aamp-aime', 'hello'),
+    {
+      message: 'AUTH_REQUIRED: Managed user authentication is required. Run `aime-acp auth login --site cn`.',
+    },
   )
 })
 

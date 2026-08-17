@@ -82,7 +82,7 @@ export interface AuthFacade {
     byteCloudAuthUserInfo(): Promise<unknown>;
     byteCloudAuthLogin(params: {
       site: AimeSite;
-      autoOpenBrowser: false;
+      autoOpenBrowser: true;
       onEvent: (event: unknown) => void;
     }): Promise<unknown>;
     byteCloudAuthBeginLogin(): Promise<unknown>;
@@ -294,7 +294,7 @@ class ManagedUserAuthProvider implements AuthProvider {
   async login(onEvent: (event: SafeLoginEvent) => void): Promise<LoginOutcome> {
     const value = await this.facade.auth.byteCloudAuthLogin({
       site: this.config.site,
-      autoOpenBrowser: false,
+      autoOpenBrowser: true,
       onEvent: (event) => {
         const safeEvent = safeLoginEvent(event);
         if (safeEvent !== undefined) onEvent(safeEvent);

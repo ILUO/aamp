@@ -269,6 +269,41 @@ function sanitizePromptOutput(output: string): string {
 
 const AUTHENTICATION_FAILURE_LINE = /^Authentication (?:required|failed)(?:\. Please use \/login command to sign in to your account\.?)?$/i
 
+const AIME_AUTH_REQUIRED_CODE = 'AUTH_REQUIRED'
+const AIME_LOGIN_COMMAND_PATTERN = /\baime-acp auth login --site (cn|i18n-tt)\b/
+
+function findAimeAuthRequiredFailure(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const match = findAimeAuthRequiredFailure(item)
+      if (match) return match
+    }
+    return undefined
+  }
+
+  const record = asRecord(value)
+  if (!record) return undefined
+  const data = asRecord(record.data)
+  const code = typeof record.code === 'string'
+    ? record.code
+    : typeof data?.code === 'string'
+      ? data.code
+      : undefined
+  if (code === AIME_AUTH_REQUIRED_CODE) {
+    const sourceMessage = [record.message, data?.message]
+      .find((item): item is string => typeof item === 'string')
+    const site = sourceMessage ? AIME_LOGIN_COMMAND_PATTERN.exec(sourceMessage)?.[1] : undefined
+    return 'AUTH_REQUIRED: Managed user authentication is required.'
+      + (site ? ' Run `aime-acp auth login --site ' + site + '`.' : '')
+  }
+
+  for (const item of Object.values(record)) {
+    const match = findAimeAuthRequiredFailure(item)
+    if (match) return match
+  }
+  return undefined
+}
+
 function findAuthenticationFailureLine(value: unknown): string | undefined {
   if (typeof value === 'string') {
     return value
@@ -299,6 +334,11 @@ function findAuthenticationFailureLine(value: unknown): string | undefined {
 }
 
 function throwIfAuthenticationFailure(...values: unknown[]): void {
+  const aimeFailure = values
+    .map((value) => findAimeAuthRequiredFailure(value))
+    .find((value): value is string => value !== undefined)
+  if (aimeFailure) throw new Error(aimeFailure)
+
   const failure = findAuthenticationFailureLine(values)
   if (failure) throw new Error(failure)
 }

@@ -309,26 +309,35 @@ export function formatTaskAgentError(
 ): string {
   const message = error instanceof Error ? error.message : String(error)
   if (executionLocation === 'remote') {
+    const diagnostic = redactRemoteDiagnostic(message)
     const safeCode = /\b(?:REMOTE_ARTIFACT_UNSUPPORTED|(?:AIME|AUTH)_[A-Z0-9_]+)\b/.exec(message)?.[0]
     if (safeCode === 'REMOTE_ARTIFACT_UNSUPPORTED') {
       return 'REMOTE_ARTIFACT_UNSUPPORTED: Remote Agent file delivery is not supported.'
     }
     if (safeCode === 'AUTH_REQUIRED') {
+      const site = /\baime-acp auth login --site (cn|i18n-tt)\b/.exec(diagnostic)?.[1]
       return 'AUTH_REQUIRED: Remote Agent authentication is required.'
+        + (site ? ' Run `aime-acp auth login --site ' + site + '`.' : '')
     }
     if (safeCode === 'AUTH_IDENTITY_CHANGED') {
       return 'AUTH_IDENTITY_CHANGED: Restart the binding after verifying the remote account.'
     }
-    if (safeCode) {
-      return `${safeCode}: Remote Agent execution failed. Check local redacted diagnostics.`
-    }
-    return 'REMOTE_AGENT_FAILED: Remote Agent execution failed. Check local redacted diagnostics.'
+    if (diagnostic.trim()) return diagnostic
+    return safeCode ? `${safeCode}: Remote Agent execution failed.` : 'REMOTE_AGENT_FAILED: Remote Agent execution failed.'
   }
   const productName = workbuddyProductName(agentName)
   if (productName && ACP_AUTH_FAILURE_PATTERN.test(message)) {
     return `${productName} login expired. Open ${productName} and sign in, then retry the task.`
   }
   return message
+}
+
+function redactRemoteDiagnostic(message: string): string {
+  return message
+    .replace(/\b(Bearer|Basic)\s+[^\s,}]+/gi, '$1 [REDACTED]')
+    .replace(/(\b(?:Authorization|Proxy-Authorization)\s*:\s*)(?:Bearer|Basic)\s+[^\s,}]+/gi, '$1[REDACTED]')
+    .replace(/(\b(?:app_secret|appSecret|smtpPassword|mailboxToken|access_token|accessToken|refresh_token|refreshToken|id_token|idToken|session_token|sessionToken|device_code|pairCode|api_key|apiKey|private_key|privateKey|password|authorization|cookie|credential|secret|token)\b\s*[:=]\s*"?)(?:(?:Bearer|Basic)\s+)?[^,\s}"]+/gi, '$1[REDACTED]')
+    .replace(/(--(?:app-secret|password|secret-token|token)\s+)\S+/gi, '$1[REDACTED]')
 }
 
 export function formatDebugPromptLog(options: {

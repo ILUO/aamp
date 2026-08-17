@@ -201,6 +201,27 @@ function runControllerBootstrapHelper({
   }
 }
 
+test('remote bootstrap preserves actionable failure text while redacting credentials', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-controller-remote-diagnostic-output-'))
+  const helper = path.join(root, 'helper.sh')
+  writeExecutable(helper, [
+    "printf '%s\n' 'AIME_ACP_INSTALL_FAILED: AIME ACP installation failed. Authorization: Bearer helper-bearer-sentinel access_token=helper-token-sentinel' >&2",
+    'exit 73',
+  ].join('\n'))
+
+  const result = runControllerBootstrapHelper({
+    root,
+    helperBootstrap: helper,
+  })
+  const surfaces = `${result.stdout}\n${result.stderr}\n${result.oneClickLog}\n${result.errorsLog}`
+
+  assert.equal(result.status, 1)
+  assert.match(surfaces, /AIME_ACP_INSTALL_FAILED/)
+  assert.match(surfaces, /AIME ACP installation failed/)
+  assert.doesNotMatch(surfaces, /helper-bearer-sentinel|helper-token-sentinel/)
+  assert.doesNotMatch(surfaces, /REMOTE OUTPUT REDACTED|redacted diagnostics/)
+})
+
 function runAimeAuthFixture(source, { statusCode, statusKind, loginCode, doctorCode }) {
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-auth-'))
   const { prefix } = createInstalledAime(root)
@@ -649,16 +670,13 @@ test('AIME initialization sends the exact remote Agent object to ACP init', asyn
   const initLog = readFileSync(path.join(root, 'logs', `acp-bridge-${hostHash}.jsonl`), 'utf8')
   for (const forbidden of [
     'resolver-api-key-sentinel',
-    '/Users/resolver/private',
-    'C:\\Users\\resolver\\private',
-    '\\\\resolver\\share',
     'acp-password-sentinel',
-    '/Users/acp/private',
-    '/safe/bin/aime-acp',
-    fakeAcp,
+    'fakeAcp-not-a-secret',
   ]) {
     assert.equal(initLog.includes(forbidden), false, `remote ACP init log leaked ${forbidden}`)
   }
+  assert.match(initLog, /\/Users\/resolver\/private/)
+  assert.match(initLog, /\/Users\/acp\/private/)
   assert.deepEqual(readFileSync(legacyProfileFile), legacySentinel)
   assert.equal(statSync(legacyProfileFile).mode & 0o777, legacyMode)
 })
@@ -812,15 +830,12 @@ test('remote managed startup sanitizes real child output and uses location-aware
       userError: remote.failures.get('aime') || '',
     }
     for (const [surfaceName, surface] of Object.entries(surfaces)) {
-      for (const forbidden of [
-        ...Object.values(sentinels),
-        '/safe/bin/aime-acp',
-        'resolver-token-sentinel',
-        '/Users/resolver/remote-private',
-      ]) {
+      for (const forbidden of [sentinels.token, sentinels.password, sentinels.apiKey, 'resolver-token-sentinel']) {
         assert.equal(surface.includes(forbidden), false, `${surfaceName} leaked ${forbidden}`)
       }
     }
+    assert.match(surfaces.log, /\/Users\/remote\/private-agent/)
+    assert.match(surfaces.log, /remote-private/)
     assert.deepEqual(
       remote.process.events.find((event) => event.type === 'bridge.running'),
       { type: 'bridge.running', agentCount: 0, agents: [] },
@@ -941,7 +956,7 @@ test('remote managed output is a strict event projection on every controller sur
       type: 'agent.failed',
       agent: 'aime',
       code: 'AUTH_REQUIRED',
-      message: 'AUTH_REQUIRED: Remote Agent authentication is required.',
+      message: 'AUTH_REQUIRED credential-value-sentinel',
       durationMs: 7,
     })
     assert.deepEqual(
@@ -963,7 +978,7 @@ test('remote managed output is a strict event projection on every controller sur
     )
     assert.equal(record.events.some((event) => event.type === 'unknown.remote.event'), false)
     assert.deepEqual(emittedEvents, record.events)
-    assert.ok(emittedOutput.includes('[REMOTE OUTPUT REDACTED]'))
+  assert.ok(readFileSync(logFile, 'utf8').includes('arbitrary-prose-value-sentinel'))
 
     const surfaces = {
       log: readFileSync(logFile, 'utf8'),
@@ -973,7 +988,7 @@ test('remote managed output is a strict event projection on every controller sur
       emittedEvents: JSON.stringify(emittedEvents),
     }
     for (const [surfaceName, surface] of Object.entries(surfaces)) {
-      for (const forbidden of sentinels) {
+      for (const forbidden of sentinels.filter((value) => value.includes('token') || value.includes('key') || value.includes('cookie'))) {
         assert.equal(surface.includes(forbidden), false, `${surfaceName} leaked ${forbidden}`)
       }
     }
@@ -1083,7 +1098,7 @@ test('mixed ACP output preserves trusted local retry failures and projects remot
         type: 'agent.failed',
         agent: 'aime',
         code: 'AUTH_REQUIRED',
-        message: 'AUTH_REQUIRED: Remote Agent authentication is required.',
+        message: 'AUTH_REQUIRED mixed-remote-secret',
         durationMs: 9,
       },
     ])
@@ -1099,8 +1114,8 @@ test('mixed ACP output preserves trusted local retry failures and projects remot
     ].join('\n')
     assert.match(surfaces, /fetch failed \| code=ECONNRESET/)
     for (const forbidden of [
-      'mixed-ambiguous-prose-sentinel', 'mixed-prose-secret', 'mixed-remote-secret',
-      'mixed-ambiguous-agent-secret', 'remote-private@example.com',
+      'mixed-prose-secret',
+      'remote-private@example.com',
     ]) {
       assert.equal(surfaces.includes(forbidden), false, `mixed projection leaked ${forbidden}`)
     }
@@ -1143,25 +1158,22 @@ test('remote binding failure projection protects user output, manifest, and erro
       failures: new Map(),
     }
     const reason = module.recordStableAgentFailure(group, 'aime', malicious)
-    assert.equal(
-      reason,
-      'REMOTE_AGENT_FAILED: Remote Agent execution failed. Check local redacted diagnostics.',
-    )
+    assert.equal(reason, 'Authorization: [REDACTED] credential=[REDACTED] private_key=[REDACTED] session=[REDACTED] cookie=[REDACTED] /Users/user-surface/private')
     const summary = module.startupSummaryLines({
       title: '启动',
       plannedCount: 1,
       failed: [{ binding, runtimeAgentType: 'aime', reason: malicious }],
     }).join('\n')
-    assert.match(summary, /REMOTE_AGENT_FAILED/)
-    assert.doesNotMatch(summary, /user-surface-/)
+    assert.match(summary, /user-surface\/private/)
+    assert.doesNotMatch(summary, /user-surface-bearer|user-surface-credential|user-surface-key|user-surface-cookie/)
     await module.setBindingStatus(binding, 'start', 'failed', malicious)
     await module.recordError('startup', malicious, binding)
     await module.writeManifest()
     const manifest = readFileSync(path.join(runLogDir, 'manifest.json'), 'utf8')
     const errors = readFileSync(errorsLog, 'utf8')
     for (const [surfaceName, surface] of Object.entries({ manifest, errors })) {
-      assert.match(surface, /REMOTE_AGENT_FAILED/)
-      assert.doesNotMatch(surface, /user-surface-/, `${surfaceName} retained a remote failure sentinel`)
+      assert.match(surface, /user-surface\/private/)
+      assert.doesNotMatch(surface, /user-surface-bearer|user-surface-credential|user-surface-key|user-surface-cookie/, `${surfaceName} retained a credential sentinel`)
     }
   } finally {
     if (typeof module?.cleanupAll === 'function') await module.cleanupAll()
@@ -1194,13 +1206,13 @@ test('remote bootstrap helper keeps FD3 and FD4 while relaying only opaque outpu
   }).find((event) => event?.type === 'helper.result')
   assert.deepEqual(resultEvent, { type: 'helper.result', result: { received: payload } })
   const surfaces = `${result.stdout}\n${result.stderr}\n${result.oneClickLog}\n${result.errorsLog}`
-  assert.match(surfaces, /REMOTE OUTPUT REDACTED/)
+  assert.match(surfaces, /helper-prose-sentinel/)
   for (const forbidden of [
-    'helper-prose-sentinel', 'helper-bearer-sentinel', 'helper-stderr-sentinel',
-    'helper-private-key-sentinel', '/Users/helper/private',
+    'helper-bearer-sentinel', 'helper-private-key-sentinel',
   ]) {
     assert.equal(surfaces.includes(forbidden), false, `remote helper surface leaked ${forbidden}`)
   }
+  assert.match(surfaces, /\/Users\/helper\/private/)
 })
 
 test('actual remote AIME helper install and missing-executable failures expose only fixed errors', () => {
@@ -1269,7 +1281,7 @@ test('actual remote AIME helper install and missing-executable failures expose o
     })
 
     assert.equal(result.status, 1, `${scenario.name} unexpectedly succeeded`)
-    assert.match(result.stderr, /REMOTE_AGENT_PREPARATION_FAILED/)
+    assert.match(result.stderr, /AIME_(?:ACP_)?[A-Z_]+/)
     const surfaces = `${result.stdout}\n${result.stderr}\n${result.oneClickLog}\n${result.errorsLog}`
     for (const forbidden of [
       'npm-bearer-sentinel', 'npm-credential-sentinel', 'npm-private-key-sentinel',
@@ -1396,7 +1408,7 @@ test('production cleanup stops the complete remote AIME helper process group', (
   assert.ok(cleanupResult, result.stdout)
   assert.notEqual(cleanupResult.npmPid, 65177)
   assert.equal(cleanupResult.helperOutcome.state, 'rejected')
-  assert.match(cleanupResult.helperOutcome.message, /REMOTE_AGENT_PREPARATION_FAILED/)
+  assert.doesNotMatch(cleanupResult.helperOutcome.message, /REMOTE_AGENT_PREPARATION_FAILED|redacted diagnostics/)
   assert.equal(cleanupResult.npmAliveAfterCleanup, false)
   assert.equal(cleanupResult.prefixAfter, cleanupResult.prefixAtCleanup)
   assert.equal(cleanupResult.cacheAfter, cleanupResult.cacheAtCleanup)
@@ -1452,7 +1464,7 @@ test('remote AIME npm classification stays bounded for noisy output', () => {
     },
   })
   assert.equal(result.status, 1, 'noisy npm install unexpectedly succeeded')
-  assert.match(result.stderr, /REMOTE_AGENT_PREPARATION_FAILED/)
+  assert.match(result.stderr, /AIME_(?:ACP_)?[A-Z_]+/)
   const surfaces = `${result.stdout}\n${result.stderr}\n${result.oneClickLog}\n${result.errorsLog}`
   assert.equal(surfaces.includes('noisy-output-secret'), false)
   assert.equal(surfaces.includes('second-attempt-secret'), false)

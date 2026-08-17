@@ -152,7 +152,7 @@ describe('managed-user auth provider', () => {
     expect(JSON.stringify(events)).not.toContain('PERSON_SENTINEL');
     expect(fake.auth.byteCloudAuthLogin).toHaveBeenCalledWith({
       site: 'cn',
-      autoOpenBrowser: false,
+      autoOpenBrowser: true,
       onEvent: expect.any(Function),
     });
   });
