@@ -87,6 +87,29 @@ describe('reduceAimeEvent', () => {
     });
   });
 
+  it('gives thought tips and progress distinct message ids so ACP never merges them', () => {
+    const thought = reduce(initialAimeEventState(), {
+      kind: 'think.tips',
+      ...meta(1),
+      text: 'First thought.',
+    });
+    expect(thought.update).toMatchObject({
+      sessionUpdate: 'agent_thought_chunk',
+      messageId: 'thought:1:1001',
+    });
+
+    const progress = reduce(thought.nextState, {
+      kind: 'progress',
+      ...meta(2),
+      status: 'executing',
+    });
+    expect(progress.update).toMatchObject({
+      sessionUpdate: 'agent_thought_chunk',
+      content: { type: 'text', text: 'AIME is executing.' },
+      messageId: 'progress:2:1002',
+    });
+  });
+
   it('emits full plan snapshots after each step update', () => {
     const plan = reduce(initialAimeEventState(), {
       kind: 'plan.update',

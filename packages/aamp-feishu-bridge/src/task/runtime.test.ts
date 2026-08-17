@@ -621,6 +621,81 @@ test('runtime writes content-bearing text deltas as task steps', async () => {
   }
 })
 
+test('runtime splits text steps at message boundaries and drops standalone AIME progress', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 60_000,
+  })
+  const aampTaskId = 'feishu-task-task_guid_msg_boundary-evt_msg_boundary'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_msg_boundary',
+      taskGuid: 'task_guid_msg_boundary',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_msg_boundary')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_msg_boundary)
+    })
+
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_1',
+      taskId: aampTaskId,
+      seq: 1,
+      type: 'text.delta',
+      payload: { text: '收到，我会继续处理该任务。', messageId: 'assistant-ack' },
+    })
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_2',
+      taskId: aampTaskId,
+      seq: 2,
+      type: 'text.delta',
+      payload: { text: '开始分析任务，简单问题将快速给出结果', messageId: 'thought-1' },
+    })
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_3',
+      taskId: aampTaskId,
+      seq: 3,
+      type: 'text.delta',
+      payload: { text: 'AIME is executing.', messageId: 'progress-1' },
+    })
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_4',
+      taskId: aampTaskId,
+      seq: 4,
+      type: 'text.delta',
+      payload: { text: '[thinking] AIME is preparing.', messageId: 'progress-2' },
+    })
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_5',
+      taskId: aampTaskId,
+      seq: 5,
+      type: 'text.delta',
+      payload: { text: ' 正在理解任务的真实意图', messageId: 'thought-1' },
+    })
+
+    await runtime.stop()
+
+    assert.deepEqual(fakeFeishu.steps.map(({ step }) => step.content), [
+      '收到，我会继续处理该任务。',
+      '开始分析任务，简单问题将快速给出结果 正在理解任务的真实意图',
+    ])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime ignores AIME progress notices as task steps', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
   const fakeAamp = new FakeAampClient()

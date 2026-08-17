@@ -116,6 +116,7 @@ interface PendingStreamStep {
   kind: StreamStepKind
   toolName?: string
   toolStatus?: ToolStepStatus
+  messageId?: string
   normalized: string
 }
 
@@ -123,6 +124,7 @@ interface StreamTaskStep extends FeishuTaskStepInput {
   kind: StreamStepKind
   toolName?: string
   toolStatus?: ToolStepStatus
+  messageId?: string
 }
 
 interface StreamStepBuffer {
@@ -1161,6 +1163,14 @@ function normalizeStepText(content: string): string {
   return content.trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
+function normalizeIgnoredStreamStepText(content: string): string {
+  return content
+    .trim()
+    .replace(/^\s*\[(?:thinking|thought|analysis|reasoning)\]\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+}
+
 const IGNORED_STREAM_STEP_TEXTS = new Set([
   'ACP task started',
   'Prompt sent to ACP agent',
@@ -1361,7 +1371,10 @@ function buildTextDeltaTaskStep(payload: Record<string, unknown>): StreamTaskSte
     'message',
     'output',
   ])
-  return content ? { kind: 'text', content } : undefined
+  const messageId = getString(payload.messageId) ?? getString(payload.message_id)
+  return content
+    ? { kind: 'text', content, ...(messageId ? { messageId } : {}) }
+    : undefined
 }
 
 function buildToolTaskStep(payload: Record<string, unknown>): StreamTaskStep | undefined {
@@ -1399,7 +1412,7 @@ function streamEventToTaskSteps(event: AampStreamEvent): StreamTaskStep[] {
   const eventType = String(event.type)
   if (eventType === 'text.delta' || eventType === 'text_delta' || eventType === 'delta') {
     const step = buildTextDeltaTaskStep(event.payload)
-    if (step && IGNORED_STREAM_STEP_TEXTS.has(normalizeStepText(step.content))) return []
+    if (step && IGNORED_STREAM_STEP_TEXTS.has(normalizeIgnoredStreamStepText(step.content))) return []
     return uniqueTaskSteps([step])
   }
   if (eventType === 'status') {
@@ -1523,6 +1536,12 @@ function aggregateStreamStepsForFlush(steps: PendingStreamStep[]): FeishuTaskSte
   for (const step of steps) {
     if (step.kind === 'text') {
       flushToolGroup()
+      if (
+        textGroup.length > 0
+        && textGroup[textGroup.length - 1].messageId !== step.messageId
+      ) {
+        flushTextGroup()
+      }
       textGroup.push(step)
       continue
     }

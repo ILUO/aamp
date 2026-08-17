@@ -293,6 +293,7 @@ export function reduceAimeEvent(
       const update = textUpdate(
         'agent_thought_chunk',
         progressText(event.status),
+        event.eventId ?? `progress:${event.offset}:${event.timestampMs}`,
       );
       return {
         nextState: freezeState(next),
@@ -302,7 +303,11 @@ export function reduceAimeEvent(
     case 'think.tips': {
       const suffix = next.thought.length === 0 ? event.text : `\n${event.text}`;
       next.thought += suffix;
-      const update = textUpdate('agent_thought_chunk', suffix);
+      const update = textUpdate(
+        'agent_thought_chunk',
+        suffix,
+        event.eventId ?? `thought:${event.offset}:${event.timestampMs}`,
+      );
       return {
         nextState: freezeState(next),
         ...(update === undefined ? {} : { update }),
