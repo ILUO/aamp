@@ -9,6 +9,7 @@ type FeishuTaskAttachment = NonNullable<FeishuTaskDetails['attachments']>[number
 export interface FeishuTaskDispatchOptions {
   agentExecutionLocation?: AgentExecutionLocation
   feishuAppId?: string
+  feishuAppOwnerId?: string
   feishuBoe?: boolean
   feishuEnvMode?: 'boe' | 'pre' | 'ppe'
   feishuEnv?: string
@@ -35,8 +36,10 @@ export function buildFeishuTaskDispatchContext(
   _eventKind: FeishuTaskEventKind,
   _options?: FeishuTaskDispatchOptions,
 ): Record<string, string> {
+  const ownerId = nonEmpty(_options?.feishuAppOwnerId)
   return {
     source: DISPATCH_SOURCE,
+    ...(ownerId ? { sender_open_id: ownerId } : {}),
   }
 }
 

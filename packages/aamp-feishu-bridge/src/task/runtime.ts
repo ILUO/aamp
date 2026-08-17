@@ -2225,8 +2225,10 @@ export class FeishuTaskBridgeRuntime {
         return
       }
       const preparedAttachments = await this.prepareFeishuTaskAttachments(task, aampTaskId)
+      const appOwnerId = await this.getAppOwnerId()
       const dispatch = buildFeishuTaskDispatch(event, task, eventKind, {
         feishuAppId: this.config.feishu.appId,
+        feishuAppOwnerId: appOwnerId,
         ...buildFeishuTaskDispatchOptions(this.config),
       })
       if (dispatch.taskId !== aampTaskId) {

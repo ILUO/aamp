@@ -146,6 +146,17 @@ test('buildFeishuTaskDispatchContext keeps only non-duplicated task routing sour
   assert.deepEqual(context, { source: 'feishu-task' })
 })
 
+test('buildFeishuTaskDispatchContext includes the verified Feishu app owner open id', () => {
+  const context = buildFeishuTaskDispatchContext(event, task, 'task_create', {
+    feishuAppOwnerId: ' ou_owner ',
+  })
+
+  assert.deepEqual(context, {
+    source: 'feishu-task',
+    sender_open_id: 'ou_owner',
+  })
+})
+
 test('buildFeishuTaskDispatchContext excludes local profile details from dispatch context', () => {
   const context = buildFeishuTaskDispatchContext(event, task, 'task_create', {
     feishuLarkCliProfile: 'aamp-feishu-task-cli_aac6764b90f89cd0',

@@ -14,10 +14,12 @@ import {
 } from './task-runtime-profile.js'
 import { isRetryableAampNetworkError, isSmtpAuthError } from './task-runtime-errors.js'
 import {
+  buildFeishuPairingDispatchContextRules,
   normalizeTaskRuntimeAgent,
   normalizeTaskRuntimeBotForExecution,
   resolveTaskRuntimeBehavior,
   resolveTaskRuntimeFeishuDomain,
+  sendPairRequestIfNeeded,
   ensureTaskRuntimeInstanceConfigs,
   saveTaskRuntimeBots,
 } from './task-runtime.js'
@@ -334,4 +336,71 @@ test('isRetryableAampNetworkError detects transient AAMP connect timeout errors'
 test('isSmtpAuthError detects stale mailbox SMTP credentials', () => {
   assert.equal(isSmtpAuthError(new Error('Invalid login: 535 5.7.8 Authentication credentials invalid.')), true)
   assert.equal(isSmtpAuthError(new Error('fetch failed')), false)
+})
+
+test('buildFeishuPairingDispatchContextRules forces the Feishu app owner open id', () => {
+  assert.deepEqual(buildFeishuPairingDispatchContextRules({
+    source: ['untrusted-source'],
+    tenant_key: ['tenant-a'],
+    sender_open_id: ['untrusted-user'],
+  }, ' ou_owner '), {
+    source: ['untrusted-source'],
+    tenant_key: ['tenant-a'],
+    sender_open_id: ['ou_owner'],
+  })
+})
+
+test('sendPairRequestIfNeeded resolves the owner before sending and includes the owner rule', async () => {
+  const sent: Array<Record<string, unknown>> = []
+  await sendPairRequestIfNeeded({
+    email: 'bridge@meshmail.test',
+    mailboxToken: 'mailbox-token',
+    smtpPassword: 'smtp-password',
+    baseUrl: 'https://meshmail.test',
+  }, 'aamp://connect?mailbox=agent%40meshmail.test&pair_code=pair-code', {
+    appId: 'cli_owner',
+    appSecret: 'secret',
+    userIdType: 'open_id',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {}, {
+    getAppOwner: async () => ({ ownerId: 'ou_owner' }),
+    sendPairRequest: async (request) => {
+      sent.push(request as unknown as Record<string, unknown>)
+    },
+  })
+
+  assert.deepEqual(sent, [{
+    to: 'agent@meshmail.test',
+    pairCode: 'pair-code',
+    dispatchContextRules: {
+      source: ['feishu', 'feishu-task'],
+      sender_open_id: ['ou_owner'],
+    },
+  }])
+})
+
+test('sendPairRequestIfNeeded fails closed when the Feishu app owner cannot be resolved', async () => {
+  let sendCount = 0
+  await assert.rejects(
+    () => sendPairRequestIfNeeded({
+      email: 'bridge@meshmail.test',
+      mailboxToken: 'mailbox-token',
+      smtpPassword: 'smtp-password',
+      baseUrl: 'https://meshmail.test',
+    }, 'aamp://connect?mailbox=agent%40meshmail.test&pair_code=pair-code', {
+      appId: 'cli_owner',
+      appSecret: 'secret',
+      userIdType: 'open_id',
+      eventNames: ['task.task.update_user_access_v2'],
+    }, {}, {
+      getAppOwner: async () => {
+        throw new Error('owner lookup failed')
+      },
+      sendPairRequest: async () => {
+        sendCount += 1
+      },
+    }),
+    /owner lookup failed/,
+  )
+  assert.equal(sendCount, 0)
 })

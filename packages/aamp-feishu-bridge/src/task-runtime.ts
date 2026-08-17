@@ -6,13 +6,15 @@ import { createHash } from 'node:crypto'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 import { AampClient, isPairingUrl, parsePairingUrl } from 'aamp-sdk'
+import { getLarkCliAppOwner } from './feishu-cli.js'
 import { getBridgeHomeDir } from './config.js'
 import { writePrivateJsonAtomic } from './private-json.js'
 import { FeishuBridgeRuntime } from './runtime.js'
 import type { BridgeConfig as ImBridgeConfig } from './types.js'
 import { FEISHU_BOE_DOMAIN, FEISHU_PRE_DOMAIN } from './task/config.js'
+import { OapiFeishuTaskClient } from './task/feishu.js'
 import { FeishuTaskBridgeRuntime } from './task/runtime.js'
-import type { AgentExecutionLocation, BridgeConfig as TaskBridgeConfig } from './task/types.js'
+import type { AgentExecutionLocation, BridgeConfig as TaskBridgeConfig, FeishuAppOwner } from './task/types.js'
 import {
   TASK_PROFILE_FILENAME,
   buildTaskProfileFeishuConfig,
@@ -72,6 +74,17 @@ interface PairSelection {
   agent: TaskRuntimeAgentConfig
   bot: TaskRuntimeBotConfig
   pairingUrl?: string
+}
+
+interface FeishuPairRequest {
+  to: string
+  pairCode: string
+  dispatchContextRules: Record<string, string[]>
+}
+
+interface FeishuPairingDependencies {
+  getAppOwner?: (config: TaskBridgeConfig['feishu']) => Promise<FeishuAppOwner>
+  sendPairRequest?: (request: FeishuPairRequest) => Promise<void>
 }
 
 export interface TaskEnabledRunOptions {
@@ -443,25 +456,58 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function sendPairRequestIfNeeded(
+export function buildFeishuPairingDispatchContextRules(
+  existingRules: Record<string, string[]> | undefined,
+  ownerId: string,
+): Record<string, string[]> {
+  const normalizedOwnerId = ownerId.trim()
+  if (!normalizedOwnerId) throw new Error('Feishu app owner id is empty.')
+  return {
+    ...(existingRules ?? {}),
+    sender_open_id: [normalizedOwnerId],
+  }
+}
+
+async function resolveFeishuAppOwner(config: TaskBridgeConfig['feishu']): Promise<FeishuAppOwner> {
+  if ((config.authMode ?? 'app-secret') === 'lark-cli' && !config.appSecret?.trim()) {
+    return getLarkCliAppOwner({
+      appId: config.appId,
+      cliBin: config.cliBin,
+      profile: config.cliProfile,
+    })
+  }
+  const client = new OapiFeishuTaskClient({ ...config, userIdType: 'open_id' })
+  return client.getAppOwner()
+}
+
+export async function sendPairRequestIfNeeded(
   mailbox: ImBridgeConfig['mailbox'],
   pairingUrl: string | undefined,
+  feishuConfig: TaskBridgeConfig['feishu'],
   options: { retrySmtpAuth?: boolean } = {},
+  dependencies: FeishuPairingDependencies = {},
 ): Promise<void> {
   if (!pairingUrl || !isPairingUrl(pairingUrl)) return
   const retrySmtpAuth = options.retrySmtpAuth ?? true
   const pairing = parsePairingUrl(pairingUrl)
-  const client = AampClient.fromMailboxIdentity({
-    email: mailbox.email,
-    smtpPassword: mailbox.smtpPassword,
-    baseUrl: mailbox.baseUrl,
+  const owner = await (dependencies.getAppOwner ?? resolveFeishuAppOwner)(feishuConfig)
+  const dispatchContextRules = buildFeishuPairingDispatchContextRules(pairing.dispatchContextRules ?? {
+    source: ['feishu', 'feishu-task'],
+  }, owner.ownerId)
+  const sendPairRequest = dependencies.sendPairRequest ?? (async (request: FeishuPairRequest) => {
+    const client = AampClient.fromMailboxIdentity({
+      email: mailbox.email,
+      smtpPassword: mailbox.smtpPassword,
+      baseUrl: mailbox.baseUrl,
+    })
+    await client.sendPairRequest(request)
   })
   for (let attempt = 1; attempt <= PAIR_REQUEST_AUTH_RETRY_COUNT; attempt += 1) {
     try {
-      await client.sendPairRequest({
+      await sendPairRequest({
         to: pairing.mailbox,
         pairCode: pairing.pairCode,
-        dispatchContextRules: pairing.dispatchContextRules ?? { source: ['feishu', 'feishu-task'] },
+        dispatchContextRules,
       })
       return
     } catch (error) {
@@ -587,7 +633,7 @@ export async function ensureTaskRuntimeInstanceConfigs(
   await writePrivateJsonAtomic(imConfigPath, imConfig)
   await writePrivateJsonAtomic(taskConfigPath, taskConfig)
   try {
-    await sendPairRequestIfNeeded(sharedMailbox, selection.pairingUrl, { retrySmtpAuth: !existingMailbox })
+    await sendPairRequestIfNeeded(sharedMailbox, selection.pairingUrl, taskConfig.feishu, { retrySmtpAuth: !existingMailbox })
   } catch (error) {
     if (!existingMailbox || !isSmtpAuthError(error)) throw error
     console.warn(`[feishu task-runtime] existing AAMP mailbox SMTP credentials are invalid; re-registering mailbox slug=${slugBase} email=${existingMailbox.email}`)
@@ -600,7 +646,7 @@ export async function ensureTaskRuntimeInstanceConfigs(
     taskConfig.mailbox = refreshedMailbox
     await writePrivateJsonAtomic(imConfigPath, imConfig)
     await writePrivateJsonAtomic(taskConfigPath, taskConfig)
-    await sendPairRequestIfNeeded(refreshedMailbox, selection.pairingUrl)
+    await sendPairRequestIfNeeded(refreshedMailbox, selection.pairingUrl, taskConfig.feishu)
   }
   return { imConfig, taskConfig, imDir, taskDir }
 }
