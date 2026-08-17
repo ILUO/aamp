@@ -14,6 +14,7 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
+    "postbuild": "npm run prepare-bin",
     "prepare-bin": "node -e \"require('node:fs').chmodSync('dist/index.js', 0o755)\"",
     "prepack": "npm run build && npm run prepare-bin",
     "prepublishOnly": "npm run build && npm run prepare-bin",

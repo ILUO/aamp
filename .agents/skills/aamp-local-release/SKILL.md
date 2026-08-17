@@ -29,6 +29,11 @@ node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs
 3. Prints the startup command for the local test run, with bridge package
    overrides, plus the notes needed to apply it correctly.
 
+Bridge builds run the package's bin preparation hook, and the helper rejects a
+bridge executable that exists without execute permission. The generated
+startup command also uses a fresh npm cache so stale local file-package
+materialization is not reused.
+
 ## How the local override works
 
 The installed Task Agent shim (`$HOME/.aamp/bin/feishu-task-agent`) honors two

@@ -40,6 +40,7 @@ test('local release plan-only prints a file: startup command for the selected br
   assert.match(result.stdout, /feishuBridge@/)
   assert.match(result.stdout, /export FEISHU_BRIDGE_PKG="file:\$PWD\/packages\/aamp-feishu-bridge"/)
   assert.match(result.stdout, /feishu-task-agent start/)
+  assert.match(result.stdout, /export NPM_CONFIG_CACHE=.*aamp-local-runtime-npm-cache/)
   assert.doesNotMatch(result.stdout, /export ACP_BRIDGE_PKG/)
 })
 
@@ -77,4 +78,25 @@ test('local release skill documents restart-before-start and no-publish', () => 
 test('local release helper discovers the repo root from its own location', () => {
   assert.equal(fs.existsSync(path.join(repoRoot, 'packages', 'aamp-feishu-bridge', 'package.json')), true)
   assert.equal(fs.existsSync(path.join(repoRoot, '.agents', 'skills', 'aamp-local-release', 'SKILL.md')), true)
+})
+
+test('local release helper rejects a non-executable bridge bin', () => {
+  const binPath = path.join(repoRoot, 'packages', 'aamp-feishu-bridge', 'dist', 'index.js')
+  const originalMode = fs.statSync(binPath).mode & 0o777
+  try {
+    fs.chmodSync(binPath, 0o644)
+    const result = runHelper(['--package', 'feishuBridge', '--skip-build'])
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /not executable/)
+    assert.match(result.stderr, /prepare-bin/)
+  } finally {
+    fs.chmodSync(binPath, originalMode)
+  }
+})
+
+test('bridge builds declare postbuild bin preparation', () => {
+  for (const packageDir of ['packages/aamp-feishu-bridge', 'packages/aamp-acp-bridge']) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, packageDir, 'package.json'), 'utf8'))
+    assert.equal(manifest.scripts.postbuild, 'npm run prepare-bin')
+  }
 })

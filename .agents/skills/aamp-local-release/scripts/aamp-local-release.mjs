@@ -9,7 +9,14 @@ import { fileURLToPath } from 'node:url'
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(scriptDir, '..', '..', '..', '..')
 const DEFAULT_OUT_DIR = '.aamp-local-release'
-const TEMP_CACHE_DIR = () => path.join(os.tmpdir(), 'aamp-local-release-npm-cache')
+let localReleaseCacheDir
+
+function tempCacheDir() {
+  if (!localReleaseCacheDir) {
+    localReleaseCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aamp-local-release-npm-cache-'))
+  }
+  return localReleaseCacheDir
+}
 
 const PACKAGE_SPECS = [
   {
@@ -184,12 +191,12 @@ function packFileName(info) {
 }
 
 function npmEnv() {
-  return { ...process.env, npm_config_cache: TEMP_CACHE_DIR() }
+  return { ...process.env, npm_config_cache: tempCacheDir() }
 }
 
 function runBuild(spec, info) {
   const pkgDir = path.join(REPO_ROOT, spec.dir)
-  fs.mkdirSync(TEMP_CACHE_DIR(), { recursive: true })
+  fs.mkdirSync(tempCacheDir(), { recursive: true })
   const result = spawnSync('npm', ['run', 'build'], {
     cwd: pkgDir,
     env: npmEnv(),
@@ -209,12 +216,18 @@ function verifyBin(spec, info) {
       + 'Build the package first or pass --skip-build only after a successful build.',
     )
   }
+  if (process.platform !== 'win32' && (fs.statSync(info.binPath).mode & 0o111) === 0) {
+    throw new Error(
+      `${spec.key} (${spec.dir}) binary target is not executable: ${info.binPath}. `
+      + 'Run "npm run prepare-bin" or rebuild the package.',
+    )
+  }
   return info.binPath
 }
 
 function runPack(spec, info, outDir) {
   fs.mkdirSync(outDir, { recursive: true })
-  fs.mkdirSync(TEMP_CACHE_DIR(), { recursive: true })
+  fs.mkdirSync(tempCacheDir(), { recursive: true })
   const pkgDir = path.join(REPO_ROOT, spec.dir)
   const result = spawnSync('npm', ['pack', '--ignore-scripts', '--pack-destination', outDir], {
     cwd: pkgDir,
@@ -237,10 +250,10 @@ function verifyResolvable(spec, info, options) {
   const pkgSpec = options.mode === 'tgz'
     ? path.join(path.resolve(REPO_ROOT, options.outDir), packFileName(info))
     : `file:${path.join(REPO_ROOT, spec.dir)}`
-  fs.mkdirSync(TEMP_CACHE_DIR(), { recursive: true })
+  fs.mkdirSync(tempCacheDir(), { recursive: true })
   const result = spawnSync(
     'npm',
-    ['exec', '--yes', '--cache', TEMP_CACHE_DIR(), '--package', pkgSpec, '--', spec.bin, '--help'],
+    ['exec', '--yes', '--cache', tempCacheDir(), '--package', pkgSpec, '--', spec.bin, '--help'],
     { env: process.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180000 },
   )
   return result.status === 0
@@ -251,7 +264,10 @@ function expectedTgzPath(spec, options) {
 }
 
 function buildStartupCommand(selectedSpecs, options, state) {
-  const lines = [`cd ${shellQuote(REPO_ROOT)}`]
+  const lines = [
+    `cd ${shellQuote(REPO_ROOT)}`,
+    'export NPM_CONFIG_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/aamp-local-runtime-npm-cache.XXXXXX")"',
+  ]
   for (const spec of selectedSpecs) {
     if (!spec.envName) continue
     if (options.mode === 'tgz') {
