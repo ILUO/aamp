@@ -3028,7 +3028,19 @@ find_workbuddy_ai_cli() {
 }
 
 aime_acp_package_spec() {
-  printf '%s\n' "${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.1-dev.1}"
+  local spec
+  spec="${AIME_ACP_PKG:-}"
+  case "$spec" in
+    @tengchengwei/aime-acp@?*) printf '%s\n' "$spec" ;;
+    *.tgz)
+      if [ -f "$spec" ]; then
+        printf '%s\n' "$spec"
+      else
+        printf '%s\n' '@tengchengwei/aime-acp@0.1.1-dev.1'
+      fi
+      ;;
+    *) printf '%s\n' '@tengchengwei/aime-acp@0.1.1-dev.1' ;;
+  esac
 }
 
 aime_acp_package_name() {
@@ -3054,7 +3066,7 @@ aime_acp_package_spec_is_supported() {
 }
 
 aime_acp_registry() {
-  printf '%s\n' "${AIME_ACP_REGISTRY:-https://bnpm.byted.org}"
+  printf '%s\n' 'https://bnpm.byted.org'
 }
 
 aime_acp_site() {

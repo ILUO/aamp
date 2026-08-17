@@ -558,32 +558,48 @@ test('AIME legacy cleanup removes an obsolete bin when the canonical package is 
   assert.equal(result.status, 0, result.stderr)
 })
 
-test('AIME preparation rejects a non-canonical registry package before installation', () => {
+test('AIME preparation ignores an inherited non-canonical package and uses the embedded pin', () => {
   const source = readFileSync(bootstrap, 'utf8')
+  const pinnedAime = '@tengchengwei/aime-acp@0.1.1-dev.1'
   const result = runShell([
     'set -euo pipefail',
     'NPM_GLOBAL_PREFIX="$1"',
     'AIME_ACP_PKG="@luckyterry/aime-acp@0.1.0-dev.1"',
-    'AIME_ACP_REGISTRY="https://bnpm.byted.org"',
+    'AIME_ACP_REGISTRY="https://registry.npmjs.org"',
     aimeAuthFunctions(source),
-    'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
-    'npm_install_global_from_registry() { exit 91; }',
-    'ensure_aime_acp_cli',
+    'printf "%s|%s" "$(aime_acp_package_spec)" "$(aime_acp_registry)"',
   ], ['/tmp/aamp-aime-personal-trial'])
 
-  assert.equal(result.status, 64)
-  assert.match(result.stderr, /AIME_ACP_PACKAGE_INVALID/)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, `${pinnedAime}|https://bnpm.byted.org`)
+})
+
+test('AIME preparation ignores an inherited remote tgz URL without exposing it', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const result = runShell([
+    'set -euo pipefail',
+    'AIME_ACP_PKG="https://user:secret@example.invalid/aime-acp.tgz"',
+    aimeAuthFunctions(source),
+    'aime_acp_package_spec',
+  ])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '@tengchengwei/aime-acp@0.1.1-dev.1\n')
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /user:secret|example\.invalid/)
 })
 
 test('AIME local tgz specs still resolve the installed scoped package directory', () => {
   const source = readFileSync(bootstrap, 'utf8')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-local-tgz-'))
+  const tgz = path.join(root, 'tengchengwei-aime-acp-0.1.1-dev.1.tgz')
+  writeFileSync(tgz, 'local test artifact')
   const result = runShell([
     'set -euo pipefail',
     'NPM_GLOBAL_PREFIX="$1"',
     'AIME_ACP_PKG="$2"',
     aimeAuthFunctions(source),
     'printf "%s|%s" "$(aime_acp_package_dir)" "$(aime_acp_package_version || true)"',
-  ], ['/tmp/aamp-shared-prefix', '/tmp/tengchengwei-aime-acp-0.1.0-dev.10.tgz'])
+  ], ['/tmp/aamp-shared-prefix', tgz])
 
   assert.equal(result.status, 0, result.stderr)
   assert.equal(
@@ -594,6 +610,9 @@ test('AIME local tgz specs still resolve the installed scoped package directory'
 
 test('AIME local tgz specs force installation even when a scoped package is already present', () => {
   const source = readFileSync(bootstrap, 'utf8')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-force-local-tgz-'))
+  const tgz = path.join(root, 'tengchengwei-aime-acp-0.1.1-dev.1.tgz')
+  writeFileSync(tgz, 'local test artifact')
   const result = runShell([
     'set -euo pipefail',
     'NPM_GLOBAL_PREFIX="$1"',
@@ -603,7 +622,7 @@ test('AIME local tgz specs force installation even when a scoped package is alre
     'touch "$NPM_GLOBAL_PREFIX/lib/node_modules/@tengchengwei/aime-acp/dist/bin.js"',
     aimeAuthFunctions(source),
     'if aime_acp_install_is_current; then exit 41; fi',
-  ], ['/tmp/aamp-shared-prefix', '/tmp/tengchengwei-aime-acp-0.1.0-dev.10.tgz'])
+  ], ['/tmp/aamp-shared-prefix', tgz])
 
   assert.equal(result.status, 0, result.stderr)
 })
