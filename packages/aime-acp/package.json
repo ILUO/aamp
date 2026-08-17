@@ -1,6 +1,6 @@
 {
   "name": "@tengchengwei/aime-acp",
-  "version": "0.1.0",
+  "version": "0.1.1-dev.1",
   "description": "ACP server for the remote AIME agent",
   "type": "module",
   "license": "UNLICENSED",
