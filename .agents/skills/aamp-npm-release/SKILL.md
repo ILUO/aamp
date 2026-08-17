@@ -52,6 +52,11 @@ The helper rewrites package names and personal-scope Task Agent pins only in
 
 ## Two-phase release contract
 
+Mutating `aamp-npm-release` and `aamp-local-release` runs use one shared release lock
+under the Git common directory. Run them serially. Concurrent mutating runs fail fast
+with the live owner details.
+`--help` and `--plan-only` do not take the lock.
+
 1. Run the helper with `--prepare-source` and the exact package selection.
    It computes every version before writing package/lock versions and
    canonical Task Agent pins. It does not build, stage, pack, publish, commit,

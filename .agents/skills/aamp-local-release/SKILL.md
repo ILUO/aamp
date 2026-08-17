@@ -1,12 +1,9 @@
 ---
 name: aamp-local-release
 description: >
-  Build AAMP npm packages locally, optionally pack local tgz artifacts, and
-  produce the Feishu Task Agent startup command for testing a local build
-  WITHOUT publishing. Use when the agent needs to rebuild the local dist of
-  aamp-feishu-bridge / aamp-acp-bridge / aamp-feishu-task-agent, prepare a
-  local test artifact, or answer "how do I start the local build for testing".
-  Never publishes and never touches the remote registry with our packages.
+  Use when an agent needs to rebuild or locally exercise aime-acp,
+  aamp-acp-bridge, aamp-feishu-bridge, or aamp-feishu-task-agent without
+  publishing, including requests for a local tgz or a local startup command.
 ---
 
 # AAMP local release
@@ -25,50 +22,56 @@ node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs
 1. Builds the selected package(s) so their `dist` output is current
    (`npm run build`; skipped for `aamp-feishu-task-agent`, which is
    source/bootstrap based).
-2. Optionally packs local `.tgz` artifacts (never published).
-3. Prints the startup command for the local test run, with bridge package
-   overrides, plus the notes needed to apply it correctly.
+2. Packs content-addressed `.tgz` artifacts when requested, and automatically
+   packs packages that cannot be tested by a live `file:` reference.
+3. Prints one isolated startup subshell with the exact local package selection.
 
-Bridge builds run the package's bin preparation hook, and the helper rejects a
-bridge executable that exists without execute permission. The generated
-startup command also uses a fresh npm cache so stale local file-package
-materialization is not reused.
+Bridge and AIME builds run their package preparation hooks, and the helper
+rejects a package executable that is missing or lacks execute permission. Both
+helper-time and runtime npm caches are temporary and cleaned on success or
+failure.
 
 ## How the local override works
 
 Normal Task Agent starts ignore inherited package override variables so an old
-local debug export cannot replace a released bridge. The generated local test
-command sets `AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true` for that invocation and
-then passes two bridge variables into the controller:
+local debug value cannot replace a released package. The generated command
+runs in a subshell, first unsets every ACP/Feishu/AIME override family, and then
+sets only this run's selection with `AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true`:
 
 - `ACP_BRIDGE_PKG` → controller `AAMP_TASK_ACP_BRIDGE_PKG` → the ACP bridge package
 - `FEISHU_BRIDGE_PKG` → controller `AAMP_TASK_FEISHU_BRIDGE_PKG` → the Feishu bridge package
+- `AIME_ACP_PKG` → controller `AAMP_TASK_AIME_ACP_PKG` → the AIME ACP tgz
 
-Two reference flavors are supported:
+Reference selection is package-specific:
 
-- `file:<repo>/packages/<dir>` (recommended): npm resolves the folder and on
+- ACP and Feishu Bridge default to `file:<repo>/packages/<dir>`. npm resolves
+  the folder and on
   npm 11 symlinks the live package folder, so the bridge runs the current
   `dist` directly. After editing source, rebuild (`npm run build`) and restart;
   no repack is needed.
-- Packed `.tgz` path: an immutable snapshot of the build. Use this when the
-  user wants a fixed artifact (for example copying it to another machine).
+- AIME is tgz-only. `aimeAcp` always builds a local AIME `.tgz` and
+  automatically includes `taskAgent`; it never uses `file:packages/aime-acp`.
+- Selecting `taskAgent` automatically packs it. It installs the local Task Agent tgz into
+  `$HOME/.aamp/npm-global`, then runs its `update` command to
+  sync `~/.aamp/bin`, sets `AAMP_TASK_AUTO_UPDATE=false`, and then starts the
+  synchronized local command.
+- `--mode tgz` makes selected bridges use packed snapshots too.
 
 When npm resolves the local package it still downloads the package's public
 dependencies (pino, @larksuiteoapi/node-sdk, aamp-sdk, ...) from the registry.
 That is dependency installation, not publishing our packages.
 
-The task-agent shim has no override for the task-agent package itself. To test
-a local `aamp-feishu-task-agent` build, install it into the global prefix
-(`npm install -g --prefix "$HOME/.aamp/npm-global" --force <tgz>`) and set
-`AAMP_TASK_AUTO_UPDATE=false`.
-
-Do not permanently export package override variables in a shell profile. The
-helper's command scopes the opt-in to one Task Agent invocation. Existing
-`file:` directories or local `.tgz` files are accepted; remote URLs and missing
-paths are rejected.
+Use the generated subshell verbatim. It makes no persistent exports and does
+not leak package overrides or npm cache paths into the caller shell. Existing
+`file:` directories are accepted only for bridge overrides; AIME accepts only
+an existing local `.tgz`. Remote URLs, option-shaped specs, missing paths, and
+AIME `file:` references fail closed.
+Do not replace it with a persistent `export`.
 
 ## Choose packages from the change set
 
+- `packages/aime-acp/**` changed: pass `--package aimeAcp`; this automatically
+  includes `taskAgent` but not `acpBridge`.
 - `packages/aamp-feishu-bridge/**` changed: pass `--package feishuBridge`.
 - `packages/aamp-acp-bridge/**` changed: pass `--package acpBridge`.
 - `packages/aamp-feishu-task-agent/**` changed: pass `--package taskAgent`.
@@ -84,16 +87,17 @@ paths are rejected.
 2. Run the helper with non-interactive flags. It builds, optionally packs, and
    prints the startup command. Do not make the user run `node ...` themselves
    as the normal path.
-3. If the user only wants the command (no rebuild), run with `--plan-only`.
+3. If the user only wants a bridge `file:` command, run with `--plan-only`.
+   AIME, Task Agent, or `--mode tgz` needs a real content hash, so plan-only
+   prints a non-runnable notice instead of inventing an artifact path.
 4. If the user wants an immutable artifact, add `--pack` (and optionally
    `--mode tgz` so the printed command references the tarball).
 5. Report the printed startup command in the final reply, and call out the two
    required steps: stop the currently running Task Agent first (it holds the
    runtime/agent leases), then run the command. `feishu-task-agent start` is
    interactive; it opens the multi-select for saved bindings.
-   Use the generated command verbatim: its inline
-   `AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true` applies only to that invocation.
-   Do not replace it with a persistent `export`.
+   Use the generated subshell verbatim. Do not replace it with persistent
+   exports or split its install/update/start sequence.
 6. Suggest verification: send the agent a task that exercises the changed code
    path and confirm the Feishu comment shows the real text (for the
    help-text/timezone fix, "查询今天的日程" should show
@@ -109,7 +113,22 @@ node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs \
   --package feishuBridge
 ```
 
-Build both bridges plus the task agent:
+Build AIME and the automatically included local Task Agent tgz:
+
+```bash
+node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs \
+  --package aimeAcp
+```
+
+Build both bridges with live `file:` references:
+
+```bash
+node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs \
+  --package acpBridge \
+  --package feishuBridge
+```
+
+Build all four packages:
 
 ```bash
 node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs \
@@ -156,17 +175,21 @@ node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs \
 
 - This skill never publishes. There is no `--publish` flag; reject any request
   to publish with this skill and point to `aamp-npm-release` instead.
+- Mutating local and npm release operations use one shared release lock under the
+  Git common directory. Concurrent helpers or linked worktrees fail fast and
+  report the live owner; `--help` and `--plan-only` do not take the lock.
 - The local build only affects a future Task Agent start: the running bridge
   does not hot-swap. Always tell the user to stop the current Task Agent
   before starting with the new overrides.
 - Normal Task Agent starts intentionally ignore inherited package override
-  variables. Local overrides require the helper's one-shot opt-in and must
-  resolve to an existing `file:` directory or local `.tgz` file.
+  variables. The local subshell clears stale overrides before its one-shot
+  opt-in; bridges may use an existing `file:` directory or local `.tgz`, while
+  AIME is tgz-only.
 - `file:` mode requires `dist` to exist. If a build was skipped and `dist` is
   stale or missing, the helper fails on the missing binary target; rebuild
   first or run with `--build` (the default).
-- Preserve existing local `.tgz` artifacts unless the user asks to remove
-  them. The helper writes packs to `--out-dir` (default `.aamp-local-release`
-  under the repo root) and never deletes anything.
+- Packed artifacts are content-addressed by SHA-256. The helper reuses
+  byte-identical output, never overwrites an existing artifact, and fails
+  closed if a conflicting file already occupies the calculated path.
 - The helper isolates npm cache writes to a temp directory so `npm run build`
   / `npm pack` do not depend on the user's `~/.npm` permissions.

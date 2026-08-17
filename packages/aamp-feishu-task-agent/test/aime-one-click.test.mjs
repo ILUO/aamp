@@ -103,6 +103,33 @@ function bridgeOverridePolicyFunctions(source) {
   )
 }
 
+function packageOverrideInitialization(source) {
+  return functionRange(
+    source,
+    'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=',
+    'ACP_PID=""',
+  )
+}
+
+function runAimeOverridePolicyFixture(source, spec, cwd = '') {
+  return runShell([
+    'set -euo pipefail',
+    'if [ -n "$2" ]; then cd "$2"; fi',
+    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
+    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
+    'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
+    'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG=""',
+    'AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG=""',
+    'AAMP_TASK_REQUESTED_AIME_ACP_PKG="$1"',
+    'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true',
+    'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
+    functionRange(source, 'aime_acp_package_spec()', 'aime_acp_package_name()'),
+    bridgeOverridePolicyFunctions(source),
+    'apply_task_agent_package_override_policy',
+    'printf "downstream:%s" "$(aime_acp_package_spec)"',
+  ], [spec, cwd])
+}
+
 function taskAgentControllerLaunchFunction(source) {
   return functionRange(source, 'run_task_agent_controller()', 'cleanup()')
 }
@@ -639,54 +666,61 @@ test('AIME local tgz specs force installation even when a scoped package is alre
   assert.equal(result.status, 0, result.stderr)
 })
 
-test('normal Task Agent start ignores inherited local bridge package overrides', () => {
+test('normal Task Agent start ignores inherited package overrides and keeps the released AIME pin', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const result = runShell([
     'set -euo pipefail',
     'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
     'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
     'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
-    'AAMP_TASK_REQUESTED_AIME_ACP_PKG=""',
+    'AAMP_TASK_REQUESTED_AIME_ACP_PKG="https://user:inherited-secret@example.invalid/aime-acp.tgz"',
     'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG="/tmp/aamp-local-release/old-acp.tgz"',
     'AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG="file:/tmp/old-feishu"',
     'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=false',
     'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
     bridgeOverridePolicyFunctions(source),
     'apply_task_agent_package_override_policy',
-    'printf "%s|%s" "$ACP_BRIDGE_PKG" "$FEISHU_BRIDGE_PKG"',
+    'printf "%s|%s|%s" "$ACP_BRIDGE_PKG" "$FEISHU_BRIDGE_PKG" "$AIME_ACP_PKG"',
   ])
 
   assert.equal(result.status, 0, result.stderr)
   assert.equal(
     result.stdout,
-    '@luckyterry/aamp-acp-bridge@0.1.28-dev.36|@zengxingyuan/aamp-feishu-bridge@0.1.51',
+    '@luckyterry/aamp-acp-bridge@0.1.28-dev.36|@zengxingyuan/aamp-feishu-bridge@0.1.51|@tengchengwei/aime-acp@0.1.1-dev.1',
   )
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /inherited-secret|example\.invalid/)
 })
 
-test('explicit local package override opt-in accepts only existing local artifacts', () => {
+test('explicit local package override opt-in accepts bridge directories and an AIME tgz', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-explicit-local-overrides-'))
   const acpTgz = path.join(root, 'acp.tgz')
+  const aimeTgz = path.join(root, 'aime.tgz')
   const feishuDir = path.join(root, 'feishu')
   writeFileSync(acpTgz, 'local acp artifact')
+  writeFileSync(aimeTgz, 'local aime artifact')
   mkdirSync(feishuDir)
   const result = runShell([
     'set -euo pipefail',
     'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
     'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
     'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
-    'AAMP_TASK_REQUESTED_AIME_ACP_PKG=""',
+    'AAMP_TASK_REQUESTED_AIME_ACP_PKG="$3"',
     'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG="$1"',
     'AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG="file:$2"',
     'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true',
     'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
     bridgeOverridePolicyFunctions(source),
     'apply_task_agent_package_override_policy',
-    'printf "%s|%s" "$ACP_BRIDGE_PKG" "$FEISHU_BRIDGE_PKG"',
-  ], [acpTgz, feishuDir])
+    'printf "%s|%s|%s" "$ACP_BRIDGE_PKG" "$FEISHU_BRIDGE_PKG" "$AIME_ACP_PKG"',
+  ], [acpTgz, feishuDir, aimeTgz])
 
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stdout, `${acpTgz}|file:${feishuDir}`)
+  const [actualAcp, actualFeishu, actualAime] = result.stdout.split('|')
+  assert.equal(actualAcp, acpTgz)
+  assert.equal(actualFeishu, `file:${feishuDir}`)
+  assert.match(actualAime, /^\//)
+  assert.equal(readFileSync(actualAime, 'utf8'), 'local aime artifact')
 })
 
 test('explicit local package override opt-in rejects missing artifacts without exposing paths', () => {
@@ -708,6 +742,201 @@ test('explicit local package override opt-in rejects missing artifacts without e
   assert.equal(result.status, 64)
   assert.match(result.stderr, /Local ACP Bridge package override is invalid/)
   assert.doesNotMatch(result.stderr, /private|credential-sentinel/)
+})
+
+for (const invalidOverride of [
+  {
+    name: 'an existing file directory',
+    createSpec(root) {
+      const directory = path.join(root, 'directory-credential-sentinel')
+      mkdirSync(directory)
+      return `file:${directory}`
+    },
+    secretPattern: /directory-credential-sentinel/,
+  },
+  {
+    name: 'a remote tgz URL even when a URL-shaped local tree exists',
+    createSpec(root) {
+      const spec = 'https://user:remote-secret@example.invalid/aime-acp.tgz'
+      const collision = path.join(root, 'https:/user:remote-secret@example.invalid/aime-acp.tgz')
+      mkdirSync(path.dirname(collision), { recursive: true })
+      writeFileSync(collision, 'must not turn a URL into a local override')
+      return spec
+    },
+    useRootAsCwd: true,
+    secretPattern: /remote-secret|example\.invalid/,
+  },
+  {
+    name: 'a named remote tgz URL even when a matching local tree exists',
+    createSpec(root) {
+      const spec = 'aime@https://named-remote-secret.example.invalid/aime.tgz'
+      const collision = path.join(root, 'aime@https:/named-remote-secret.example.invalid/aime.tgz')
+      mkdirSync(path.dirname(collision), { recursive: true })
+      writeFileSync(collision, 'must not turn a named remote spec into a local override')
+      return spec
+    },
+    useRootAsCwd: true,
+    secretPattern: /named-remote-secret|example\.invalid/,
+  },
+  {
+    name: 'a file-prefixed tgz even when that relative filename exists',
+    createSpec(root) {
+      const spec = 'file:prefixed-credential-sentinel.tgz'
+      writeFileSync(path.join(root, spec), 'must not accept file: package specs')
+      return spec
+    },
+    useRootAsCwd: true,
+    secretPattern: /prefixed-credential-sentinel/,
+  },
+  {
+    name: 'an option-shaped tgz even when that relative filename exists',
+    createSpec(root) {
+      const spec = '--option-credential-sentinel.tgz'
+      writeFileSync(path.join(root, spec), 'must not accept option-shaped specs')
+      return spec
+    },
+    useRootAsCwd: true,
+    secretPattern: /option-credential-sentinel/,
+  },
+  {
+    name: 'a missing local tgz',
+    createSpec(root) {
+      return path.join(root, 'missing-credential-sentinel.tgz')
+    },
+    secretPattern: /missing-credential-sentinel/,
+  },
+  {
+    name: 'the canonical remote package spec',
+    createSpec() {
+      return '@tengchengwei/aime-acp@0.1.1-dev.1'
+    },
+    secretPattern: /@tengchengwei\/aime-acp@0\.1\.1-dev\.1/,
+  },
+]) {
+  test(`explicit AIME override opt-in rejects ${invalidOverride.name} before downstream setup`, () => {
+    const source = readFileSync(bootstrap, 'utf8')
+    const root = mkdtempSync(path.join(tmpdir(), 'aamp-invalid-aime-override-'))
+    const result = runAimeOverridePolicyFixture(
+      source,
+      invalidOverride.createSpec(root),
+      invalidOverride.useRootAsCwd ? root : '',
+    )
+
+    assert.doesNotMatch(result.stdout, /downstream|@tengchengwei\/aime-acp/)
+    assert.equal(result.status, 64)
+    assert.match(result.stderr, /AIME_ACP_PACKAGE_OVERRIDE_INVALID/)
+    assert.match(result.stderr, /existing local \.tgz file/)
+    assert.doesNotMatch(result.stderr, invalidOverride.secretPattern)
+  })
+}
+
+test('AIME canonicalizes a shorthand-shaped local tgz before downstream setup', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-shorthand-local-'))
+  const relativeSpec = 'owner/artifact.tgz'
+  const absoluteSpec = path.join(root, relativeSpec)
+  mkdirSync(path.dirname(absoluteSpec), { recursive: true })
+  writeFileSync(absoluteSpec, 'local AIME artifact')
+
+  const result = runAimeOverridePolicyFixture(source, relativeSpec, root)
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /^downstream:\//)
+  assert.notEqual(result.stdout, `downstream:${relativeSpec}`)
+  assert.equal(readFileSync(result.stdout.slice('downstream:'.length), 'utf8'), 'local AIME artifact')
+})
+
+test('bridge-only opt-in keeps the released AIME pin across outer controller and helper launch', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-bridge-only-controller-helper-'))
+  const helper = path.join(root, 'helper.sh')
+  const outer = path.join(root, 'outer.sh')
+  const runner = path.join(root, 'controller-runner.mjs')
+  const acpTgz = path.join(root, 'acp.tgz')
+  const feishuDir = path.join(root, 'feishu')
+  writeFileSync(acpTgz, 'local acp artifact')
+  mkdirSync(feishuDir)
+  writeExecutable(helper, [
+    'set -euo pipefail',
+    'AAMP_TASK_INTERNAL="${AAMP_TASK_INTERNAL:-false}"',
+    packageOverrideInitialization(source),
+    'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
+    bridgeOverridePolicyFunctions(source),
+    'apply_task_agent_package_override_policy',
+    `printf '{"acp":"%s","feishu":"%s","aime":"%s"}\\n' "$ACP_BRIDGE_PKG" "$FEISHU_BRIDGE_PKG" "$AIME_ACP_PKG" >&3`,
+  ].join('\n'))
+  writeFileSync(runner, [
+    `const controller = await import(${JSON.stringify(`${pathToFileURL(controller).href}?bridgeOnly=${crypto.randomUUID()}`)})`,
+    'try {',
+    "  const result = await controller.runBootstrapHelper('__discover-agents', { agent_type: 'aime', aamp_host: 'https://meshmail.ai' })",
+    '  console.log(JSON.stringify(result))',
+    '} finally {',
+    '  await controller.cleanupAll()',
+    '}',
+    '',
+  ].join('\n'))
+  writeExecutable(outer, [
+    'set -euo pipefail',
+    'AAMP_TASK_INTERNAL=false',
+    packageOverrideInitialization(source),
+    'AAMP_TASK_AGENT_NAME=@luckyterry/aamp-feishu-task-agent',
+    'AAMP_TASK_AGENT_CHANNEL=dev',
+    'AAMP_TASK_ACTION=start',
+    'NPM_BIN=npm',
+    'NPX_BIN=npx',
+    'CODEX_ACP_PKG=@agentclientprotocol/codex-acp@1.0.2',
+    'AAMP_TASK_AGENT_VERSION=0.1.0-dev.203',
+    'AGENT=""',
+    'AAMP_HOST=https://meshmail.ai',
+    'DEBUG_MODE=false',
+    'NPM_REGISTRY=https://registry.npmjs.org/',
+    'NPM_CACHE_DIR="${NPM_CACHE_DIR:-$HOME/npm-cache}"',
+    'NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/npm-prefix}"',
+    'AAMP_LARK_CLI_CONFIG_DIR="${AAMP_LARK_CLI_CONFIG_DIR:-$HOME/lark-config}"',
+    'AAMP_RUN_LOG_DIR="${AAMP_RUN_LOG_DIR:-$HOME/controller-run}"',
+    'export AAMP_RUN_LOG_DIR',
+    'mkdir -p "$AAMP_RUN_LOG_DIR"',
+    'task_agent_controller_path() { printf "%s\n" "$FAKE_CONTROLLER"; }',
+    'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
+    bridgeOverridePolicyFunctions(source),
+    taskAgentControllerLaunchFunction(source),
+    'apply_task_agent_package_override_policy',
+    'run_task_agent_controller',
+  ].join('\n'))
+
+  const runOuter = (packageEnv) => spawnSync('bash', [outer], {
+    encoding: 'utf8',
+    timeout: 20_000,
+    env: isolatedBootstrapEnv({
+      HOME: root,
+      ACP_BRIDGE_PKG: '',
+      AAMP_TASK_ACP_BRIDGE_PKG: '',
+      FEISHU_BRIDGE_PKG: '',
+      AAMP_TASK_FEISHU_BRIDGE_PKG: '',
+      AIME_ACP_PKG: '',
+      AAMP_TASK_AIME_ACP_PKG: '',
+      AAMP_TASK_ALLOW_PACKAGE_OVERRIDES: 'true',
+      AAMP_TASK_COMMAND_PATH: helper,
+      FAKE_CONTROLLER: runner,
+      ...packageEnv,
+    }),
+  })
+
+  const acpResult = runOuter({ ACP_BRIDGE_PKG: acpTgz })
+  assert.equal(acpResult.status, 0, acpResult.stderr)
+  assert.deepEqual(JSON.parse(acpResult.stdout), {
+    acp: acpTgz,
+    feishu: '@zengxingyuan/aamp-feishu-bridge@0.1.51',
+    aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
+  })
+
+  const feishuResult = runOuter({ FEISHU_BRIDGE_PKG: `file:${feishuDir}` })
+  assert.equal(feishuResult.status, 0, feishuResult.stderr)
+  assert.deepEqual(JSON.parse(feishuResult.stdout), {
+    acp: '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.36',
+    feishu: `file:${feishuDir}`,
+    aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
+  })
 })
 
 test('Task Agent controller explicitly propagates local AIME and bridge override state', () => {

@@ -7,6 +7,7 @@ import process, { stdin as input, stdout as output } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { acquireReleaseLock } from '../../shared/release-lock.mjs'
 
 const PUBLIC_NPM_REGISTRY = 'https://registry.npmjs.org'
 const AIME_BNPM_REGISTRY = 'https://bnpm.byted.org'
@@ -1022,6 +1023,42 @@ function buildLocalTestCommand(packageManager, targets, artifactsDir) {
   if (!targets.taskAgent?.tgz) return null
   const taskAgentTgz = targetTgzPath(targets.taskAgent, artifactsDir)
   const envLines = [
+    'env',
+    '-u ACP_BRIDGE_PKG',
+    '-u AAMP_TASK_ACP_BRIDGE_PKG',
+    '-u FEISHU_BRIDGE_PKG',
+    '-u AAMP_TASK_FEISHU_BRIDGE_PKG',
+    '-u AIME_ACP_PKG',
+    '-u AAMP_TASK_AIME_ACP_PKG',
+    '-u AIME_ACP_REGISTRY',
+    '-u AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG',
+    '-u AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG',
+    '-u AAMP_TASK_REQUESTED_AIME_ACP_PKG',
+    '-u AAMP_TASK_AGENT_NAME',
+    '-u AAMP_TASK_AGENT_LEGACY_NAME',
+    '-u AAMP_TASK_AGENT_CHANNEL',
+    '-u AAMP_TASK_COMMAND_NAME',
+    '-u AAMP_TASK_COMMAND_PATH',
+    '-u AAMP_TASK_SHIM_DIR',
+    '-u AAMP_TASK_ENTRY',
+    '-u AAMP_TASK_INTERNAL',
+    '-u AAMP_TASK_INTERNAL_RESULT_FD',
+    '-u AAMP_TASK_INTERNAL_INPUT_FD',
+    '-u AAMP_TASK_INTERNAL_EXECUTION_LOCATION',
+    '-u AAMP_TASK_PACKAGE_OVERRIDES_RESOLVED',
+    '-u AAMP_TASK_NPM_REGISTRY',
+    '-u AAMP_TASK_NPM_GLOBAL_PREFIX',
+    '-u AAMP_TASK_NPM_CACHE_DIR',
+    '-u AAMP_TASK_NPM_BIN',
+    '-u AAMP_TASK_NPX_BIN',
+    '-u AAMP_TASK_INSTALL_COMMAND',
+    '-u NPM_REGISTRY',
+    '-u NPM_CONFIG_REGISTRY',
+    '-u npm_config_registry',
+    '-u NPM_GLOBAL_PREFIX',
+    '-u AAMP_BIN_DIR',
+    '-u AAMP_TASK_COMMAND_PATH',
+    '-u AAMP_TASK_SHIM_DIR',
     'AAMP_TASK_AUTO_UPDATE=false',
     'AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true',
   ]
@@ -1079,7 +1116,9 @@ function commandArgsForOptions(options, scope, packageManager, publish) {
   ]
   for (const key of options.packages) args.push('--package', key)
   if (options.tag) args.push('--tag', options.tag)
-  if (publish) {
+  if (options.prepareSource) {
+    args.push('--prepare-source')
+  } else if (publish) {
     args.push('--publish', '--confirm-publish')
     if (options.allowDirty) args.push('--allow-dirty')
   } else {
@@ -1136,6 +1175,7 @@ async function runWizard(baseOptions) {
       publish: false,
       confirmPublish: false,
       allowDirty: dirty.length > 0,
+      prepareSource: false,
     }
     let scope = ''
     let publish = false
@@ -1154,9 +1194,10 @@ async function runWizard(baseOptions) {
       scope = normalizeScope(`@${whoami}`)
       publish = true
     } else if (choice === '3') {
-      releaseLabel = '@larktask 官方稳定包'
+      releaseLabel = '@larktask 官方稳定包源码准备'
       options.mode = 'final'
       options.tag = baseOptions.tag || 'latest'
+      options.prepareSource = true
       scope = '@larktask'
       for (const spec of PACKAGE_SPECS) {
         const sourceDir = path.join(repoRoot, spec.dir)
@@ -1172,7 +1213,7 @@ async function runWizard(baseOptions) {
         )
         options.versions.set(spec.key, version)
       }
-      publish = true
+      publish = false
     } else {
       throw new Error(`Unsupported choice: ${choice}`)
     }
@@ -1216,10 +1257,12 @@ async function runWizard(baseOptions) {
     console.log('')
     printReleasePlan(sources, targets, selectedKeys)
     console.log('')
-    console.log(publish ? 'publish command:' : 'pack command:')
+    console.log(options.prepareSource ? 'prepare-source command:' : publish ? 'publish command:' : 'pack command:')
     console.log(scriptCommand(executionArgs))
     console.log('')
-    if (publish) {
+    if (options.prepareSource) {
+      console.log('Review and test the prepared source changes, commit them, then run the publish phase separately.')
+    } else if (publish) {
       console.log('remote one-click startup command after publish succeeds and npm metadata is visible:')
       console.log(remoteOneClickCommand)
       console.log('')
@@ -1252,201 +1295,225 @@ async function main() {
   assertExplicitPackageSelection(options)
 
   const repoRoot = findRepoRoot()
-  const { packageManager, whoami } = resolveAuthenticatedPackageManager(options.packageManager, options.registry, options.publish)
-  const canonicalScope = options.mode === 'trial' ? normalizeScope(`@${whoami}`) : '@larktask'
-  const requestedScope = normalizeScope(options.scope)
-  if (options.mode === 'final' && requestedScope && requestedScope !== canonicalScope) {
-    throw new Error('Final scope is fixed to @larktask')
-  }
-  const scope = canonicalScope
+  const mutating = !options.planOnly
+  const operation = options.prepareSource
+    ? 'prepare-source'
+    : options.publish
+      ? 'publish'
+      : options.verifyPublished
+        ? 'verify-published'
+        : 'pack'
+  const releaseLock = mutating
+    ? acquireReleaseLock({
+        repoRoot,
+        helper: 'aamp-npm-release',
+        operation,
+        argv: process.argv.slice(2),
+      })
+    : null
+  try {
+    const { packageManager, whoami } = resolveAuthenticatedPackageManager(
+      options.packageManager,
+      options.registry,
+      options.publish,
+    )
+    const canonicalScope = options.mode === 'trial' ? normalizeScope(`@${whoami}`) : '@larktask'
+    const requestedScope = normalizeScope(options.scope)
+    if (options.mode === 'final' && requestedScope && requestedScope !== canonicalScope) {
+      throw new Error('Final scope is fixed to @larktask')
+    }
+    const scope = canonicalScope
 
-  const dirty = trackedDirty(repoRoot)
-  if (dirty.length > 0 && options.publish && !options.allowDirty) {
-    throw new Error(`Tracked worktree files are dirty. Commit/stash them or pass --allow-dirty:\n${dirty.join('\n')}`)
-  }
+    const dirty = trackedDirty(repoRoot)
+    if (dirty.length > 0 && options.publish && !options.allowDirty) {
+      throw new Error(`Tracked worktree files are dirty. Commit/stash them or pass --allow-dirty:\n${dirty.join('\n')}`)
+    }
 
-  const selectedKeys = resolveSelectedPackageKeys(options)
-  const releaseSpecs = selectedPackageSpecs(selectedKeys)
-  if (options.prepareSource) assertReleaseVersionsMatchHead(repoRoot, releaseSpecs)
-  const requiredRegistries = new Set(releaseSpecs.map((spec) => packageRegistry(spec, options)))
-  for (const registry of requiredRegistries) {
-    if (registry === options.registry) continue
-    const identity = npmWhoami(packageManager, registry)
-    console.log(`npm identity (${registry}): ${identity}`)
-  }
-  const { sources, targets, tag } = buildReleasePlan(repoRoot, packageManager, options, scope, selectedKeys)
-  const hasPublicRegistryTarget = releaseSpecs.some((spec) => {
-    const target = targets[spec.key]
-    return normalizeRegistry(target.registry) === PUBLIC_NPM_REGISTRY
-      && !(options.resumePublish && target.alreadyPublished)
-  })
-  if (options.publish && hasPublicRegistryTarget) assertBrowserPublishReady(packageManager)
-  const outDir = path.resolve(repoRoot, options.outDir)
-  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')
-  const stageRoot = path.join(outDir, `stage-${options.mode}-${scope.slice(1)}-${stamp}`)
-  const artifactsDir = path.join(outDir, 'artifacts')
+    const selectedKeys = resolveSelectedPackageKeys(options)
+    const releaseSpecs = selectedPackageSpecs(selectedKeys)
+    if (options.prepareSource) assertReleaseVersionsMatchHead(repoRoot, releaseSpecs)
+    const requiredRegistries = new Set(releaseSpecs.map((spec) => packageRegistry(spec, options)))
+    for (const registry of requiredRegistries) {
+      if (registry === options.registry) continue
+      const identity = npmWhoami(packageManager, registry)
+      console.log(`npm identity (${registry}): ${identity}`)
+    }
+    const { sources, targets, tag } = buildReleasePlan(repoRoot, packageManager, options, scope, selectedKeys)
+    const hasPublicRegistryTarget = releaseSpecs.some((spec) => {
+      const target = targets[spec.key]
+      return normalizeRegistry(target.registry) === PUBLIC_NPM_REGISTRY
+        && !(options.resumePublish && target.alreadyPublished)
+    })
+    if (options.publish && hasPublicRegistryTarget) assertBrowserPublishReady(packageManager)
+    const outDir = path.resolve(repoRoot, options.outDir)
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')
+    const stageRoot = path.join(outDir, `stage-${options.mode}-${scope.slice(1)}-${stamp}`)
+    const artifactsDir = path.join(outDir, 'artifacts')
 
-  console.log(`npm identity: ${whoami}`)
-  console.log(`package manager: ${packageManager.command}`)
-  console.log(`mode: ${options.mode}`)
-  console.log(`target scope: ${scope}`)
-  console.log(`registry: ${options.registry}`)
-  console.log(`dist-tag: ${tag}`)
-  console.log(`selected packages: ${describePackageKeys(selectedKeys)}`)
-  console.log('')
-  printReleasePlan(sources, targets, selectedKeys)
-
-  if (options.prepareSource) {
-    prepareSourceMetadata(sources, targets, releaseSpecs, options)
+    console.log(`npm identity: ${whoami}`)
+    console.log(`package manager: ${packageManager.command}`)
+    console.log(`mode: ${options.mode}`)
+    console.log(`target scope: ${scope}`)
+    console.log(`registry: ${options.registry}`)
+    console.log(`dist-tag: ${tag}`)
+    console.log(`selected packages: ${describePackageKeys(selectedKeys)}`)
     console.log('')
-    console.log('source metadata prepared; review and commit the changes before publishing')
-    return
-  }
+    printReleasePlan(sources, targets, selectedKeys)
 
-  if (options.planOnly) return
-
-  assertPreparedSourceMetadata(sources, targets, releaseSpecs)
-
-  if (!options.skipBuild) {
-    for (const spec of releaseSpecs.filter((item) => item.build)) {
-      const source = sources.get(spec.key)
-      console.log(`\nbuild: ${source.sourceDir}`)
-      run(packageManager.command, ['run', 'build'], { cwd: source.sourceDir, stdio: 'inherit' })
+    if (options.prepareSource) {
+      prepareSourceMetadata(sources, targets, releaseSpecs, options)
+      console.log('')
+      console.log('source metadata prepared; review and commit the changes before publishing')
+      return
     }
-  }
 
-  removeIfExists(stageRoot)
-  fs.mkdirSync(stageRoot, { recursive: true })
+    if (options.planOnly) return
 
-  for (const spec of releaseSpecs) {
-    const source = sources.get(spec.key)
-    const stagedDir = path.join(stageRoot, spec.unscopedName)
-    copyPackageForStaging(source.sourceDir, stagedDir)
-    patchPackageMetadata(stagedDir, targets[spec.key].name, targets[spec.key].version)
-    chmodBins(stagedDir)
-    targets[spec.key].stagedDir = stagedDir
-  }
-  if (selectedKeys.has('taskAgent')) {
-    patchTaskAgentPins(targets.taskAgent.stagedDir, targets, tag)
-    assertStagedTaskAgentPins(targets.taskAgent.stagedDir, targets)
-  }
+    assertPreparedSourceMetadata(sources, targets, releaseSpecs)
 
-  const packed = []
-  if (options.pack) {
-    for (const spec of releaseSpecs) {
-      const target = targets[spec.key]
-      console.log(`\npack: ${target.name}@${target.version}`)
-      const tgz = packPackage(packageManager, target.stagedDir, artifactsDir)
-      target.tgz = tgz
-      target.sha256 = sha256(tgz)
-      target.sha1 = sha1(tgz)
-      packed.push({ key: spec.key, name: target.name, version: target.version, tgz, sha256: target.sha256 })
-      console.log(`artifact: ${tgz}`)
-      console.log(`sha256: ${target.sha256}`)
-    }
-  }
-
-  if (options.publish) {
-    console.log('\nauth: public npm uses browser auth in this TTY; BNPM uses existing internal npm authentication.')
-    for (const spec of releaseSpecs) {
-      const target = targets[spec.key]
-      if (options.resumePublish && target.alreadyPublished) {
-        console.log(`\nresume verify: ${target.name}@${target.version} [${target.registry}]`)
-        await waitForRemoteArtifact(packageManager, target.registry, target)
-        continue
+    if (!options.skipBuild) {
+      for (const spec of releaseSpecs.filter((item) => item.build)) {
+        const source = sources.get(spec.key)
+        console.log(`\nbuild: ${source.sourceDir}`)
+        run(packageManager.command, ['run', 'build'], { cwd: source.sourceDir, stdio: 'inherit' })
       }
-      console.log(`\npublish: ${target.name}@${target.version} [${target.registry}]`)
-      publishPackage(packageManager, target.tgz, target.registry, tag)
     }
-    console.log('\nverify published package metadata:')
+
+    removeIfExists(stageRoot)
+    fs.mkdirSync(stageRoot, { recursive: true })
+
     for (const spec of releaseSpecs) {
-      const target = targets[spec.key]
-      await waitForRemoteArtifact(packageManager, target.registry, target)
-      console.log(`- ${target.name}@${target.version}: visible, packed shasum verified`)
+      const source = sources.get(spec.key)
+      const stagedDir = path.join(stageRoot, spec.unscopedName)
+      copyPackageForStaging(source.sourceDir, stagedDir)
+      patchPackageMetadata(stagedDir, targets[spec.key].name, targets[spec.key].version)
+      chmodBins(stagedDir)
+      targets[spec.key].stagedDir = stagedDir
     }
-  }
-
-  if (options.verifyPublished) {
-    console.log('\nverify existing published package artifacts:')
-    for (const spec of releaseSpecs) {
-      const target = targets[spec.key]
-      await waitForRemoteArtifact(packageManager, target.registry, target)
-      console.log(`- ${target.name}@${target.version}: visible, packed shasum verified`)
+    if (selectedKeys.has('taskAgent')) {
+      patchTaskAgentPins(targets.taskAgent.stagedDir, targets, tag)
+      assertStagedTaskAgentPins(targets.taskAgent.stagedDir, targets)
     }
-  }
 
-  const oneClickUrl = targets.taskAgent?.selected
-    ? tarballUrl(options.registry, targets.taskAgent.name, targets.taskAgent.version)
-    : null
-  const oneClickCommand = oneClickUrl
-    ? `curl -fsSL ${oneClickUrl} | tar -xOzf - package/bootstrap/aamp-feishu-task-agent-bootstrap.sh | bash -s -- install`
-    : null
-  const remoteOneClickCommand = options.publish || options.verifyPublished ? oneClickCommand : null
-  const localTestCommand = buildLocalTestCommand(packageManager, targets, artifactsDir)
-  const followUpStartCommand = buildFollowUpStartCommand()
-  const manifest = {
-    generatedAt: new Date().toISOString(),
-    repoRoot,
-    mode: options.mode,
-    npmIdentity: whoami,
-    packageManager: packageManager.command,
-    scope,
-    registry: options.registry,
-    tag,
-    selectedPackages: releaseSpecs.map((spec) => spec.key),
-    stageRoot,
-    artifactsDir,
-    packages: PACKAGE_SPECS.map((spec) => ({
-      key: spec.key,
-      selected: selectedKeys.has(spec.key),
-      sourceName: sources.get(spec.key).sourceName,
-      sourceVersion: sources.get(spec.key).sourceVersion,
-      targetName: targets[spec.key].name,
-      targetVersion: targets[spec.key].version,
-      remoteLatest: targets[spec.key].remoteLatest,
-      registry: targets[spec.key].registry,
-      stagedDir: targets[spec.key].stagedDir,
-      tgz: targets[spec.key].tgz || null,
-      sha256: targets[spec.key].sha256 || null,
-      sha1: targets[spec.key].sha1 || null,
-      remoteIntegrity: targets[spec.key].remoteIntegrity || null,
-      remoteTarball: targets[spec.key].remoteTarball || null,
-    })),
-    remoteOneClickUrl: options.publish || options.verifyPublished ? oneClickUrl : null,
-    remoteOneClickCommand,
-    localTestCommand,
-    followUpStartCommand,
-  }
-  const manifestFile = path.join(stageRoot, 'release-manifest.json')
-  writeJson(manifestFile, manifest)
-
-  console.log('')
-  console.log(`manifest: ${manifestFile}`)
-  if (packed.length > 0) {
-    console.log('')
-    console.log('artifacts:')
-    for (const item of packed) {
-      console.log(`- ${item.name}@${item.version}`)
-      console.log(`  ${item.tgz}`)
-      console.log(`  sha256 ${item.sha256}`)
+    const packed = []
+    if (options.pack) {
+      for (const spec of releaseSpecs) {
+        const target = targets[spec.key]
+        console.log(`\npack: ${target.name}@${target.version}`)
+        const tgz = packPackage(packageManager, target.stagedDir, artifactsDir)
+        target.tgz = tgz
+        target.sha256 = sha256(tgz)
+        target.sha1 = sha1(tgz)
+        packed.push({ key: spec.key, name: target.name, version: target.version, tgz, sha256: target.sha256 })
+        console.log(`artifact: ${tgz}`)
+        console.log(`sha256: ${target.sha256}`)
+      }
     }
-  }
-  if (localTestCommand) {
+
+    if (options.publish) {
+      console.log('\nauth: public npm uses browser auth in this TTY; BNPM uses existing internal npm authentication.')
+      for (const spec of releaseSpecs) {
+        const target = targets[spec.key]
+        if (options.resumePublish && target.alreadyPublished) {
+          console.log(`\nresume verify: ${target.name}@${target.version} [${target.registry}]`)
+          await waitForRemoteArtifact(packageManager, target.registry, target)
+          continue
+        }
+        console.log(`\npublish: ${target.name}@${target.version} [${target.registry}]`)
+        publishPackage(packageManager, target.tgz, target.registry, tag)
+      }
+      console.log('\nverify published package metadata:')
+      for (const spec of releaseSpecs) {
+        const target = targets[spec.key]
+        await waitForRemoteArtifact(packageManager, target.registry, target)
+        console.log(`- ${target.name}@${target.version}: visible, packed shasum verified`)
+      }
+    }
+
+    if (options.verifyPublished) {
+      console.log('\nverify existing published package artifacts:')
+      for (const spec of releaseSpecs) {
+        const target = targets[spec.key]
+        await waitForRemoteArtifact(packageManager, target.registry, target)
+        console.log(`- ${target.name}@${target.version}: visible, packed shasum verified`)
+      }
+    }
+
+    const oneClickUrl = targets.taskAgent?.selected
+      ? tarballUrl(options.registry, targets.taskAgent.name, targets.taskAgent.version)
+      : null
+    const oneClickCommand = oneClickUrl
+      ? `curl -fsSL ${oneClickUrl} | tar -xOzf - package/bootstrap/aamp-feishu-task-agent-bootstrap.sh | bash -s -- install`
+      : null
+    const remoteOneClickCommand = options.publish || options.verifyPublished ? oneClickCommand : null
+    const localTestCommand = buildLocalTestCommand(packageManager, targets, artifactsDir)
+    const followUpStartCommand = buildFollowUpStartCommand()
+    const manifest = {
+      generatedAt: new Date().toISOString(),
+      repoRoot,
+      mode: options.mode,
+      npmIdentity: whoami,
+      packageManager: packageManager.command,
+      scope,
+      registry: options.registry,
+      tag,
+      selectedPackages: releaseSpecs.map((spec) => spec.key),
+      stageRoot,
+      artifactsDir,
+      packages: PACKAGE_SPECS.map((spec) => ({
+        key: spec.key,
+        selected: selectedKeys.has(spec.key),
+        sourceName: sources.get(spec.key).sourceName,
+        sourceVersion: sources.get(spec.key).sourceVersion,
+        targetName: targets[spec.key].name,
+        targetVersion: targets[spec.key].version,
+        remoteLatest: targets[spec.key].remoteLatest,
+        registry: targets[spec.key].registry,
+        stagedDir: targets[spec.key].stagedDir,
+        tgz: targets[spec.key].tgz || null,
+        sha256: targets[spec.key].sha256 || null,
+        sha1: targets[spec.key].sha1 || null,
+        remoteIntegrity: targets[spec.key].remoteIntegrity || null,
+        remoteTarball: targets[spec.key].remoteTarball || null,
+      })),
+      remoteOneClickUrl: options.publish || options.verifyPublished ? oneClickUrl : null,
+      remoteOneClickCommand,
+      localTestCommand,
+      followUpStartCommand,
+    }
+    const manifestFile = path.join(stageRoot, 'release-manifest.json')
+    writeJson(manifestFile, manifest)
+
     console.log('')
-    console.log('local tgz test command:')
-    console.log(localTestCommand)
-  }
-  if (remoteOneClickCommand) {
+    console.log(`manifest: ${manifestFile}`)
+    if (packed.length > 0) {
+      console.log('')
+      console.log('artifacts:')
+      for (const item of packed) {
+        console.log(`- ${item.name}@${item.version}`)
+        console.log(`  ${item.tgz}`)
+        console.log(`  sha256 ${item.sha256}`)
+      }
+    }
+    if (localTestCommand) {
+      console.log('')
+      console.log('local tgz test command:')
+      console.log(localTestCommand)
+    }
+    if (remoteOneClickCommand) {
+      console.log('')
+      console.log('remote one-click startup command:')
+      console.log(remoteOneClickCommand)
+    } else {
+      console.log('')
+      console.log('remote one-click startup command: not printed because packages were packed locally but not published/verified')
+    }
     console.log('')
-    console.log('remote one-click startup command:')
-    console.log(remoteOneClickCommand)
-  } else {
-    console.log('')
-    console.log('remote one-click startup command: not printed because packages were packed locally but not published/verified')
+    console.log('follow-up start command:')
+    console.log(followUpStartCommand)
+  } finally {
+    releaseLock?.release()
   }
-  console.log('')
-  console.log('follow-up start command:')
-  console.log(followUpStartCommand)
 }
 
 main().catch((error) => {

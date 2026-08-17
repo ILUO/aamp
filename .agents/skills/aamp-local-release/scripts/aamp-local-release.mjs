@@ -1,24 +1,48 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { acquireReleaseLock } from '../../shared/release-lock.mjs'
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(scriptDir, '..', '..', '..', '..')
 const DEFAULT_OUT_DIR = '.aamp-local-release'
 let localReleaseCacheDir
+const LOCAL_CACHE_PREFIX = 'aamp-local-release-npm-cache-'
 
 function tempCacheDir() {
   if (!localReleaseCacheDir) {
-    localReleaseCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aamp-local-release-npm-cache-'))
+    localReleaseCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), LOCAL_CACHE_PREFIX))
   }
   return localReleaseCacheDir
 }
 
+function cleanupTempCacheDir() {
+  if (!localReleaseCacheDir) return
+  const cacheDir = localReleaseCacheDir
+  localReleaseCacheDir = undefined
+  if (path.dirname(cacheDir) !== path.resolve(os.tmpdir()) || !path.basename(cacheDir).startsWith(LOCAL_CACHE_PREFIX)) {
+    return
+  }
+  fs.rmSync(cacheDir, { recursive: true, force: true })
+}
+
+process.once('exit', cleanupTempCacheDir)
+
 const PACKAGE_SPECS = [
+  {
+    key: 'aimeAcp',
+    dir: 'packages/aime-acp',
+    unscopedName: 'aime-acp',
+    build: true,
+    bin: 'aime-acp',
+    envName: 'AIME_ACP_PKG',
+    tgzOnly: true,
+  },
   {
     key: 'acpBridge',
     dir: 'packages/aamp-acp-bridge',
@@ -42,11 +66,15 @@ const PACKAGE_SPECS = [
     build: false,
     bin: 'feishu-task-agent',
     envName: '',
+    tgzOnly: true,
   },
 ]
 
 const PACKAGE_KEY_ALIASES = new Map([
   ['all', 'all'],
+  ['aime', 'aimeAcp'],
+  ['aimeacp', 'aimeAcp'],
+  ['aime-acp', 'aimeAcp'],
   ['acp', 'acpBridge'],
   ['acpbridge', 'acpBridge'],
   ['acp-bridge', 'acpBridge'],
@@ -66,7 +94,7 @@ function normalizePackageSelection(value) {
   if (!value) return ''
   const compact = value.replace(/^@[^/]+\//, '').replace(/[^A-Za-z0-9-]/g, '').toLowerCase()
   const key = PACKAGE_KEY_ALIASES.get(compact)
-  if (!key) throw new Error(`Unknown package key: ${value}. Use acpBridge, feishuBridge, taskAgent, or all.`)
+  if (!key) throw new Error(`Unknown package key: ${value}. Use aimeAcp, acpBridge, feishuBridge, taskAgent, or all.`)
   return key
 }
 
@@ -78,6 +106,11 @@ function allPackageKeys() {
   return PACKAGE_SPECS.map((spec) => spec.key)
 }
 
+function resolvePackageDependencies(keys) {
+  if (keys.has('aimeAcp')) keys.add('taskAgent')
+  return keys
+}
+
 function usage() {
   return `Usage:
   node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs [options]
@@ -87,7 +120,8 @@ startup command for testing the local build WITHOUT publishing.
 
 Options:
   --package KEY          Package to build. Repeatable or comma-separated.
-                         Keys: acpBridge, feishuBridge, taskAgent, all. Default: all
+                         Keys: aimeAcp, acpBridge, feishuBridge, taskAgent, all.
+                         aimeAcp automatically includes taskAgent. Default: all
   --build / --skip-build Build dist before printing. Default: build
   --pack                 Also create local tgz artifacts under --out-dir
   --out-dir DIR          tgz output directory. Default: .aamp-local-release (repo root)
@@ -96,7 +130,8 @@ Options:
                          uses packed tgz paths and implies --pack. Default: file
   --verify               Sanity-check that npm exec resolves each bridge bin
                          (downloads public dependencies; slower). Default: off
-  --plan-only            Print plan and startup command without building or packing
+  --plan-only            Print the plan without building or packing. A startup
+                         command is printed only when no packed artifact is needed
   --json                 Print a JSON summary to stdout (no human sections)
   --help                 Show this help
 
@@ -162,6 +197,7 @@ function parseArgs(argv) {
   if (options.packages.size === 0 || options.packages.has('all')) {
     options.packages = new Set(allPackageKeys())
   }
+  resolvePackageDependencies(options.packages)
   return options
 }
 
@@ -186,8 +222,13 @@ function packageInfo(spec) {
   return { name, version, binPath }
 }
 
-function packFileName(info) {
-  return `${info.name.replace(/^@/, '').replace('/', '-')}-${info.version}.tgz`
+function packFileName(info, digest = '') {
+  const stem = `${info.name.replace(/^@/, '').replace('/', '-')}-${info.version}`
+  return `${stem}${digest ? `-${digest}` : ''}.tgz`
+}
+
+function sha256(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 }
 
 function npmEnv() {
@@ -229,27 +270,53 @@ function runPack(spec, info, outDir) {
   fs.mkdirSync(outDir, { recursive: true })
   fs.mkdirSync(tempCacheDir(), { recursive: true })
   const pkgDir = path.join(REPO_ROOT, spec.dir)
-  const result = spawnSync('npm', ['pack', '--ignore-scripts', '--pack-destination', outDir], {
-    cwd: pkgDir,
-    env: npmEnv(),
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout || '').trim().split('\n').slice(-8).join('\n')
-    throw new Error(`npm pack failed for ${spec.key} (${spec.dir}):\n${detail}`)
+  const stagingDir = fs.mkdtempSync(path.join(outDir, '.aamp-local-pack-'))
+  try {
+    const result = spawnSync('npm', ['pack', '--ignore-scripts', '--pack-destination', stagingDir], {
+      cwd: pkgDir,
+      env: npmEnv(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    if (result.status !== 0) {
+      const detail = (result.stderr || result.stdout || '').trim().split('\n').slice(-8).join('\n')
+      throw new Error(`npm pack failed for ${spec.key} (${spec.dir}):\n${detail}`)
+    }
+    const printedName = String(result.stdout || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.endsWith('.tgz'))
+      .at(-1)
+    const generatedTgzs = fs.readdirSync(stagingDir).filter((name) => name.endsWith('.tgz'))
+    if (generatedTgzs.length !== 1) {
+      throw new Error(`npm pack must produce exactly one tgz for ${spec.key}; found ${generatedTgzs.length}`)
+    }
+    const stagedTgz = path.join(stagingDir, generatedTgzs[0])
+    if (printedName && path.basename(printedName) !== generatedTgzs[0]) {
+      throw new Error(`npm pack reported ${path.basename(printedName)} but produced ${generatedTgzs[0]}`)
+    }
+
+    const digest = sha256(stagedTgz)
+    const tgzPath = path.join(outDir, packFileName(info, digest))
+    try {
+      fs.copyFileSync(stagedTgz, tgzPath, fs.constants.COPYFILE_EXCL)
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      const existingStat = fs.lstatSync(tgzPath)
+      if (!existingStat.isFile() || existingStat.isSymbolicLink()) {
+        throw new Error(`Content-addressed artifact collision at ${tgzPath}: expected a regular non-symlink file`)
+      }
+      if (sha256(tgzPath) !== digest) {
+        throw new Error(`Content-addressed artifact collision at ${tgzPath}`)
+      }
+    }
+    return tgzPath
+  } finally {
+    fs.rmSync(stagingDir, { recursive: true, force: true })
   }
-  const tgzPath = path.join(outDir, packFileName(info))
-  if (!fs.existsSync(tgzPath)) {
-    throw new Error(`npm pack completed but expected artifact is missing: ${tgzPath}`)
-  }
-  return tgzPath
 }
 
-function verifyResolvable(spec, info, options) {
-  const pkgSpec = options.mode === 'tgz'
-    ? path.join(path.resolve(REPO_ROOT, options.outDir), packFileName(info))
-    : `file:${path.join(REPO_ROOT, spec.dir)}`
+function verifyResolvable(spec, pkgSpec) {
   fs.mkdirSync(tempCacheDir(), { recursive: true })
   const result = spawnSync(
     'npm',
@@ -259,28 +326,67 @@ function verifyResolvable(spec, info, options) {
   return result.status === 0
 }
 
-function expectedTgzPath(spec, options) {
-  return path.resolve(REPO_ROOT, options.outDir, packFileName(packageInfo(spec)))
+function needsPackedArtifact(spec, options) {
+  return spec.tgzOnly === true || options.mode === 'tgz' || options.pack
+}
+
+function startupNeedsPackedArtifact(selectedSpecs, options) {
+  return options.mode === 'tgz' || selectedSpecs.some((spec) => spec.tgzOnly === true)
 }
 
 function buildStartupCommand(selectedSpecs, options, state) {
+  if (!state.startupCommandRunnable) {
+    return [
+      '# Startup command unavailable in --plan-only: packed artifacts are content-addressed.',
+      '# Run without --plan-only to build/pack them and print a runnable command.',
+    ].join('\n')
+  }
+
   const lines = [
+    'set -e',
     `cd ${shellQuote(REPO_ROOT)}`,
-    'export NPM_CONFIG_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/aamp-local-runtime-npm-cache.XXXXXX")"',
+    'unset ACP_BRIDGE_PKG AAMP_TASK_ACP_BRIDGE_PKG FEISHU_BRIDGE_PKG AAMP_TASK_FEISHU_BRIDGE_PKG',
+    'unset AIME_ACP_PKG AAMP_TASK_AIME_ACP_PKG AIME_ACP_REGISTRY AAMP_TASK_AIME_ACP_REGISTRY',
+    'unset AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG AAMP_TASK_REQUESTED_AIME_ACP_PKG',
+    'unset AAMP_TASK_ALLOW_PACKAGE_OVERRIDES NPM_CONFIG_CACHE npm_config_cache',
+    'unset NPM_REGISTRY NPM_CONFIG_REGISTRY npm_config_registry NPM_GLOBAL_PREFIX AAMP_BIN_DIR',
+    'unset AAMP_TASK_AGENT_NAME AAMP_TASK_AGENT_LEGACY_NAME AAMP_TASK_AGENT_CHANNEL',
+    'unset AAMP_TASK_COMMAND_NAME AAMP_TASK_COMMAND_PATH AAMP_TASK_SHIM_DIR AAMP_TASK_ENTRY',
+    'unset AAMP_TASK_INTERNAL AAMP_TASK_INTERNAL_RESULT_FD AAMP_TASK_INTERNAL_INPUT_FD AAMP_TASK_INTERNAL_EXECUTION_LOCATION',
+    'unset AAMP_TASK_PACKAGE_OVERRIDES_RESOLVED AAMP_TASK_NPM_REGISTRY AAMP_TASK_NPM_GLOBAL_PREFIX',
+    'unset AAMP_TASK_NPM_CACHE_DIR AAMP_TASK_NPM_BIN AAMP_TASK_NPX_BIN AAMP_TASK_INSTALL_COMMAND',
+    '_aamp_local_runtime_cache="$(mktemp -d "${TMPDIR:-/tmp}/aamp-local-runtime-npm-cache.XXXXXX")"',
+    `trap 'rm -rf -- "$_aamp_local_runtime_cache"' EXIT`,
+    'export NPM_CONFIG_CACHE="$_aamp_local_runtime_cache"',
+    'export AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true',
   ]
   for (const spec of selectedSpecs) {
     if (!spec.envName) continue
-    if (options.mode === 'tgz') {
-      const tgzPath = state.tgzPaths[spec.key] || expectedTgzPath(spec, options)
+    if (spec.tgzOnly || options.mode === 'tgz') {
+      const tgzPath = state.tgzPaths[spec.key]
+      if (!tgzPath) throw new Error(`Packed artifact is unavailable for ${spec.key}`)
       lines.push(`export ${spec.envName}=${shellQuote(tgzPath)}`)
     } else {
       lines.push(`export ${spec.envName}="file:$PWD/${spec.dir}"`)
     }
   }
-  lines.push('AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true feishu-task-agent start')
-  lines.push('# fallback when ~/.aamp/bin is not on PATH:')
-  lines.push('AAMP_TASK_ALLOW_PACKAGE_OVERRIDES=true "$HOME/.aamp/bin/feishu-task-agent" start')
-  return lines.join('\n')
+
+  const withTaskAgent = selectedSpecs.some((spec) => spec.key === 'taskAgent')
+  if (withTaskAgent) {
+    const taskAgentTgz = state.tgzPaths.taskAgent
+    if (!taskAgentTgz) throw new Error('Packed artifact is unavailable for taskAgent')
+    lines.push('export AAMP_TASK_AUTO_UPDATE=false')
+    lines.push(`npm install -g --prefix "$HOME/.aamp/npm-global" --force ${shellQuote(taskAgentTgz)}`)
+    lines.push('"$HOME/.aamp/npm-global/bin/feishu-task-agent" update')
+    lines.push('"$HOME/.aamp/bin/feishu-task-agent" start')
+  } else {
+    lines.push('if command -v feishu-task-agent >/dev/null 2>&1; then')
+    lines.push('  feishu-task-agent start')
+    lines.push('else')
+    lines.push('  "$HOME/.aamp/bin/feishu-task-agent" start')
+    lines.push('fi')
+  }
+  return ['(', ...lines.map((line) => `  ${line}`), ')'].join('\n')
 }
 
 function buildNotes(selectedSpecs, options, state) {
@@ -295,7 +401,13 @@ function buildNotes(selectedSpecs, options, state) {
   notes.push('Verify locally: send the agent a task that exercises the changed path and confirm the Feishu comment shows the real text.')
   const withTaskAgent = selectedSpecs.some((spec) => spec.key === 'taskAgent')
   if (withTaskAgent) {
-    notes.push('The task-agent shim has no env override for itself. To test a local task-agent build, install it into the global prefix: npm install -g --prefix "$HOME/.aamp/npm-global" --force <taskAgent tgz> and set AAMP_TASK_AUTO_UPDATE=false.')
+    notes.push('The startup command installs the packed local task-agent, disables auto-update, synchronizes ~/.aamp/bin, and then starts it.')
+  }
+  if (selectedSpecs.some((spec) => spec.key === 'aimeAcp')) {
+    notes.push('AIME ACP local overrides are always packed tgz snapshots, including in file mode.')
+  }
+  if (!state.startupCommandRunnable) {
+    notes.push('This plan needs packed content-addressed artifacts; re-run without --plan-only before starting.')
   }
   return notes
 }
@@ -309,6 +421,7 @@ function run(options) {
     startupCommand: '',
     notes: [],
     plan: options.planOnly,
+    startupCommandRunnable: !(options.planOnly && startupNeedsPackedArtifact(selectedSpecs, options)),
   }
 
   for (const spec of selectedSpecs) {
@@ -326,13 +439,16 @@ function run(options) {
         entry.built = true
       }
       verifyBin(spec, info)
-      if (options.pack) {
+      if (needsPackedArtifact(spec, options)) {
         const tgzPath = runPack(spec, info, path.resolve(REPO_ROOT, options.outDir))
         entry.tgz = tgzPath
         state.tgzPaths[spec.key] = tgzPath
       }
       if (options.verify && spec.envName) {
-        state.verified[spec.key] = verifyResolvable(spec, info, options)
+        const pkgSpec = spec.tgzOnly || options.mode === 'tgz'
+          ? state.tgzPaths[spec.key]
+          : `file:${path.join(REPO_ROOT, spec.dir)}`
+        state.verified[spec.key] = verifyResolvable(spec, pkgSpec)
         entry.verified = state.verified[spec.key]
       }
     }
@@ -376,7 +492,22 @@ function main() {
     process.stdout.write(usage())
     process.exit(0)
   }
+  let releaseLock
   try {
+    const selectedSpecs = selectedPackageSpecs(options.packages)
+    const mutatesReleaseState = !options.planOnly && (
+      options.build
+      || options.pack
+      || options.verify
+      || selectedSpecs.some((spec) => spec.tgzOnly === true)
+    )
+    if (mutatesReleaseState) {
+      releaseLock = acquireReleaseLock({
+        repoRoot: REPO_ROOT,
+        helper: 'aamp-local-release',
+        operation: 'build-pack-verify',
+      })
+    }
     const state = run(options)
     if (options.json) {
       process.stdout.write(`${JSON.stringify({ ...state, repoRoot: REPO_ROOT }, null, 2)}\n`)
@@ -384,11 +515,18 @@ function main() {
       printHuman(options, state)
     }
     const failedVerifications = Object.values(state.verified).filter((value) => value === false)
-    process.exit(failedVerifications.length ? 1 : 0)
+    process.exitCode = failedVerifications.length ? 1 : 0
   } catch (error) {
     process.stderr.write(`aamp-local-release failed: ${error.message}\n`)
-    process.exit(1)
+    process.exitCode = 1
+  } finally {
+    cleanupTempCacheDir()
+    releaseLock?.release()
   }
 }
 
-main()
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+  main()
+}
+
+export { verifyBin }
