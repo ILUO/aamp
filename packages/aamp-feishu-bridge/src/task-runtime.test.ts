@@ -404,3 +404,144 @@ test('sendPairRequestIfNeeded fails closed when the Feishu app owner cannot be r
   )
   assert.equal(sendCount, 0)
 })
+
+test('sendPairRequestIfNeeded defers the raw SMTP diagnostic while a stale mailbox is being refreshed', async () => {
+  const output: string[] = []
+  const originalWarn = console.warn
+  const originalError = console.error
+  console.warn = (...values: unknown[]) => output.push(values.join(' '))
+  console.error = (...values: unknown[]) => output.push(values.join(' '))
+  try {
+    await assert.rejects(
+      () => sendPairRequestIfNeeded({
+        email: 'stale@meshmail.test',
+        mailboxToken: 'stale-token',
+        smtpPassword: 'stale-password',
+        baseUrl: 'https://meshmail.test',
+      }, 'aamp://connect?mailbox=agent%40meshmail.test&pair_code=pair-code', {
+        appId: 'cli_owner',
+        appSecret: 'secret',
+        userIdType: 'open_id',
+        eventNames: ['task.task.update_user_access_v2'],
+      }, {
+        retrySmtpAuth: false,
+        deferSmtpAuthDiagnostic: true,
+      }, {
+        getAppOwner: async () => ({ ownerId: 'ou_owner' }),
+        sendPairRequest: async () => {
+          throw new Error('Invalid login: 535 5.7.8 Authentication credentials invalid.')
+        },
+      }),
+      /535/,
+    )
+  } finally {
+    console.warn = originalWarn
+    console.error = originalError
+  }
+  assert.match(output.join('\n'), /requires credential refresh before pairing/)
+  assert.doesNotMatch(output.join('\n'), /535|authentication credentials invalid/i)
+})
+
+test('sendPairRequestIfNeeded waits for a fresh mailbox SMTP credential without exposing a recoverable 535', async () => {
+  const output: string[] = []
+  const originalWarn = console.warn
+  const originalError = console.error
+  console.warn = (...values: unknown[]) => output.push(values.join(' '))
+  console.error = (...values: unknown[]) => output.push(values.join(' '))
+  let attempts = 0
+  try {
+    await sendPairRequestIfNeeded({
+      email: 'fresh@meshmail.test',
+      mailboxToken: 'fresh-token',
+      smtpPassword: 'fresh-password',
+      baseUrl: 'https://meshmail.test',
+    }, 'aamp://connect?mailbox=agent%40meshmail.test&pair_code=pair-code', {
+      appId: 'cli_owner',
+      appSecret: 'secret',
+      userIdType: 'open_id',
+      eventNames: ['task.task.update_user_access_v2'],
+    }, {}, {
+      getAppOwner: async () => ({ ownerId: 'ou_owner' }),
+      sendPairRequest: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('Invalid login: 535 5.7.8 Authentication credentials invalid.')
+      },
+    })
+  } finally {
+    console.warn = originalWarn
+    console.error = originalError
+  }
+  assert.equal(attempts, 2)
+  assert.match(output.join('\n'), /waiting for mailbox SMTP readiness/)
+  assert.doesNotMatch(output.join('\n'), /535|authentication credentials invalid/i)
+})
+
+test('ensureTaskRuntimeInstanceConfigs refreshes a stale mailbox and persists the replacement before pairing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aamp-feishu-runtime-refresh-'))
+  const agentEmail = 'aime@meshmail.test'
+  const appId = 'cli_remote'
+  const instanceId = `aime-${createHash('sha256').update(agentEmail).digest('hex').slice(0, 8)}-cli-remote`
+  const imDir = join(root, 'task-runtime', 'instances', instanceId, 'im')
+  const staleMailbox = {
+    email: 'stale@meshmail.test',
+    mailboxToken: 'stale-token',
+    smtpPassword: 'stale-password',
+    baseUrl: 'https://meshmail.test',
+  }
+  const freshMailbox = {
+    email: 'fresh@meshmail.test',
+    mailboxToken: 'fresh-token',
+    smtpPassword: 'fresh-password',
+    baseUrl: 'https://meshmail.test',
+  }
+  try {
+    await mkdir(imDir, { recursive: true })
+    await writeFile(join(imDir, 'config.json'), JSON.stringify({
+      version: 1,
+      aampHost: 'https://meshmail.test',
+      targetAgentEmail: agentEmail,
+      slug: instanceId,
+      feishu: { appId, appSecret: 'remote-secret' },
+      mailbox: staleMailbox,
+      behavior: { streamThrottleMs: 700, streamThrottleChars: 40 },
+    }))
+    const selection = {
+      agent: {
+        type: 'aime',
+        display_name: 'Aime',
+        target_agent_email: agentEmail,
+        execution_location: 'remote' as const,
+        updated_at: '2026-08-14T00:00:00.000Z',
+      },
+      bot: normalizeTaskProfile({
+        app_id: appId,
+        app_secret: 'remote-secret',
+        auth_mode: 'app-secret',
+      }),
+      pairingUrl: 'aamp://connect?mailbox=agent%40meshmail.test&pair_code=pair-code',
+    }
+    const pairedMailboxEmails: string[] = []
+    let registrations = 0
+    const configured = await ensureTaskRuntimeInstanceConfigs(selection, { configDir: root }, {
+      registerMailbox: async () => {
+        registrations += 1
+        return freshMailbox
+      },
+      sendPairRequestIfNeeded: async (mailbox) => {
+        pairedMailboxEmails.push(mailbox.email)
+        if (mailbox.email === staleMailbox.email) {
+          throw new Error('Invalid login: 535 5.7.8 Authentication credentials invalid.')
+        }
+      },
+    })
+    const savedTaskConfig = JSON.parse(await readFile(join(configured.taskDir, 'config.json'), 'utf8'))
+    const savedImConfig = JSON.parse(await readFile(join(configured.imDir, 'config.json'), 'utf8'))
+
+    assert.equal(registrations, 1)
+    assert.deepEqual(pairedMailboxEmails, [staleMailbox.email, freshMailbox.email])
+    assert.deepEqual(savedTaskConfig.mailbox, freshMailbox)
+    assert.deepEqual(savedImConfig.mailbox, freshMailbox)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

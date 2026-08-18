@@ -87,6 +87,11 @@ interface FeishuPairingDependencies {
   sendPairRequest?: (request: FeishuPairRequest) => Promise<void>
 }
 
+export interface TaskRuntimeInstanceDependencies {
+  registerMailbox?: typeof AampClient.registerMailbox
+  sendPairRequestIfNeeded?: typeof sendPairRequestIfNeeded
+}
+
 export interface TaskEnabledRunOptions {
   configDir?: string
   aampHost?: string
@@ -484,7 +489,7 @@ export async function sendPairRequestIfNeeded(
   mailbox: ImBridgeConfig['mailbox'],
   pairingUrl: string | undefined,
   feishuConfig: TaskBridgeConfig['feishu'],
-  options: { retrySmtpAuth?: boolean } = {},
+  options: { retrySmtpAuth?: boolean, deferSmtpAuthDiagnostic?: boolean } = {},
   dependencies: FeishuPairingDependencies = {},
 ): Promise<void> {
   if (!pairingUrl || !isPairingUrl(pairingUrl)) return
@@ -513,10 +518,17 @@ export async function sendPairRequestIfNeeded(
     } catch (error) {
       const canRetrySmtpAuth = retrySmtpAuth && isSmtpAuthError(error)
       if (attempt < PAIR_REQUEST_AUTH_RETRY_COUNT && (canRetrySmtpAuth || isRetryableAampNetworkError(error))) {
-        const reason = canRetrySmtpAuth ? 'SMTP auth not ready' : 'network temporarily unavailable'
-        console.warn(`[feishu task-runtime] AAMP pair request ${reason} from=${mailbox.email} attempt=${attempt}/${PAIR_REQUEST_AUTH_RETRY_COUNT}; retrying in ${PAIR_REQUEST_AUTH_RETRY_DELAY_MS}ms: ${describeError(error)}`)
+        if (canRetrySmtpAuth) {
+          console.warn(`[feishu task-runtime] AAMP pair request waiting for mailbox SMTP readiness from=${mailbox.email} attempt=${attempt}/${PAIR_REQUEST_AUTH_RETRY_COUNT}; retrying in ${PAIR_REQUEST_AUTH_RETRY_DELAY_MS}ms`)
+        } else {
+          console.warn(`[feishu task-runtime] AAMP pair request network temporarily unavailable from=${mailbox.email} attempt=${attempt}/${PAIR_REQUEST_AUTH_RETRY_COUNT}; retrying in ${PAIR_REQUEST_AUTH_RETRY_DELAY_MS}ms: ${describeError(error)}`)
+        }
         await sleep(PAIR_REQUEST_AUTH_RETRY_DELAY_MS)
         continue
+      }
+      if (options.deferSmtpAuthDiagnostic && isSmtpAuthError(error)) {
+        console.warn(`[feishu task-runtime] existing AAMP mailbox requires credential refresh before pairing from=${mailbox.email}`)
+        throw error
       }
       console.error(`[feishu task-runtime] AAMP pair request failed from=${mailbox.email} to=${pairing.mailbox} host=${mailbox.baseUrl}: ${describeError(error)}`)
       throw error
@@ -530,6 +542,7 @@ async function ensureMailboxConfig(
     slug: string
     description: string
     existing?: ImBridgeConfig['mailbox']
+    registerMailbox?: typeof AampClient.registerMailbox
   },
 ): Promise<ImBridgeConfig['mailbox']> {
   if (options.existing) {
@@ -539,7 +552,7 @@ async function ensureMailboxConfig(
   console.log(`[feishu task-runtime] registering AAMP mailbox host=${options.aampHost} slug=${options.slug} slugLength=${options.slug.length}`)
   let mailbox: Awaited<ReturnType<typeof AampClient.registerMailbox>>
   try {
-    mailbox = await AampClient.registerMailbox({
+    mailbox = await (options.registerMailbox ?? AampClient.registerMailbox)({
       aampHost: options.aampHost,
       slug: options.slug,
       description: options.description,
@@ -569,6 +582,7 @@ export function resolveTaskRuntimeBehavior(
 export async function ensureTaskRuntimeInstanceConfigs(
   selection: PairSelection,
   options: TaskEnabledRunOptions,
+  dependencies: TaskRuntimeInstanceDependencies = {},
 ): Promise<{ imConfig: ImBridgeConfig, taskConfig: TaskBridgeConfig, imDir: string, taskDir: string }> {
   const instanceId = resolveInstanceId(selection.agent, selection.bot)
   const imDir = imInstanceDir(instanceId, options.configDir)
@@ -591,6 +605,7 @@ export async function ensureTaskRuntimeInstanceConfigs(
     slug: slugBase,
     description: `Feishu bridge runtime for ${selection.agent.target_agent_email}`,
     existing: existingMailbox,
+    registerMailbox: dependencies.registerMailbox,
   })
 
   const imConfig: ImBridgeConfig = {
@@ -632,8 +647,12 @@ export async function ensureTaskRuntimeInstanceConfigs(
 
   await writePrivateJsonAtomic(imConfigPath, imConfig)
   await writePrivateJsonAtomic(taskConfigPath, taskConfig)
+  const sendPairRequest = dependencies.sendPairRequestIfNeeded ?? sendPairRequestIfNeeded
   try {
-    await sendPairRequestIfNeeded(sharedMailbox, selection.pairingUrl, taskConfig.feishu, { retrySmtpAuth: !existingMailbox })
+    await sendPairRequest(sharedMailbox, selection.pairingUrl, taskConfig.feishu, {
+      retrySmtpAuth: !existingMailbox,
+      deferSmtpAuthDiagnostic: Boolean(existingMailbox),
+    })
   } catch (error) {
     if (!existingMailbox || !isSmtpAuthError(error)) throw error
     console.warn(`[feishu task-runtime] existing AAMP mailbox SMTP credentials are invalid; re-registering mailbox slug=${slugBase} email=${existingMailbox.email}`)
@@ -641,12 +660,13 @@ export async function ensureTaskRuntimeInstanceConfigs(
       aampHost,
       slug: slugBase,
       description: `Feishu bridge runtime for ${selection.agent.target_agent_email}`,
+      registerMailbox: dependencies.registerMailbox,
     })
     imConfig.mailbox = refreshedMailbox
     taskConfig.mailbox = refreshedMailbox
     await writePrivateJsonAtomic(imConfigPath, imConfig)
     await writePrivateJsonAtomic(taskConfigPath, taskConfig)
-    await sendPairRequestIfNeeded(refreshedMailbox, selection.pairingUrl, taskConfig.feishu)
+    await sendPairRequest(refreshedMailbox, selection.pairingUrl, taskConfig.feishu)
   }
   return { imConfig, taskConfig, imDir, taskDir }
 }
