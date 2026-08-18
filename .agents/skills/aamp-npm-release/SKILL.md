@@ -36,6 +36,14 @@ accepted.
   and `--bump major` select the next minor or major line. Trial from
   `x.y.z-dev.N` always becomes `x.y.z-dev.(N+1)`. Trial source sequencing is
   independent of npm/BNPM identities and independent of any remote max version.
+- When an explicitly requested release line must be aligned across packages,
+  `--prepare-source --version key=x.y.z-dev.N` may set that package's exact
+  trial source version. This is a deliberate source-preparation exception, not
+  a pack/publish override: the exact version is written to source, reviewed and
+  committed first; subsequent pack/publish commands must omit `--version` and
+  reuse the committed source versions. It is appropriate for adopting an
+  already-published dependency version as a Task Agent pin while publishing
+  only the missing packages.
 - Final keeps the existing mode name `final`. Final preparation requires
   `npm whoami` on the public npm registry to be exactly `larktask`, plus
   `--bump patch|minor|major`. From `x.y.z-dev.N`, `patch` becomes `x.y.z`,
@@ -351,8 +359,8 @@ non-interactive command yourself.
 - For personal trial mode, stable `x.y.z` source versions become
   `x.y.(z+1)-dev.0`; an existing `x.y.z-dev.N` becomes `x.y.z-dev.(N+1)` from
   source only.
-- Ordinary pack/publish never increments. It rejects an existing target and
-  requires a new source preparation.
+- Ordinary pack/publish never increments or accepts `--version`. It rejects
+  an existing target and requires a new source preparation.
 - Before pack/publish, package/lock versions and all selected prepared-source Task
   Agent pins must still match the prepared source. Treat drift as a broken
   release and stop before build or staging.

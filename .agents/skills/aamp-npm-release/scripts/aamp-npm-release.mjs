@@ -122,7 +122,7 @@ Options:
   --pnpm PATH               Backward-compatible alias for --pm
   --otp CODE                Unsupported. Public npm publish uses browser auth; BNPM uses existing internal auth
   --agent NAME              Deprecated compatibility option; printed startup commands omit --agent
-  --version key=version     Unsupported. Deterministic source versions now use --bump instead
+  --version key=version     Exact source version for --prepare-source only. Use only to align an explicit release line
   --aime-scope @name        Assertion only. Must equal @<BNPM whoami> when used
   --aime-registry URL       AIME registry, fixed to https://bnpm.byted.org
   --help                    Show this help
@@ -278,8 +278,8 @@ function parseArgs(argv) {
   if (options.packages.has('all') && options.packages.size > 1) {
     throw new Error('--package all cannot be combined with other --package values')
   }
-  if (options.versions.size > 0) {
-    throw new Error('--version is no longer supported. Deterministic release preparation uses --bump and source versions.')
+  if (options.versions.size > 0 && !options.prepareSource) {
+    throw new Error('--version is only supported with --prepare-source; pack and publish always reuse committed source versions.')
   }
   if (options.mode === 'final' && options.prepareSource && !options.bumpExplicit) {
     throw new Error('Final --prepare-source requires --bump patch, minor, or major')
@@ -456,15 +456,27 @@ function nextPreparedFinalVersion(sourceVersion, bump) {
   return stable
 }
 
+function assertExplicitPreparedVersion(mode, key, version) {
+  if (mode === 'trial' && !parseDevVersion(version)) {
+    throw new Error(`Trial --version ${key} must be x.y.z-dev.N, got ${version}`)
+  }
+  if (mode === 'final' && !parseStableVersion(version)) {
+    throw new Error(`Final --version ${key} must be stable x.y.z, got ${version}`)
+  }
+}
+
 function decideVersion({ mode, sourceVersion, remoteVersions, override, prepareSource, verifyPublished, resumePublish, bump, key }) {
   if (prepareSource) {
-    if (override) throw new Error('--version is no longer supported. Deterministic release preparation uses --bump and source versions.')
+    if (override) {
+      assertExplicitPreparedVersion(mode, key, override)
+      return override
+    }
     if (mode === 'final') return nextPreparedFinalVersion(sourceVersion, bump)
     return nextPreparedTrialVersion(sourceVersion, remoteVersions, bump)
   }
 
   if (override) {
-    throw new Error('--version is no longer supported. Deterministic release preparation uses --bump and source versions.')
+    throw new Error('--version is only supported with --prepare-source; pack and publish always reuse committed source versions.')
   }
   if (verifyPublished || resumePublish) {
     if (verifyPublished && !remoteVersions.includes(sourceVersion)) {
@@ -1155,6 +1167,7 @@ function commandArgsForOptions(options, scopes, packageManager, publish) {
   if (options.prepareSource) {
     args.push('--prepare-source')
     if (options.bumpExplicit || options.mode === 'final') args.push('--bump', options.bump)
+    for (const [key, version] of options.versions) args.push('--version', `${key}=${version}`)
   } else if (publish) {
     args.push('--publish', '--confirm-publish')
     if (options.allowDirty) args.push('--allow-dirty')

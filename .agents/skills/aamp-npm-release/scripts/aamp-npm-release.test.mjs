@@ -946,6 +946,56 @@ test('trial --prepare-source bumps stable packages to the next patch dev.0 and o
   assert.equal(calls.some(({ args }) => args.includes('https://bnpm.byted.org')), false)
 })
 
+test('trial --prepare-source accepts explicit source versions and lets an existing dependency be adopted without publishing it', (t) => {
+  const repo = createReleaseRepo(t, {
+    acpBridge: '1.2.3-dev.7',
+    feishuBridge: '3.4.5',
+    taskAgent: '2.4.6-dev.9',
+  })
+  const { fakeNpm, env } = createStatefulFakeNpm(t, {
+    'https://registry.npmjs.org/|@release-test/aamp-feishu-bridge': ['3.4.5-dev.3'],
+  })
+
+  const result = runRelease(repo, fakeNpm, env, [
+    '--mode', 'trial',
+    '--prepare-source',
+    '--scope', '@release-test',
+    '--package', 'acpBridge',
+    '--package', 'feishuBridge',
+    '--package', 'taskAgent',
+    '--version', 'acpBridge=1.3.0-dev.0',
+    '--version', 'feishuBridge=3.4.5-dev.3',
+    '--version', 'taskAgent=2.5.0-dev.0',
+  ])
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stdout, /@canonical\/aamp-acp-bridge@1\.2\.3-dev\.7 -> @release-test\/aamp-acp-bridge@1\.3\.0-dev\.0/)
+  assert.equal(readJson(path.join(repo, 'packages/aamp-acp-bridge/package.json')).version, '1.3.0-dev.0')
+  assert.equal(readJson(path.join(repo, 'packages/aamp-feishu-bridge/package.json')).version, '3.4.5-dev.3')
+  assert.equal(readJson(path.join(repo, 'packages/aamp-feishu-task-agent/package.json')).version, '2.5.0-dev.0')
+  const bootstrap = fs.readFileSync(path.join(repo, 'packages/aamp-feishu-task-agent/bootstrap/aamp-feishu-task-agent-bootstrap.sh'), 'utf8')
+  assert.match(bootstrap, /ACP_BRIDGE_PKG="\$\{ACP_BRIDGE_PKG:-@release-test\/aamp-acp-bridge@1\.3\.0-dev\.0\}"/)
+  assert.match(bootstrap, /FEISHU_BRIDGE_PKG="\$\{FEISHU_BRIDGE_PKG:-@release-test\/aamp-feishu-bridge@3\.4\.5-dev\.3\}"/)
+  assert.match(bootstrap, /AAMP_TASK_AGENT_VERSION="2\.5\.0-dev\.0"/)
+})
+
+test('explicit --version is rejected outside source preparation and validates the release mode', (t) => {
+  const repo = createReleaseRepo(t)
+  const { fakeNpm, env } = createStatefulFakeNpm(t)
+
+  const outsidePrepare = runRelease(repo, fakeNpm, env, [
+    '--mode', 'trial', '--plan-only', '--scope', '@release-test', '--package', 'acpBridge', '--version', 'acpBridge=1.3.0-dev.0',
+  ])
+  assert.equal(outsidePrepare.status, 1)
+  assert.match(outsidePrepare.stderr, /only supported with --prepare-source/i)
+
+  const invalidTrialVersion = runRelease(repo, fakeNpm, env, [
+    '--mode', 'trial', '--prepare-source', '--scope', '@release-test', '--package', 'acpBridge', '--version', 'acpBridge=1.3.0',
+  ])
+  assert.equal(invalidTrialVersion.status, 1)
+  assert.match(invalidTrialVersion.stderr, /must be x\.y\.z-dev\.N/i)
+})
+
 test('trial --prepare-source bumps stable packages to dev.0 from source versions only', (t) => {
   const repo = createReleaseRepo(t)
   const { fakeNpm, env } = createStatefulFakeNpm(t, {

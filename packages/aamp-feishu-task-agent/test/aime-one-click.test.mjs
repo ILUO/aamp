@@ -115,8 +115,8 @@ function runAimeOverridePolicyFixture(source, spec, cwd = '') {
   return runShell([
     'set -euo pipefail',
     'if [ -n "$2" ]; then cd "$2"; fi',
-    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
-    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
+    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.29-dev.0"',
+    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@luckyterry/aamp-feishu-bridge@0.1.52-dev.3"',
     'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
     'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG=""',
     'AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG=""',
@@ -714,8 +714,8 @@ test('normal Task Agent start ignores inherited package overrides and keeps the 
   const source = readFileSync(bootstrap, 'utf8')
   const result = runShell([
     'set -euo pipefail',
-    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
-    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
+    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.29-dev.0"',
+    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@luckyterry/aamp-feishu-bridge@0.1.52-dev.3"',
     'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
     'AAMP_TASK_REQUESTED_AIME_ACP_PKG="https://user:inherited-secret@example.invalid/aime-acp.tgz"',
     'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG="/tmp/aamp-local-release/old-acp.tgz"',
@@ -730,7 +730,7 @@ test('normal Task Agent start ignores inherited package overrides and keeps the 
   assert.equal(result.status, 0, result.stderr)
   assert.equal(
     result.stdout,
-    '@luckyterry/aamp-acp-bridge@0.1.28-dev.36|@zengxingyuan/aamp-feishu-bridge@0.1.51|@tengchengwei/aime-acp@0.1.1-dev.1',
+    '@luckyterry/aamp-acp-bridge@0.1.29-dev.0|@luckyterry/aamp-feishu-bridge@0.1.52-dev.3|@tengchengwei/aime-acp@0.1.1-dev.1',
   )
   assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /inherited-secret|example\.invalid/)
 })
@@ -746,8 +746,8 @@ test('explicit local package override opt-in accepts bridge directories and an A
   mkdirSync(feishuDir)
   const result = runShell([
     'set -euo pipefail',
-    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
-    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
+    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.29-dev.0"',
+    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@luckyterry/aamp-feishu-bridge@0.1.52-dev.3"',
     'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
     'AAMP_TASK_REQUESTED_AIME_ACP_PKG="$3"',
     'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG="$1"',
@@ -771,8 +771,8 @@ test('explicit local package override opt-in rejects missing artifacts without e
   const source = readFileSync(bootstrap, 'utf8')
   const result = runShell([
     'set -euo pipefail',
-    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.28-dev.36"',
-    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@zengxingyuan/aamp-feishu-bridge@0.1.51"',
+    'AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="@luckyterry/aamp-acp-bridge@0.1.29-dev.0"',
+    'AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="@luckyterry/aamp-feishu-bridge@0.1.52-dev.3"',
     'AAMP_TASK_DEFAULT_AIME_ACP_PKG="@tengchengwei/aime-acp@0.1.1-dev.1"',
     'AAMP_TASK_REQUESTED_ACP_BRIDGE_PKG="/private/missing/credential-sentinel.tgz"',
     'AAMP_TASK_REQUESTED_FEISHU_BRIDGE_PKG=""',
@@ -929,7 +929,7 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
     'NPM_BIN=npm',
     'NPX_BIN=npx',
     'CODEX_ACP_PKG=@agentclientprotocol/codex-acp@1.0.2',
-    'AAMP_TASK_AGENT_VERSION=0.1.0-dev.203',
+    'AAMP_TASK_AGENT_VERSION=0.1.1-dev.0',
     'AGENT=""',
     'AAMP_HOST=https://meshmail.ai',
     'DEBUG_MODE=false',
@@ -970,14 +970,14 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
   assert.equal(acpResult.status, 0, acpResult.stderr)
   assert.deepEqual(JSON.parse(acpResult.stdout), {
     acp: acpTgz,
-    feishu: '@zengxingyuan/aamp-feishu-bridge@0.1.51',
+    feishu: '@luckyterry/aamp-feishu-bridge@0.1.52-dev.3',
     aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
   })
 
   const feishuResult = runOuter({ FEISHU_BRIDGE_PKG: `file:${feishuDir}` })
   assert.equal(feishuResult.status, 0, feishuResult.stderr)
   assert.deepEqual(JSON.parse(feishuResult.stdout), {
-    acp: '@luckyterry/aamp-acp-bridge@0.1.28-dev.36',
+    acp: '@luckyterry/aamp-acp-bridge@0.1.29-dev.0',
     feishu: `file:${feishuDir}`,
     aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
   })
