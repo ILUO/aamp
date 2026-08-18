@@ -60,10 +60,10 @@ const NPM_BIN = process.env.AAMP_TASK_NPM_BIN || 'npm';
 const NPM_REGISTRY = process.env.AAMP_TASK_NPM_REGISTRY || 'https://registry.npmjs.org/';
 const FEISHU_API_PROBE_URL = 'https://open.feishu.cn/';
 const NPM_CACHE_DIR = process.env.AAMP_TASK_NPM_CACHE_DIR || path.join(os.tmpdir(), 'aamp-one-click-npm-cache');
-const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.36';
+const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@luckyterry/aamp-acp-bridge@0.1.28-dev.36';
 const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || '@zengxingyuan/aamp-feishu-bridge@0.1.51';
 const INSTALL_COMMAND = process.env.AAMP_TASK_INSTALL_COMMAND
-  || 'npx -y --package @larktask/aamp-feishu-task-agent@dev feishu-task-agent install';
+  || 'npx -y --package @luckyterry/aamp-feishu-task-agent@dev feishu-task-agent install';
 const DEFAULT_AGENT = process.env.AAMP_TASK_DEFAULT_AGENT || '';
 const DEFAULT_AAMP_HOST = process.env.AAMP_TASK_AAMP_HOST || 'https://meshmail.ai';
 const DEBUG_MODE = process.env.AAMP_TASK_DEBUG_MODE === 'true';

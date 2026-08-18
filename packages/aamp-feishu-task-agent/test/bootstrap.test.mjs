@@ -30,19 +30,23 @@ test('global Task Agent installation requires the TraeCode readiness helper', ()
   assert.match(completeness, /bin\/traecode-readiness\.mjs/)
 })
 
-test('task agent package uses the larktask npm scope consistently', () => {
-  const expectedPackage = '@larktask/aamp-feishu-task-agent'
+test('task agent source keeps canonical package metadata and records the last successful release pins', () => {
+  const canonicalPackage = '@larktask/aamp-feishu-task-agent'
+  const releasedTaskAgent = '@luckyterry/aamp-feishu-task-agent'
+  const releasedAcpBridge = '@luckyterry/aamp-acp-bridge@0.1.28-dev.36'
   const source = readFileSync(bootstrap, 'utf8')
   const controller = readFileSync(path.resolve(__dirname, '../bin/feishu-task-agent-controller.mjs'), 'utf8')
   const readme = readFileSync(path.resolve(__dirname, '../README.md'), 'utf8')
   const packageLock = JSON.parse(readFileSync(path.resolve(__dirname, '../package-lock.json'), 'utf8'))
 
-  assert.equal(packageJson.name, expectedPackage)
-  assert.equal(packageLock.name, expectedPackage)
-  assert.equal(packageLock.packages[''].name, expectedPackage)
-  assert.match(source, /AAMP_TASK_AGENT_NAME="\$\{AAMP_TASK_AGENT_NAME:-@larktask\/aamp-feishu-task-agent\}"/)
-  assert.match(controller, /npx -y --package @larktask\/aamp-feishu-task-agent@dev feishu-task-agent install/)
-  assert.match(readme, /npx -y --package @larktask\/aamp-feishu-task-agent@dev/)
+  assert.equal(packageJson.name, canonicalPackage)
+  assert.equal(packageLock.name, canonicalPackage)
+  assert.equal(packageLock.packages[''].name, canonicalPackage)
+  assert.match(source, new RegExp(`ACP_BRIDGE_PKG=\"\\$\\{ACP_BRIDGE_PKG:-${releasedAcpBridge.replace('/', '\\/')}\\}\"`))
+  assert.match(controller, new RegExp(`'${releasedAcpBridge.replace('/', '\\/')}'`))
+  assert.match(source, new RegExp(`AAMP_TASK_AGENT_NAME=\"\\$\\{AAMP_TASK_AGENT_NAME:-${releasedTaskAgent.replace('/', '\\/')}\\}\"`))
+  assert.match(controller, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@dev feishu-task-agent install`))
+  assert.match(readme, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@dev`))
 })
 
 test('bootstrap embedded version matches the published package version', () => {
@@ -84,7 +88,7 @@ test('internal profile probe reports hit or miss without profile mutation, auth 
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-profile-probe-'))
   const fakeCli = path.join(root, 'lark-cli')
   const callsFile = path.join(root, 'calls.log')
-  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@larktask/aamp-feishu-task-agent/bin/agent-metadata.mjs')
+  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@luckyterry/aamp-feishu-task-agent/bin/agent-metadata.mjs')
   mkdirSync(path.dirname(metadataFile), { recursive: true })
   writeFileSync(metadataFile, readFileSync(path.resolve(__dirname, '../bin/agent-metadata.mjs')))
   writeFileSync(fakeCli, `#!/usr/bin/env bash
@@ -161,7 +165,7 @@ test('internal profile probe does not install lark-cli when no existing candidat
   const binDir = path.join(root, 'bin')
   const callsFile = path.join(root, 'calls.log')
   const resultFile = path.join(root, 'result.json')
-  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@larktask/aamp-feishu-task-agent/bin/agent-metadata.mjs')
+  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@luckyterry/aamp-feishu-task-agent/bin/agent-metadata.mjs')
   mkdirSync(binDir)
   mkdirSync(path.dirname(metadataFile), { recursive: true })
   writeFileSync(metadataFile, readFileSync(path.resolve(__dirname, '../bin/agent-metadata.mjs')))

@@ -372,7 +372,7 @@ test('controller displays a saved Coco binding as its raw type in list and start
   )
 })
 
-test('Trae one-click package pins move together', () => {
+test('Trae one-click source records the released ACP identity at the source package version', () => {
   const bootstrapSource = readFileSync(bootstrap, 'utf8')
   const controllerSource = readFileSync(controller, 'utf8')
   const acpPackage = JSON.parse(readFileSync(path.resolve(__dirname, '../../aamp-acp-bridge/package.json'), 'utf8'))
@@ -382,7 +382,7 @@ test('Trae one-click package pins move together', () => {
   assert.equal(acpLock.packages[''].version, acpPackage.version)
   assert.equal(taskLock.version, packageJson.version)
   assert.equal(taskLock.packages[''].version, packageJson.version)
-  const pinnedAcp = `${acpPackage.name}@${acpPackage.version}`
+  const pinnedAcp = `@luckyterry/aamp-acp-bridge@${acpPackage.version}`
   assert.equal(bootstrapSource.includes(`ACP_BRIDGE_PKG="\${ACP_BRIDGE_PKG:-${pinnedAcp}}"`), true)
   assert.equal(controllerSource.includes(pinnedAcp), true)
 })

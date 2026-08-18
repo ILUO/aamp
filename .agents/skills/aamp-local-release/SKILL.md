@@ -52,10 +52,21 @@ Reference selection is package-specific:
 - AIME is tgz-only. `aimeAcp` always builds a local AIME `.tgz` and
   automatically includes `taskAgent`; it never uses `file:packages/aime-acp`.
 - Selecting `taskAgent` automatically packs it. It installs the local Task Agent tgz into
-  `$HOME/.aamp/npm-global`, then runs its `update` command to
-  sync `~/.aamp/bin`, sets `AAMP_TASK_AUTO_UPDATE=false`, and then starts the
-  synchronized local command.
+  `$HOME/.aamp/npm-global`, explicitly pins `AAMP_TASK_AGENT_NAME` to the packed local
+  manifest name for that subshell, sets `AAMP_TASK_AUTO_UPDATE=false`, and starts that
+  exact npm-global launcher directly. Its normal startup synchronizes `~/.aamp/bin`
+  before opening the interactive selector; the generated command does not run a
+  separate `update` step.
 - `--mode tgz` makes selected bridges use packed snapshots too.
+- When `taskAgent` is selected directly or via `aimeAcp`, the helper preflights
+  every unselected Task Agent default package pin before printing a runnable
+  command. Local overrides skip that package's remote check; unresolved defaults
+  fail early with an actionable message naming the pin and telling you which
+  `--package acpBridge`, `--package feishuBridge`, or `--package aimeAcp` flag
+  to add instead of silently auto-including everything.
+- `--plan-only` stays safe for Task Agent runs: it does not promise that
+  unselected default pins are runnable, and reports that Task Agent preflight
+  was skipped/unchecked.
 
 When npm resolves the local package it still downloads the package's public
 dependencies (pino, @larksuiteoapi/node-sdk, aamp-sdk, ...) from the registry.
@@ -89,7 +100,9 @@ Do not replace it with a persistent `export`.
    as the normal path.
 3. If the user only wants a bridge `file:` command, run with `--plan-only`.
    AIME, Task Agent, or `--mode tgz` needs a real content hash, so plan-only
-   prints a non-runnable notice instead of inventing an artifact path.
+   prints a non-runnable notice instead of inventing an artifact path. For Task
+   Agent selections it also skips default-pin preflight, so treat the output as
+   unchecked until a real run succeeds.
 4. If the user wants an immutable artifact, add `--pack` (and optionally
    `--mode tgz` so the printed command references the tarball).
 5. Report the printed startup command in the final reply, and call out the two
@@ -97,7 +110,7 @@ Do not replace it with a persistent `export`.
    runtime/agent leases), then run the command. `feishu-task-agent start` is
    interactive; it opens the multi-select for saved bindings.
    Use the generated subshell verbatim. Do not replace it with persistent
-   exports or split its install/update/start sequence.
+   exports or split its install/start sequence.
 6. Suggest verification: send the agent a task that exercises the changed code
    path and confirm the Feishu comment shows the real text (for the
    help-text/timezone fix, "查询今天的日程" should show
@@ -181,6 +194,11 @@ node .agents/skills/aamp-local-release/scripts/aamp-local-release.mjs \
 - The local build only affects a future Task Agent start: the running bridge
   does not hot-swap. Always tell the user to stop the current Task Agent
   before starting with the new overrides.
+- Task Agent local runs fail closed before printing a runnable command when an
+  unselected default ACP/Feishu/AIME pin cannot be resolved from its registry.
+  The fix is to add the corresponding local override package flag for the
+  package you changed; for example, if the missing default is the ACP bridge,
+  rerun with `--package acpBridge`.
 - Normal Task Agent starts intentionally ignore inherited package override
   variables. The local subshell clears stale overrides before its one-shot
   opt-in; bridges may use an existing `file:` directory or local `.tgz`, while

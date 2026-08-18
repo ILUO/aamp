@@ -17,10 +17,8 @@ const PACKAGE_SPECS = [
     key: 'aimeAcp',
     dir: 'packages/aime-acp',
     unscopedName: 'aime-acp',
-    packageName: '@tengchengwei/aime-acp',
     build: true,
     registryOption: 'aimeRegistry',
-    scopeOption: 'aimeScope',
   },
   {
     key: 'acpBridge',
@@ -103,7 +101,7 @@ function usage() {
 Options:
   --wizard                  Manual/debug planning helper; agents should prefer non-interactive flags
   --mode trial|final        Release mode. Default: trial
-  --scope @name             Trial must equal @<npm whoami>; final is fixed to @larktask
+  --scope @name             Assertion only. Trial must equal @<public npm whoami>; final must equal @larktask
   --registry URL            Public AAMP registry, fixed to https://registry.npmjs.org/
   --tag NAME                Trial is fixed to dev; final is fixed to latest
   --pack                    Build staged packages and create tgz artifacts. Default unless --plan-only is used
@@ -124,8 +122,8 @@ Options:
   --pnpm PATH               Backward-compatible alias for --pm
   --otp CODE                Unsupported. Public npm publish uses browser auth; BNPM uses existing internal auth
   --agent NAME              Deprecated compatibility option; printed startup commands omit --agent
-  --version key=version     Override a target package version. Keys: aimeAcp, acpBridge, feishuBridge, taskAgent
-  --aime-scope @name        Compatibility flag; only @tengchengwei is accepted
+  --version key=version     Unsupported. Deterministic source versions now use --bump instead
+  --aime-scope @name        Assertion only. Must equal @<BNPM whoami> when used
   --aime-registry URL       AIME registry, fixed to https://bnpm.byted.org
   --help                    Show this help
 `
@@ -145,7 +143,8 @@ function parseArgs(argv) {
     registry: 'https://registry.npmjs.org/',
     aimeRegistry: AIME_BNPM_REGISTRY,
     tag: '',
-    aimeScope: '@tengchengwei',
+    aimeScope: '',
+    bumpExplicit: false,
     pack: true,
     planOnly: false,
     prepareSource: false,
@@ -198,6 +197,7 @@ function parseArgs(argv) {
       options.pack = false
     } else if (arg === '--bump') {
       options.bump = next()
+      options.bumpExplicit = true
     } else if (arg === '--package' || arg === '--packages') {
       for (const value of next().split(',')) {
         const key = normalizePackageSelection(value.trim())
@@ -247,9 +247,6 @@ function parseArgs(argv) {
   if (!['patch', 'minor', 'major'].includes(options.bump)) {
     throw new Error('--bump must be patch, minor, or major')
   }
-  if (options.aimeScope !== '@tengchengwei') {
-    throw new Error('--aime-scope is fixed to @tengchengwei; other AIME owners are not supported')
-  }
   if (normalizeRegistry(options.aimeRegistry) !== AIME_BNPM_REGISTRY) {
     throw new Error('AIME registry is fixed to ' + AIME_BNPM_REGISTRY)
   }
@@ -280,6 +277,12 @@ function parseArgs(argv) {
   validateAgentType(options.agent)
   if (options.packages.has('all') && options.packages.size > 1) {
     throw new Error('--package all cannot be combined with other --package values')
+  }
+  if (options.versions.size > 0) {
+    throw new Error('--version is no longer supported. Deterministic release preparation uses --bump and source versions.')
+  }
+  if (options.mode === 'final' && options.prepareSource && !options.bumpExplicit) {
+    throw new Error('Final --prepare-source requires --bump patch, minor, or major')
   }
   return options
 }
@@ -394,6 +397,13 @@ function packageName(scope, unscopedName) {
   return `${normalizeScope(scope)}/${unscopedName}`
 }
 
+function targetPackageName(spec, scopes, sourceName) {
+  if (spec.key === 'aimeAcp') {
+    return scopes.aimeScope ? packageName(scopes.aimeScope, spec.unscopedName) : sourceName
+  }
+  return packageName(scopes.publicScope, spec.unscopedName)
+}
+
 function tarballUrl(registry, scopedPackageName, version) {
   const cleanRegistry = registry.endsWith('/') ? registry.slice(0, -1) : registry
   const unscoped = scopedPackageName.split('/').pop()
@@ -420,75 +430,41 @@ function bumpStableVersion(version, bump = 'patch') {
   return `${parsed.major}.${parsed.minor}.${parsed.patch + 1}`
 }
 
-function bumpPatch(version) {
-  return bumpStableVersion(version, 'patch')
-}
-
-function nextAvailableStableVersion(candidate, remoteVersions) {
-  let current = candidate
-  while (remoteVersions.includes(current)) {
-    const next = bumpPatch(current)
-    if (!next || next === current) return current
-    current = next
-  }
-  return current
-}
-
-function stableVersionSuggestion(spec, sourceVersion, remoteVersions) {
-  const baseVersion = sourceVersion.split('-')[0]
-  let candidate = sourceVersion
-  if (sourceVersion.includes('-')) {
-    candidate = spec.key === 'taskAgent' ? baseVersion : (bumpPatch(baseVersion) || baseVersion)
-  } else {
-    candidate = bumpPatch(sourceVersion) || sourceVersion
-  }
-  return nextAvailableStableVersion(candidate, remoteVersions)
-}
-
 function nextPreparedTrialVersion(sourceVersion, remoteVersions, bump) {
+  void remoteVersions
   const sourceDev = parseDevVersion(sourceVersion)
   if (!sourceDev) {
     const nextStable = bumpStableVersion(sourceVersion, bump)
     if (!nextStable) {
       throw new Error(`Trial source version must be stable x.y.z or x.y.z-dev.N: ${sourceVersion}`)
     }
-    const candidate = `${nextStable}-dev.1`
-    if (remoteVersions.includes(candidate)) {
-      throw new Error(`Prepared trial version ${candidate} already exists. Choose a different --bump or update the source version.`)
-    }
-    return candidate
+    return `${nextStable}-dev.0`
   }
+  return `${sourceDev.base}-dev.${sourceDev.number + 1}`
+}
 
-  let max = sourceDev.number
-  for (const version of remoteVersions) {
-    const other = parseDevVersion(version)
-    if (other && other.base === sourceDev.base && other.number > max) {
-      max = other.number
-    }
+function nextPreparedFinalVersion(sourceVersion, bump) {
+  const sourceDev = parseDevVersion(sourceVersion)
+  if (sourceDev) {
+    if (bump === 'patch') return sourceDev.base
+    return bumpStableVersion(sourceDev.base, bump)
   }
-  return `${sourceDev.base}-dev.${max + 1}`
+  const stable = bumpStableVersion(sourceVersion, bump)
+  if (!stable) {
+    throw new Error(`Final source version must be stable x.y.z or x.y.z-dev.N: ${sourceVersion}`)
+  }
+  return stable
 }
 
 function decideVersion({ mode, sourceVersion, remoteVersions, override, prepareSource, verifyPublished, resumePublish, bump, key }) {
   if (prepareSource) {
-    if (mode === 'final') {
-      if (!override) {
-        throw new Error(`Final --prepare-source requires --version ${key}=x.y.z for every release package`)
-      }
-      if (!parseStableVersion(override)) {
-        throw new Error(`Final source version must be stable x.y.z: ${override}`)
-      }
-      if (remoteVersions.includes(override)) {
-        throw new Error(`Final version ${override} already exists`)
-      }
-      return override
-    }
-    if (override) throw new Error('--version is only supported with final --prepare-source')
+    if (override) throw new Error('--version is no longer supported. Deterministic release preparation uses --bump and source versions.')
+    if (mode === 'final') return nextPreparedFinalVersion(sourceVersion, bump)
     return nextPreparedTrialVersion(sourceVersion, remoteVersions, bump)
   }
 
   if (override) {
-    throw new Error('--version only prepares source metadata; use it with --mode final --prepare-source')
+    throw new Error('--version is no longer supported. Deterministic release preparation uses --bump and source versions.')
   }
   if (verifyPublished || resumePublish) {
     if (verifyPublished && !remoteVersions.includes(sourceVersion)) {
@@ -500,13 +476,7 @@ function decideVersion({ mode, sourceVersion, remoteVersions, override, prepareS
     throw new Error(`Trial release requires a prepared source version x.y.z-dev.N, got ${sourceVersion}. Run --prepare-source first.`)
   }
   if (mode === 'final' && !parseStableVersion(sourceVersion)) {
-    throw new Error(`Final release requires a stable source version x.y.z, got ${sourceVersion}. Run --mode final --prepare-source with explicit --version values first.`)
-  }
-  if (remoteVersions.includes(sourceVersion)) {
-    if (mode === 'trial') {
-      throw new Error(`Source version ${sourceVersion} already exists in the target registry. Run --prepare-source before packing or publishing.`)
-    }
-    throw new Error(`Final version ${sourceVersion} already exists. Run --mode final --prepare-source with explicit --version values.`)
+    throw new Error(`Final release requires a stable source version x.y.z, got ${sourceVersion}. Run --mode final --prepare-source with --bump first.`)
   }
   return sourceVersion
 }
@@ -636,11 +606,7 @@ function packageRegistry(spec, options) {
   return spec.registryOption ? options[spec.registryOption] : options.registry
 }
 
-function packageScope(spec, options, scope) {
-  return spec.scopeOption ? options[spec.scopeOption] : scope
-}
-
-function buildReleasePlan(repoRoot, packageManager, options, scope, selectedKeys) {
+function buildReleasePlan(repoRoot, packageManager, options, scopes, selectedKeys) {
   const sources = new Map()
   const targets = {}
   const resolveRemote = (key) => selectedKeys.has(key)
@@ -648,7 +614,7 @@ function buildReleasePlan(repoRoot, packageManager, options, scope, selectedKeys
     const sourceDir = path.join(repoRoot, spec.dir)
     const sourcePackage = readJson(path.join(sourceDir, 'package.json'))
     const registry = packageRegistry(spec, options)
-    const targetName = spec.packageName || packageName(packageScope(spec, options, scope), spec.unscopedName)
+    const targetName = targetPackageName(spec, scopes, sourcePackage.name)
     const versions = resolveRemote(spec.key) ? remoteVersions(packageManager, registry, targetName) : []
     const remoteLatest = versions.at(-1) || null
     const selected = selectedKeys.has(spec.key)
@@ -735,11 +701,16 @@ function replaceInFile(file, replacements) {
   fs.writeFileSync(file, content)
 }
 
-function patchTaskAgentPins(taskDir, targets, tag) {
+function preparedTaskAgentChannel(mode) {
+  return mode === 'final' ? 'latest' : 'dev'
+}
+
+function patchPreparedSourceTaskAgentPins(taskDir, targets, taskAgentChannel) {
   const replacements = [
-    [/@[^/\s"']+\/aamp-feishu-task-agent@dev/g, `${targets.taskAgent.name}@${tag}`],
-    [/AAMP_TASK_AGENT_NAME="\$\{AAMP_TASK_AGENT_NAME:-@[^/"]+\/aamp-feishu-task-agent\}"/g, `AAMP_TASK_AGENT_NAME="\${AAMP_TASK_AGENT_NAME:-${targets.taskAgent.name}}"`],
+    [/^AAMP_TASK_AGENT_NAME="\$\{AAMP_TASK_AGENT_NAME:-[^}"]+}"$/m, `AAMP_TASK_AGENT_NAME="\${AAMP_TASK_AGENT_NAME:-${targets.taskAgent.name}}"`],
+    [/^AAMP_TASK_AGENT_CHANNEL="\$\{AAMP_TASK_AGENT_CHANNEL:-[^}"]+}"$/m, `AAMP_TASK_AGENT_CHANNEL="\${AAMP_TASK_AGENT_CHANNEL:-${taskAgentChannel}}"`],
     [/^AAMP_TASK_AGENT_VERSION="[^"]*"$/m, `AAMP_TASK_AGENT_VERSION="${targets.taskAgent.version}"`],
+    [/@[^/\s"']+\/aamp-feishu-task-agent@(dev|latest)/g, `${targets.taskAgent.name}@${taskAgentChannel}`],
   ]
   if (targets.acpBridge?.selected) {
     replacements.push([
@@ -753,38 +724,10 @@ function patchTaskAgentPins(taskDir, targets, tag) {
       `${targets.feishuBridge.name}@${targets.feishuBridge.version}`,
     ])
   }
-  if (targets.aimeAcp?.selected && targets.aimeAcp.version) {
-    replacements.push(
-      [/^AIME_ACP_PKG="\$\{AIME_ACP_PKG:-[^"]+}"$/m, `AIME_ACP_PKG="\${AIME_ACP_PKG:-${targets.aimeAcp.name}@${targets.aimeAcp.version}}"`],
-      [/^AIME_ACP_REGISTRY="\$\{AIME_ACP_REGISTRY:-[^"]+}"$/m, `AIME_ACP_REGISTRY="\${AIME_ACP_REGISTRY:-${targets.aimeAcp.registry}}"`],
-    )
-  }
-
-  replaceInFile(path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'), replacements)
-  replaceInFile(path.join(taskDir, 'bin/feishu-task-agent-controller.mjs'), replacements)
-  replaceInFile(path.join(taskDir, 'README.md'), replacements)
-}
-
-function patchPreparedSourceTaskAgentPins(taskDir, sources, targets) {
-  const replacements = [
-    [/^AAMP_TASK_AGENT_VERSION="[^"]*"$/m, `AAMP_TASK_AGENT_VERSION="${targets.taskAgent.version}"`],
-  ]
-  if (targets.acpBridge?.selected) {
-    replacements.push([
-      /@[^/\s"']+\/aamp-acp-bridge@[0-9A-Za-z.-]+/g,
-      `${sources.get('acpBridge').sourceName}@${targets.acpBridge.version}`,
-    ])
-  }
-  if (targets.feishuBridge?.selected) {
-    replacements.push([
-      /@[^/\s"']+\/aamp-feishu-bridge@[0-9A-Za-z.-]+/g,
-      `${sources.get('feishuBridge').sourceName}@${targets.feishuBridge.version}`,
-    ])
-  }
   if (targets.aimeAcp?.selected) {
     replacements.push(
-      [/@tengchengwei\/aime-acp@[0-9A-Za-z.-]+/g, `${sources.get('aimeAcp').sourceName}@${targets.aimeAcp.version}`],
-      [/https:\/\/bnpm\.byted\.org/g, targets.aimeAcp.registry],
+      [/@[^/\s"']+\/aime-acp@[0-9A-Za-z.-]+/g, `${targets.aimeAcp.name}@${targets.aimeAcp.version}`],
+      [/^AIME_ACP_REGISTRY="\$\{AIME_ACP_REGISTRY:-[^"]+}"$/m, `AIME_ACP_REGISTRY="\${AIME_ACP_REGISTRY:-${targets.aimeAcp.registry}}"`],
     )
   }
 
@@ -843,29 +786,94 @@ function exactMatches(content, pattern) {
   return content.match(pattern) || []
 }
 
-function assertPreparedTaskAgentPins(taskDir, sources, targets) {
+function readTaskAgentPinFiles(taskDir) {
+  return {
+    bootstrapFile: path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'),
+    controllerFile: path.join(taskDir, 'bin/feishu-task-agent-controller.mjs'),
+    readmeFile: path.join(taskDir, 'README.md'),
+    bootstrap: fs.readFileSync(path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'), 'utf8'),
+    controller: fs.readFileSync(path.join(taskDir, 'bin/feishu-task-agent-controller.mjs'), 'utf8'),
+    readme: fs.readFileSync(path.join(taskDir, 'README.md'), 'utf8'),
+  }
+}
+
+function parsePinnedPackage(pin) {
+  const at = pin.lastIndexOf('@')
+  if (at <= 0) {
+    throw new Error(`Invalid pinned package identity: ${pin}`)
+  }
+  return {
+    name: pin.slice(0, at),
+    version: pin.slice(at + 1),
+  }
+}
+
+function assertTaskAgentNamePin(bootstrap, expectedName) {
+  const match = /^AAMP_TASK_AGENT_NAME="\$\{AAMP_TASK_AGENT_NAME:-([^}"]+)\}"$/m.exec(bootstrap)
+  if (!match) return
+  if (match[1] !== expectedName) {
+    throw new Error(`Task Agent name pin validation failed: expected ${expectedName}, got ${match[1]}`)
+  }
+}
+
+function assertTaskAgentChannelPin(bootstrap, expectedChannel) {
+  const match = /^AAMP_TASK_AGENT_CHANNEL="\$\{AAMP_TASK_AGENT_CHANNEL:-([^}"]+)\}"$/m.exec(bootstrap)
+  if (!match) {
+    throw new Error(`Task Agent prepared source channel validation failed: expected ${expectedChannel}, but AAMP_TASK_AGENT_CHANNEL is missing`)
+  }
+  if (match[1] !== expectedChannel) {
+    throw new Error(`Task Agent prepared source channel validation failed: expected ${expectedChannel}, got ${match[1]}`)
+  }
+}
+
+function readPinnedPackageGroup(content, pattern, label) {
+  const pins = exactMatches(content, pattern)
+  if (pins.length !== 2) {
+    throw new Error(`${label} pin validation failed: expected 2 occurrences`)
+  }
+  const unique = [...new Set(pins)]
+  if (unique.length !== 1) {
+    throw new Error(`${label} pin validation failed: expected 2 matching occurrences`)
+  }
+  return parsePinnedPackage(unique[0])
+}
+
+function readAimeRegistry(bootstrap) {
+  const matches = [...bootstrap.matchAll(/AIME_ACP_REGISTRY:-([^}"]+)/g)].map((match) => match[1])
+  if (matches.length !== 2 || matches.some((entry) => entry !== matches[0])) {
+    throw new Error('AIME ACP registry validation failed: expected 2 matching occurrences')
+  }
+  return matches[0]
+}
+
+function assertPreparedTaskAgentPins(taskDir, sources, targets, taskAgentChannel) {
   assertTaskAgentBootstrapVersion(taskDir, targets.taskAgent.version)
-  const bootstrap = fs.readFileSync(path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'), 'utf8')
-  const controller = fs.readFileSync(path.join(taskDir, 'bin/feishu-task-agent-controller.mjs'), 'utf8')
+  const { bootstrap, controller, readme } = readTaskAgentPinFiles(taskDir)
+  assertTaskAgentNamePin(bootstrap, targets.taskAgent.name)
+  assertTaskAgentChannelPin(bootstrap, taskAgentChannel)
+  const taskAgentScopePins = exactMatches(`${controller}\n${readme}`, /@[^/\s"']+\/aamp-feishu-task-agent@(dev|latest)/g)
+  if (taskAgentScopePins.length !== 2 || taskAgentScopePins.some((pin) => pin !== `${targets.taskAgent.name}@${taskAgentChannel}`)) {
+    throw new Error(`Task Agent prepared source pin validation failed: expected 2 occurrences of ${targets.taskAgent.name}@${taskAgentChannel}`)
+  }
   if (targets.acpBridge?.selected) {
-    const expected = `${sources.get('acpBridge').sourceName}@${targets.acpBridge.version}`
+    const expected = `${targets.acpBridge.name}@${targets.acpBridge.version}`
     const pins = exactMatches(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-acp-bridge@[0-9A-Za-z.-]+/g)
     if (pins.length !== 2 || pins.some((pin) => pin !== expected)) {
-      throw new Error(`ACP bridge canonical pin validation failed: expected 2 occurrences of ${expected}`)
+      throw new Error(`ACP bridge prepared source pin validation failed: expected 2 occurrences of ${expected}`)
     }
   }
   if (targets.feishuBridge?.selected) {
-    const expected = `${sources.get('feishuBridge').sourceName}@${targets.feishuBridge.version}`
+    const expected = `${targets.feishuBridge.name}@${targets.feishuBridge.version}`
     const pins = exactMatches(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-feishu-bridge@[0-9A-Za-z.-]+/g)
     if (pins.length !== 2 || pins.some((pin) => pin !== expected)) {
-      throw new Error(`Feishu bridge canonical pin validation failed: expected 2 occurrences of ${expected}`)
+      throw new Error(`Feishu bridge prepared source pin validation failed: expected 2 occurrences of ${expected}`)
     }
   }
   if (targets.aimeAcp?.selected) {
-    const expected = `${sources.get('aimeAcp').sourceName}@${targets.aimeAcp.version}`
-    const pins = exactMatches(bootstrap, /@tengchengwei\/aime-acp@[0-9A-Za-z.-]+/g)
+    const expected = `${targets.aimeAcp.name}@${targets.aimeAcp.version}`
+    const pins = exactMatches(bootstrap, /@[^/\s"']+\/aime-acp@[0-9A-Za-z.-]+/g)
     if (pins.length !== 2 || pins.some((pin) => pin !== expected)) {
-      throw new Error(`AIME ACP canonical pin validation failed: expected 2 occurrences of ${expected}`)
+      throw new Error(`AIME ACP prepared source pin validation failed: expected 2 occurrences of ${expected}`)
     }
     const registries = exactMatches(bootstrap, /AIME_ACP_REGISTRY:-([^}"]+)/g)
     if (registries.length !== 2 || registries.some((entry) => entry !== `AIME_ACP_REGISTRY:-${targets.aimeAcp.registry}`)) {
@@ -874,45 +882,32 @@ function assertPreparedTaskAgentPins(taskDir, sources, targets) {
   }
 }
 
-function assertStagedTaskAgentPins(taskDir, targets) {
-  assertTaskAgentBootstrapVersion(taskDir, targets.taskAgent.version)
-  const bootstrap = fs.readFileSync(path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'), 'utf8')
-  const controller = fs.readFileSync(path.join(taskDir, 'bin/feishu-task-agent-controller.mjs'), 'utf8')
-  if (targets.acpBridge?.selected) {
-    const expected = `${targets.acpBridge.name}@${targets.acpBridge.version}`
-    const pins = exactMatches(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-acp-bridge@[0-9A-Za-z.-]+/g)
-    if (pins.length !== 2 || pins.some((pin) => pin !== expected)) {
-      throw new Error(`Staged ACP bridge pin validation failed: expected 2 occurrences of ${expected}`)
-    }
+function assertStagedTaskAgentPins(taskDir, sourceTaskDir) {
+  const staged = readTaskAgentPinFiles(taskDir)
+  const source = readTaskAgentPinFiles(sourceTaskDir)
+  if (staged.bootstrap !== source.bootstrap) {
+    throw new Error('Staged Task Agent bootstrap pins must match prepared source pins exactly')
   }
-  if (targets.feishuBridge?.selected) {
-    const expected = `${targets.feishuBridge.name}@${targets.feishuBridge.version}`
-    const pins = exactMatches(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-feishu-bridge@[0-9A-Za-z.-]+/g)
-    if (pins.length !== 2 || pins.some((pin) => pin !== expected)) {
-      throw new Error(`Staged Feishu bridge pin validation failed: expected 2 occurrences of ${expected}`)
-    }
+  if (staged.controller !== source.controller) {
+    throw new Error('Staged Task Agent controller pins must match prepared source pins exactly')
   }
-  if (targets.aimeAcp?.selected) {
-    const expected = `${targets.aimeAcp.name}@${targets.aimeAcp.version}`
-    const pins = exactMatches(bootstrap, /@tengchengwei\/aime-acp@[0-9A-Za-z.-]+/g)
-    if (pins.length !== 2 || pins.some((pin) => pin !== expected)) {
-      throw new Error(`Staged AIME ACP pin validation failed: expected 2 occurrences of ${expected}`)
-    }
-    const registries = exactMatches(bootstrap, /AIME_ACP_REGISTRY:-([^}"]+)/g)
-    const expectedRegistry = `AIME_ACP_REGISTRY:-${targets.aimeAcp.registry}`
-    if (registries.length !== 2 || registries.some((entry) => entry !== expectedRegistry)) {
-      throw new Error(`Staged AIME ACP registry validation failed: expected 2 occurrences of ${targets.aimeAcp.registry}`)
-    }
+  if (staged.readme !== source.readme) {
+    throw new Error('Staged Task Agent README pins must match prepared source pins exactly')
   }
 }
 
-function assertPreparedSourceMetadata(sources, targets, releaseSpecs) {
+function assertPreparedSourceMetadata(sources, targets, releaseSpecs, options) {
   for (const spec of releaseSpecs) {
     const source = sources.get(spec.key)
     assertPackageMetadata(source.sourceDir, source.sourceName, targets[spec.key].version)
   }
   if (targets.taskAgent?.selected) {
-    assertPreparedTaskAgentPins(sources.get('taskAgent').sourceDir, sources, targets)
+    assertPreparedTaskAgentPins(
+      sources.get('taskAgent').sourceDir,
+      sources,
+      targets,
+      preparedTaskAgentChannel(options.mode),
+    )
   }
 }
 
@@ -925,13 +920,54 @@ function prepareSourceMetadata(sources, targets, releaseSpecs, options) {
       patchPackageMetadata(source.sourceDir, source.sourceName, targets[spec.key].version)
     }
     if (includesTaskAgent) {
-      patchPreparedSourceTaskAgentPins(sources.get('taskAgent').sourceDir, sources, targets)
+      patchPreparedSourceTaskAgentPins(
+        sources.get('taskAgent').sourceDir,
+        targets,
+        preparedTaskAgentChannel(options.mode),
+      )
     }
-    assertPreparedSourceMetadata(sources, targets, releaseSpecs)
+    assertPreparedSourceMetadata(sources, targets, releaseSpecs, options)
   } catch (error) {
     restoreSourceFiles(snapshot)
     throw error
   }
+}
+
+function assertSelectedVersionsNotAlreadyPublished(targets, selectedKeys, options) {
+  if (options.prepareSource || options.verifyPublished || options.resumePublish) return
+  for (const spec of selectedPackageSpecs(selectedKeys)) {
+    const target = targets[spec.key]
+    if (!target.alreadyPublished) continue
+    if (options.mode === 'trial') {
+      throw new Error(`Source version ${target.version} already exists in the target registry. Run --prepare-source before packing or publishing.`)
+    }
+    throw new Error(`Final version ${target.version} already exists. Run --mode final --prepare-source with --bump.`)
+  }
+}
+
+function validatePinnedDependency(packageManager, pin, registry, spec, selected, expectedTarget) {
+  if (selected) {
+    if (pin.name !== expectedTarget.name || pin.version !== expectedTarget.version) {
+      throw new Error(`${spec.key} selected pin validation failed: expected ${expectedTarget.name}@${expectedTarget.version}, got ${pin.name}@${pin.version}`)
+    }
+    return
+  }
+  const versions = remoteVersions(packageManager, registry, pin.name)
+  if (!versions.includes(pin.version)) {
+    throw new Error(`Task Agent default ${spec.unscopedName} pin ${pin.name}@${pin.version} is not published on ${registry}. Include --package ${spec.key} to publish it, or update the source Task Agent pin before packing/publishing.`)
+  }
+}
+
+function assertAllTaskAgentDefaultPinsValid(taskDir, packageManager, targets) {
+  const { bootstrap, controller } = readTaskAgentPinFiles(taskDir)
+  const acpPin = readPinnedPackageGroup(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-acp-bridge@[0-9A-Za-z.-]+/g, 'ACP bridge')
+  const feishuPin = readPinnedPackageGroup(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-feishu-bridge@[0-9A-Za-z.-]+/g, 'Feishu bridge')
+  const aimePin = readPinnedPackageGroup(bootstrap, /@[^/\s"']+\/aime-acp@[0-9A-Za-z.-]+/g, 'AIME ACP')
+  const aimeRegistry = readAimeRegistry(bootstrap)
+
+  validatePinnedDependency(packageManager, acpPin, targets.acpBridge.registry, PACKAGE_SPECS.find((spec) => spec.key === 'acpBridge'), targets.acpBridge.selected, targets.acpBridge)
+  validatePinnedDependency(packageManager, feishuPin, targets.feishuBridge.registry, PACKAGE_SPECS.find((spec) => spec.key === 'feishuBridge'), targets.feishuBridge.selected, targets.feishuBridge)
+  validatePinnedDependency(packageManager, aimePin, aimeRegistry, PACKAGE_SPECS.find((spec) => spec.key === 'aimeAcp'), targets.aimeAcp.selected, targets.aimeAcp)
 }
 
 function assertTaskAgentBootstrapVersion(taskDir, expectedVersion) {
@@ -1105,27 +1141,25 @@ function scriptCommand(args) {
   return ['node', '.agents/skills/aamp-npm-release/scripts/aamp-npm-release.mjs', ...args].map(shellWord).join(' ')
 }
 
-function commandArgsForOptions(options, scope, packageManager, publish) {
+function commandArgsForOptions(options, scopes, packageManager, publish) {
   const args = [
     '--mode', options.mode,
-    '--scope', scope,
+    '--scope', scopes.publicScope,
     '--registry', options.registry,
-    '--aime-scope', options.aimeScope,
     '--aime-registry', options.aimeRegistry,
     '--pm', packageManager.command,
   ]
+  if (scopes.aimeScope) args.push('--aime-scope', scopes.aimeScope)
   for (const key of options.packages) args.push('--package', key)
   if (options.tag) args.push('--tag', options.tag)
   if (options.prepareSource) {
     args.push('--prepare-source')
+    if (options.bumpExplicit || options.mode === 'final') args.push('--bump', options.bump)
   } else if (publish) {
     args.push('--publish', '--confirm-publish')
     if (options.allowDirty) args.push('--allow-dirty')
   } else {
     args.push('--pack')
-  }
-  for (const [key, version] of options.versions) {
-    args.push('--version', `${key}=${version}`)
   }
   return args
 }
@@ -1155,29 +1189,29 @@ async function questionWithDefault(prompter, question, defaultValue) {
 
 async function runWizard(baseOptions) {
   const repoRoot = findRepoRoot()
-  let { packageManager, whoami } = resolveAuthenticatedPackageManager(baseOptions.packageManager, baseOptions.registry)
+  let { packageManager, whoami: publicWhoami } = resolveAuthenticatedPackageManager(baseOptions.packageManager, baseOptions.registry)
   const dirty = trackedDirty(repoRoot)
   const prompter = createPrompter()
 
   try {
-    console.log(`npm identity: ${whoami}`)
+    console.log(`npm identity: ${publicWhoami}`)
     console.log(`package manager: ${packageManager.command}`)
     console.log('')
     console.log('选择要准备哪种包：')
     console.log('1) 个人试用本地包：只 pack tgz，不发布 npm')
     console.log('2) 个人试用远程包：发布到当前用户 scope，例如 @luckyterry，tag=dev')
-    console.log('3) @larktask 官方稳定包：发布 stable 版本，tag=latest，需要确认版本号')
+    console.log('3) @larktask 官方稳定包：按源码版本和 bump 准备 stable 版本，tag=latest')
     const choice = (await questionWithDefault(prompter, '输入序号', '1')).trim()
 
     const options = {
       ...baseOptions,
-      versions: new Map(baseOptions.versions),
       publish: false,
       confirmPublish: false,
       allowDirty: dirty.length > 0,
       prepareSource: false,
+      aimeScope: '',
     }
-    let scope = ''
+    let scopes = { publicScope: '', aimeScope: '' }
     let publish = false
     let releaseLabel = ''
 
@@ -1185,34 +1219,25 @@ async function runWizard(baseOptions) {
       releaseLabel = '个人试用本地包'
       options.mode = 'trial'
       options.tag = baseOptions.tag || 'dev'
-      scope = normalizeScope(`@${whoami}`)
+      scopes.publicScope = normalizeScope(`@${publicWhoami}`)
       publish = false
     } else if (choice === '2') {
       releaseLabel = '个人试用远程包'
       options.mode = 'trial'
       options.tag = baseOptions.tag || 'dev'
-      scope = normalizeScope(`@${whoami}`)
+      scopes.publicScope = normalizeScope(`@${publicWhoami}`)
       publish = true
     } else if (choice === '3') {
+      if (publicWhoami !== 'larktask') {
+        throw new Error(`Final release requires public npm identity must be exactly larktask, got ${publicWhoami}`)
+      }
       releaseLabel = '@larktask 官方稳定包源码准备'
       options.mode = 'final'
       options.tag = baseOptions.tag || 'latest'
       options.prepareSource = true
-      scope = '@larktask'
-      for (const spec of PACKAGE_SPECS) {
-        const sourceDir = path.join(repoRoot, spec.dir)
-        const sourcePackage = readJson(path.join(sourceDir, 'package.json'))
-        const targetName = spec.packageName || packageName(scope, spec.unscopedName)
-        const registry = packageRegistry(spec, baseOptions)
-        const versions = remoteVersions(packageManager, registry, targetName)
-        const suggestion = stableVersionSuggestion(spec, sourcePackage.version, versions)
-        const version = await questionWithDefault(
-          prompter,
-          `${targetName} 稳定版本（源码 ${sourcePackage.version}）`,
-          suggestion,
-        )
-        options.versions.set(spec.key, version)
-      }
+      options.bump = await questionWithDefault(prompter, 'stable prepare 使用哪个 bump（patch/minor/major）', 'patch')
+      options.bumpExplicit = true
+      scopes.publicScope = '@larktask'
       publish = false
     } else {
       throw new Error(`Unsupported choice: ${choice}`)
@@ -1221,7 +1246,8 @@ async function runWizard(baseOptions) {
     if (publish && packageManager.name !== 'npm') {
       const resolved = resolveAuthenticatedPackageManager('npm', baseOptions.registry, true)
       packageManager = resolved.packageManager
-      whoami = resolved.whoami
+      publicWhoami = resolved.whoami
+      scopes.publicScope = normalizeScope(`@${publicWhoami}`)
       console.log(`remote publish uses npm browser auth; switching package manager to ${packageManager.command}`)
     }
 
@@ -1236,18 +1262,24 @@ async function runWizard(baseOptions) {
       if (key) options.packages.add(key)
     }
     const selectedKeys = resolveSelectedPackageKeys(options)
-    const { sources, targets, tag } = buildReleasePlan(repoRoot, packageManager, options, scope, selectedKeys)
+    if (selectedKeys.has('aimeAcp')) {
+      const bnpmWhoami = npmWhoami(packageManager, options.aimeRegistry)
+      scopes.aimeScope = normalizeScope(`@${bnpmWhoami}`)
+      options.aimeScope = scopes.aimeScope
+      console.log(`npm identity (${options.aimeRegistry}): ${bnpmWhoami}`)
+    }
+    const { sources, targets, tag } = buildReleasePlan(repoRoot, packageManager, options, scopes, selectedKeys)
     const outDir = path.resolve(repoRoot, options.outDir)
     const artifactsDir = path.join(outDir, 'artifacts')
     const remoteOneClickUrl = tarballUrl(options.registry, targets.taskAgent.name, targets.taskAgent.version)
     const remoteOneClickCommand = `curl -fsSL ${remoteOneClickUrl} | tar -xOzf - package/bootstrap/aamp-feishu-task-agent-bootstrap.sh | bash -s -- install`
     const localTestCommand = buildLocalTestCommand(packageManager, targets, artifactsDir)
     const followUpStartCommand = buildFollowUpStartCommand()
-    const executionArgs = commandArgsForOptions(options, scope, packageManager, publish)
+    const executionArgs = commandArgsForOptions(options, scopes, packageManager, publish)
 
     console.log('')
     console.log(`release type: ${releaseLabel}`)
-    console.log(`target scope: ${scope}`)
+    console.log(`target scope: ${scopes.publicScope}`)
     console.log(`dist-tag: ${tag}`)
     console.log(`selected packages: ${describePackageKeys(selectedKeys)}`)
     if (dirty.length > 0 && publish) {
@@ -1312,17 +1344,23 @@ async function main() {
       })
     : null
   try {
-    const { packageManager, whoami } = resolveAuthenticatedPackageManager(
+    const { packageManager, whoami: publicWhoami } = resolveAuthenticatedPackageManager(
       options.packageManager,
       options.registry,
       options.publish,
     )
-    const canonicalScope = options.mode === 'trial' ? normalizeScope(`@${whoami}`) : '@larktask'
+    if (options.mode === 'final' && publicWhoami !== 'larktask') {
+      throw new Error(`Final release requires public npm identity must be exactly larktask, got ${publicWhoami}`)
+    }
+    const canonicalScope = options.mode === 'trial' ? normalizeScope(`@${publicWhoami}`) : '@larktask'
     const requestedScope = normalizeScope(options.scope)
+    if (options.mode === 'trial' && requestedScope && requestedScope !== canonicalScope) {
+      throw new Error(`--scope assertion must equal ${canonicalScope}`)
+    }
     if (options.mode === 'final' && requestedScope && requestedScope !== canonicalScope) {
       throw new Error('Final scope is fixed to @larktask')
     }
-    const scope = canonicalScope
+    const scopes = { publicScope: canonicalScope, aimeScope: '' }
 
     const dirty = trackedDirty(repoRoot)
     if (dirty.length > 0 && options.publish && !options.allowDirty) {
@@ -1331,14 +1369,22 @@ async function main() {
 
     const selectedKeys = resolveSelectedPackageKeys(options)
     const releaseSpecs = selectedPackageSpecs(selectedKeys)
+    if (selectedKeys.has('aimeAcp') || options.aimeScope) {
+      const bnpmWhoami = npmWhoami(packageManager, options.aimeRegistry)
+      console.log(`npm identity (${options.aimeRegistry}): ${bnpmWhoami}`)
+      scopes.aimeScope = normalizeScope(`@${bnpmWhoami}`)
+      if (options.aimeScope && normalizeScope(options.aimeScope) !== scopes.aimeScope) {
+        throw new Error(`--aime-scope assertion must equal ${scopes.aimeScope}`)
+      }
+    }
     if (options.prepareSource) assertReleaseVersionsMatchHead(repoRoot, releaseSpecs)
     const requiredRegistries = new Set(releaseSpecs.map((spec) => packageRegistry(spec, options)))
     for (const registry of requiredRegistries) {
-      if (registry === options.registry) continue
+      if (registry === options.registry || registry === options.aimeRegistry) continue
       const identity = npmWhoami(packageManager, registry)
       console.log(`npm identity (${registry}): ${identity}`)
     }
-    const { sources, targets, tag } = buildReleasePlan(repoRoot, packageManager, options, scope, selectedKeys)
+    const { sources, targets, tag } = buildReleasePlan(repoRoot, packageManager, options, scopes, selectedKeys)
     const hasPublicRegistryTarget = releaseSpecs.some((spec) => {
       const target = targets[spec.key]
       return normalizeRegistry(target.registry) === PUBLIC_NPM_REGISTRY
@@ -1347,13 +1393,13 @@ async function main() {
     if (options.publish && hasPublicRegistryTarget) assertBrowserPublishReady(packageManager)
     const outDir = path.resolve(repoRoot, options.outDir)
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')
-    const stageRoot = path.join(outDir, `stage-${options.mode}-${scope.slice(1)}-${stamp}`)
+    const stageRoot = path.join(outDir, `stage-${options.mode}-${scopes.publicScope.slice(1)}-${stamp}`)
     const artifactsDir = path.join(outDir, 'artifacts')
 
-    console.log(`npm identity: ${whoami}`)
+    console.log(`npm identity: ${publicWhoami}`)
     console.log(`package manager: ${packageManager.command}`)
     console.log(`mode: ${options.mode}`)
-    console.log(`target scope: ${scope}`)
+    console.log(`target scope: ${scopes.publicScope}`)
     console.log(`registry: ${options.registry}`)
     console.log(`dist-tag: ${tag}`)
     console.log(`selected packages: ${describePackageKeys(selectedKeys)}`)
@@ -1369,7 +1415,9 @@ async function main() {
 
     if (options.planOnly) return
 
-    assertPreparedSourceMetadata(sources, targets, releaseSpecs)
+    assertPreparedSourceMetadata(sources, targets, releaseSpecs, options)
+    assertAllTaskAgentDefaultPinsValid(sources.get('taskAgent').sourceDir, packageManager, targets)
+    assertSelectedVersionsNotAlreadyPublished(targets, selectedKeys, options)
 
     if (!options.skipBuild) {
       for (const spec of releaseSpecs.filter((item) => item.build)) {
@@ -1391,8 +1439,7 @@ async function main() {
       targets[spec.key].stagedDir = stagedDir
     }
     if (selectedKeys.has('taskAgent')) {
-      patchTaskAgentPins(targets.taskAgent.stagedDir, targets, tag)
-      assertStagedTaskAgentPins(targets.taskAgent.stagedDir, targets)
+      assertStagedTaskAgentPins(targets.taskAgent.stagedDir, sources.get('taskAgent').sourceDir)
     }
 
     const packed = []
@@ -1452,9 +1499,9 @@ async function main() {
       generatedAt: new Date().toISOString(),
       repoRoot,
       mode: options.mode,
-      npmIdentity: whoami,
+      npmIdentity: publicWhoami,
       packageManager: packageManager.command,
-      scope,
+      scope: scopes.publicScope,
       registry: options.registry,
       tag,
       selectedPackages: releaseSpecs.map((spec) => spec.key),

@@ -11,6 +11,21 @@ import { acquireReleaseLock } from '../../shared/release-lock.mjs'
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(scriptDir, '..', '..', '..', '..')
 const DEFAULT_OUT_DIR = '.aamp-local-release'
+const PUBLIC_NPM_REGISTRY = 'https://registry.npmjs.org/'
+const TASK_AGENT_BOOTSTRAP_PATH = path.join(
+  REPO_ROOT,
+  'packages',
+  'aamp-feishu-task-agent',
+  'bootstrap',
+  'aamp-feishu-task-agent-bootstrap.sh',
+)
+const TASK_AGENT_CONTROLLER_PATH = path.join(
+  REPO_ROOT,
+  'packages',
+  'aamp-feishu-task-agent',
+  'bin',
+  'feishu-task-agent-controller.mjs',
+)
 let localReleaseCacheDir
 const LOCAL_CACHE_PREFIX = 'aamp-local-release-npm-cache-'
 
@@ -326,6 +341,209 @@ function verifyResolvable(spec, pkgSpec) {
   return result.status === 0
 }
 
+function readSourceFile(filePath, label) {
+  try {
+    return fs.readFileSync(filePath, 'utf8')
+  } catch (error) {
+    throw new Error(`Cannot read ${label} at ${filePath}: ${error.message}`)
+  }
+}
+
+function extractRequiredMatch(source, pattern, label, filePath) {
+  const match = pattern.exec(source)
+  const value = match?.[1]?.trim()
+  if (!value) {
+    throw new Error(`Cannot parse ${label} from ${filePath}`)
+  }
+  return value
+}
+
+function parsePinnedPackageSpec(spec, label) {
+  const value = String(spec || '').trim()
+  if (!value) throw new Error(`${label} is missing`)
+  if (/^(?:file:|https?:\/\/|-)/.test(value) || value.endsWith('.tgz')) {
+    throw new Error(`${label} must be an npm package pin like @scope/name@version, found ${value}`)
+  }
+  const match = /^(?:@[^/\s]+\/)?[^@\s]+@[^@\s][^\s]*$/.exec(value)
+  if (!match) {
+    throw new Error(`${label} must be an npm package pin like @scope/name@version, found ${value}`)
+  }
+  const splitAt = value.lastIndexOf('@')
+  return {
+    packageSpec: value,
+    version: value.slice(splitAt + 1),
+  }
+}
+
+function normalizeRegistryUrl(value, label) {
+  let url
+  try {
+    url = new URL(String(value || '').trim())
+  } catch {
+    throw new Error(`${label} must be an absolute registry URL, found ${value}`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`${label} must use http or https, found ${value}`)
+  }
+  return url.toString()
+}
+
+function ensureSameTaskAgentPin(kind, bootstrapValue, controllerValue) {
+  if (bootstrapValue.packageSpec !== controllerValue.packageSpec) {
+    throw new Error(
+      `Task Agent default ${kind} pin mismatch between bootstrap and controller: `
+      + `${bootstrapValue.packageSpec} vs ${controllerValue.packageSpec}`,
+    )
+  }
+  return bootstrapValue
+}
+
+function taskAgentDefaultPins() {
+  const bootstrapSource = readSourceFile(TASK_AGENT_BOOTSTRAP_PATH, 'Task Agent bootstrap')
+  const controllerSource = readSourceFile(TASK_AGENT_CONTROLLER_PATH, 'Task Agent controller')
+
+  const bootstrapAcp = parsePinnedPackageSpec(
+    extractRequiredMatch(
+      bootstrapSource,
+      /\bACP_BRIDGE_PKG="\$\{ACP_BRIDGE_PKG:-([^"\r\n]+)\}"/,
+      'Task Agent ACP bridge default pin',
+      TASK_AGENT_BOOTSTRAP_PATH,
+    ),
+    'Task Agent ACP bridge default pin',
+  )
+  const controllerAcp = parsePinnedPackageSpec(
+    extractRequiredMatch(
+      controllerSource,
+      /\bconst ACP_PACKAGE = process\.env\.AAMP_TASK_ACP_BRIDGE_PKG \|\| ['"]([^'"\r\n]+)['"];/,
+      'Task Agent ACP bridge controller pin',
+      TASK_AGENT_CONTROLLER_PATH,
+    ),
+    'Task Agent ACP bridge controller pin',
+  )
+  const bootstrapFeishu = parsePinnedPackageSpec(
+    extractRequiredMatch(
+      bootstrapSource,
+      /\bFEISHU_BRIDGE_PKG="\$\{FEISHU_BRIDGE_PKG:-([^"\r\n]+)\}"/,
+      'Task Agent Feishu bridge default pin',
+      TASK_AGENT_BOOTSTRAP_PATH,
+    ),
+    'Task Agent Feishu bridge default pin',
+  )
+  const controllerFeishu = parsePinnedPackageSpec(
+    extractRequiredMatch(
+      controllerSource,
+      /\bconst FEISHU_PACKAGE = process\.env\.AAMP_TASK_FEISHU_BRIDGE_PKG \|\| ['"]([^'"\r\n]+)['"];/,
+      'Task Agent Feishu bridge controller pin',
+      TASK_AGENT_CONTROLLER_PATH,
+    ),
+    'Task Agent Feishu bridge controller pin',
+  )
+  const aimePackage = parsePinnedPackageSpec(
+    extractRequiredMatch(
+      bootstrapSource,
+      /\bAIME_ACP_PKG="\$\{AIME_ACP_PKG:-([^"\r\n]+)\}"/,
+      'Task Agent AIME ACP default pin',
+      TASK_AGENT_BOOTSTRAP_PATH,
+    ),
+    'Task Agent AIME ACP default pin',
+  )
+  const aimeRegistryDefault = normalizeRegistryUrl(
+    extractRequiredMatch(
+      bootstrapSource,
+      /\bAIME_ACP_REGISTRY="\$\{AIME_ACP_REGISTRY:-([^"\r\n]+)\}"/,
+      'Task Agent AIME ACP registry default',
+      TASK_AGENT_BOOTSTRAP_PATH,
+    ),
+    'Task Agent AIME ACP registry default',
+  )
+  const aimeRegistryFunction = normalizeRegistryUrl(
+    extractRequiredMatch(
+      bootstrapSource,
+      /aime_acp_registry\(\)\s*\{[\s\S]*?printf '%s\\n' '([^'\r\n]+)'/m,
+      'Task Agent AIME ACP registry function',
+      TASK_AGENT_BOOTSTRAP_PATH,
+    ),
+    'Task Agent AIME ACP registry function',
+  )
+  if (aimeRegistryDefault !== aimeRegistryFunction) {
+    throw new Error(
+      `Task Agent default AIME registry mismatch in bootstrap: ${aimeRegistryDefault} vs ${aimeRegistryFunction}`,
+    )
+  }
+
+  return {
+    acpBridge: {
+      key: 'acpBridge',
+      label: 'ACP bridge',
+      overrideFlag: '--package acpBridge',
+      registry: PUBLIC_NPM_REGISTRY,
+      ...ensureSameTaskAgentPin('ACP bridge', bootstrapAcp, controllerAcp),
+    },
+    feishuBridge: {
+      key: 'feishuBridge',
+      label: 'Feishu bridge',
+      overrideFlag: '--package feishuBridge',
+      registry: PUBLIC_NPM_REGISTRY,
+      ...ensureSameTaskAgentPin('Feishu bridge', bootstrapFeishu, controllerFeishu),
+    },
+    aimeAcp: {
+      key: 'aimeAcp',
+      label: 'AIME ACP',
+      overrideFlag: '--package aimeAcp',
+      registry: aimeRegistryDefault,
+      ...aimePackage,
+    },
+  }
+}
+
+function checkRemotePinnedPackage(pin) {
+  fs.mkdirSync(tempCacheDir(), { recursive: true })
+  const result = spawnSync(
+    'npm',
+    ['view', pin.packageSpec, 'version', '--json', '--registry', pin.registry, '--cache', tempCacheDir()],
+    { env: process.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180000 },
+  )
+  if (result.status !== 0) {
+    throw new Error(
+      `Task Agent default ${pin.label} pin ${pin.packageSpec} is unresolved on ${pin.registry}. `
+      + `Add ${pin.overrideFlag} to use your local override.`,
+    )
+  }
+  let resolvedVersion
+  try {
+    resolvedVersion = JSON.parse(String(result.stdout || '').trim())
+  } catch {
+    throw new Error(
+      `Task Agent default ${pin.label} pin ${pin.packageSpec} returned malformed npm view output. `
+      + `Add ${pin.overrideFlag} to use your local override.`,
+    )
+  }
+  if (resolvedVersion !== pin.version) {
+    throw new Error(
+      `Task Agent default ${pin.label} pin ${pin.packageSpec} resolved unexpected version ${JSON.stringify(resolvedVersion)} `
+      + `from ${pin.registry}. Add ${pin.overrideFlag} to use your local override.`,
+    )
+  }
+}
+
+function preflightTaskAgentDefaultPins(selectedKeys, options) {
+  const withTaskAgent = selectedKeys.has('taskAgent')
+  if (!withTaskAgent) {
+    return { skipped: false, checked: [] }
+  }
+  if (options.planOnly) {
+    return { skipped: true, checked: [] }
+  }
+  const defaults = taskAgentDefaultPins()
+  const checked = []
+  for (const key of ['acpBridge', 'feishuBridge', 'aimeAcp']) {
+    if (selectedKeys.has(key)) continue
+    checkRemotePinnedPackage(defaults[key])
+    checked.push(key)
+  }
+  return { skipped: false, checked }
+}
+
 function needsPackedArtifact(spec, options) {
   return spec.tgzOnly === true || options.mode === 'tgz' || options.pack
 }
@@ -375,10 +593,11 @@ function buildStartupCommand(selectedSpecs, options, state) {
   if (withTaskAgent) {
     const taskAgentTgz = state.tgzPaths.taskAgent
     if (!taskAgentTgz) throw new Error('Packed artifact is unavailable for taskAgent')
+    const taskAgentInfo = packageInfo(PACKAGE_SPECS.find((spec) => spec.key === 'taskAgent'))
+    lines.push(`export AAMP_TASK_AGENT_NAME=${shellQuote(taskAgentInfo.name)}`)
     lines.push('export AAMP_TASK_AUTO_UPDATE=false')
     lines.push(`npm install -g --prefix "$HOME/.aamp/npm-global" --force ${shellQuote(taskAgentTgz)}`)
-    lines.push('"$HOME/.aamp/npm-global/bin/feishu-task-agent" update')
-    lines.push('"$HOME/.aamp/bin/feishu-task-agent" start')
+    lines.push('"$HOME/.aamp/npm-global/bin/feishu-task-agent" start')
   } else {
     lines.push('if command -v feishu-task-agent >/dev/null 2>&1; then')
     lines.push('  feishu-task-agent start')
@@ -401,10 +620,13 @@ function buildNotes(selectedSpecs, options, state) {
   notes.push('Verify locally: send the agent a task that exercises the changed path and confirm the Feishu comment shows the real text.')
   const withTaskAgent = selectedSpecs.some((spec) => spec.key === 'taskAgent')
   if (withTaskAgent) {
-    notes.push('The startup command installs the packed local task-agent, disables auto-update, synchronizes ~/.aamp/bin, and then starts it.')
+    notes.push('The startup command installs the packed local task-agent, disables auto-update, and starts that exact npm-global launcher directly; normal startup synchronizes ~/.aamp/bin before opening the interactive selector.')
   }
   if (selectedSpecs.some((spec) => spec.key === 'aimeAcp')) {
     notes.push('AIME ACP local overrides are always packed tgz snapshots, including in file mode.')
+  }
+  if (state.taskAgentDefaultPreflight?.skipped) {
+    notes.push('Task Agent default-pin preflight is skipped in --plan-only; this output is unchecked and not runnable.')
   }
   if (!state.startupCommandRunnable) {
     notes.push('This plan needs packed content-addressed artifacts; re-run without --plan-only before starting.')
@@ -414,6 +636,7 @@ function buildNotes(selectedSpecs, options, state) {
 
 function run(options) {
   const selectedSpecs = selectedPackageSpecs(options.packages)
+  const taskAgentDefaultPreflight = preflightTaskAgentDefaultPins(options.packages, options)
   const state = {
     packages: [],
     tgzPaths: {},
@@ -422,6 +645,7 @@ function run(options) {
     notes: [],
     plan: options.planOnly,
     startupCommandRunnable: !(options.planOnly && startupNeedsPackedArtifact(selectedSpecs, options)),
+    taskAgentDefaultPreflight,
   }
 
   for (const spec of selectedSpecs) {

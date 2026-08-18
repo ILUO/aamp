@@ -91,7 +91,7 @@ unset AAMP_TASK_PACKAGE_OVERRIDES_RESOLVED
 unset ACP_BRIDGE_PKG AAMP_TASK_ACP_BRIDGE_PKG
 unset FEISHU_BRIDGE_PKG AAMP_TASK_FEISHU_BRIDGE_PKG
 unset AIME_ACP_PKG AIME_ACP_REGISTRY AAMP_TASK_AIME_ACP_PKG
-ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.36}"
+ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@luckyterry/aamp-acp-bridge@0.1.28-dev.36}"
 AIME_ACP_PKG="${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.1-dev.1}"
 AIME_ACP_REGISTRY="${AIME_ACP_REGISTRY:-https://bnpm.byted.org}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
@@ -99,7 +99,7 @@ FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}
 AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="$ACP_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
-AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
+AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@luckyterry/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_VERSION="0.1.0-dev.203"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
@@ -3046,23 +3046,68 @@ find_workbuddy_ai_cli() {
 }
 
 aime_acp_package_spec() {
-  local spec
+  local default_spec registry spec
   spec="${AIME_ACP_PKG:-}"
+  default_spec="$(aime_acp_default_package_spec)"
+  registry="${AIME_ACP_REGISTRY:-https://bnpm.byted.org}"
   case "$spec" in
-    @tengchengwei/aime-acp@?*) printf '%s\n' "$spec" ;;
+    @*/aime-acp@?*)
+      if [ "${registry%/}" = 'https://bnpm.byted.org' ]; then
+        printf '%s\n' "$spec"
+      else
+        printf '%s\n' "$default_spec"
+      fi
+      ;;
     *.tgz)
       if [ -f "$spec" ]; then
         printf '%s\n' "$spec"
       else
-        printf '%s\n' '@tengchengwei/aime-acp@0.1.1-dev.1'
+        printf '%s\n' "$default_spec"
       fi
       ;;
-    *) printf '%s\n' '@tengchengwei/aime-acp@0.1.1-dev.1' ;;
+    *) printf '%s\n' "$default_spec" ;;
   esac
 }
 
+aime_acp_default_package_spec() {
+  printf '%s\n' "${AAMP_TASK_DEFAULT_AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.1-dev.1}"
+}
+
+aime_acp_local_package_name() {
+  local spec="$1"
+  tar -xOzf "$spec" package/package.json 2>/dev/null | node -e '
+let raw = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const value = JSON.parse(raw);
+    if (typeof value.name !== "string" || !/^@[^/]+\/aime-acp$/.test(value.name)) process.exit(1);
+    process.stdout.write(value.name);
+  } catch {
+    process.exit(1);
+  }
+});
+'
+}
+
 aime_acp_package_name() {
-  printf '%s\n' '@tengchengwei/aime-acp'
+  local local_name spec
+  spec="$(aime_acp_package_spec)"
+  case "$spec" in
+    *.tgz)
+      local_name="$(aime_acp_local_package_name "$spec" || true)"
+      if [ -n "$local_name" ]; then
+        printf '%s\n' "$local_name"
+        return 0
+      fi
+      spec="$(aime_acp_default_package_spec)"
+      ;;
+  esac
+  case "$spec" in
+    @*/aime-acp@?*) printf '%s\n' "${spec%@*}" ;;
+    *) return 1 ;;
+  esac
 }
 
 aime_acp_package_version() {
@@ -3078,7 +3123,7 @@ aime_acp_package_version() {
 aime_acp_package_spec_is_supported() {
   case "$(aime_acp_package_spec)" in
     *.tgz) return 0 ;;
-    @tengchengwei/aime-acp@?*) return 0 ;;
+    @*/aime-acp@?*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -3172,7 +3217,7 @@ aime_acp_install_is_current() {
 
 ensure_aime_acp_cli() {
   aime_acp_package_spec_is_supported \
-    || agent_fail "AIME_ACP_PACKAGE_INVALID: AIME ACP must use @tengchengwei/aime-acp or a local tgz."
+    || agent_fail "AIME_ACP_PACKAGE_INVALID: AIME ACP must use a scoped BNPM package or a local tgz."
   remove_legacy_aime_acp
   if aime_acp_install_is_current; then
     return 0

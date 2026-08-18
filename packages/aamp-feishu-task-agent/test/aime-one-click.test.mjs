@@ -613,6 +613,23 @@ test('AIME preparation ignores an inherited non-canonical package and uses the e
   assert.equal(result.stdout, `${pinnedAime}|https://bnpm.byted.org`)
 })
 
+test('AIME runtime accepts the scoped package recorded by the current BNPM release identity', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const result = runShell([
+    'set -euo pipefail',
+    'NPM_GLOBAL_PREFIX=/tmp/aamp-bnpm-identity-prefix',
+    'AIME_ACP_PKG=@zengxingyuan/aime-acp@0.1.2-dev.0',
+    aimeAuthFunctions(source),
+    'printf "%s|%s|%s|%s" "$(aime_acp_package_spec)" "$(aime_acp_package_name)" "$(aime_acp_package_version)" "$(aime_acp_package_dir)"',
+  ])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(
+    result.stdout,
+    '@zengxingyuan/aime-acp@0.1.2-dev.0|@zengxingyuan/aime-acp|0.1.2-dev.0|/tmp/aamp-bnpm-identity-prefix/lib/node_modules/@zengxingyuan/aime-acp',
+  )
+})
+
 test('AIME preparation ignores an inherited remote tgz URL without exposing it', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const result = runShell([
@@ -644,6 +661,33 @@ test('AIME local tgz specs still resolve the installed scoped package directory'
   assert.equal(
     result.stdout,
     '/tmp/aamp-shared-prefix/lib/node_modules/@tengchengwei/aime-acp|',
+  )
+})
+
+test('AIME local tgz resolves its packaged canonical name when the recorded BNPM scope differs', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-local-cross-scope-tgz-'))
+  const archiveRoot = path.join(root, 'archive')
+  const packageRoot = path.join(archiveRoot, 'package')
+  const tgz = path.join(root, 'canonical-aime-acp.tgz')
+  mkdirSync(packageRoot, { recursive: true })
+  writeFileSync(path.join(packageRoot, 'package.json'), '{"name":"@tengchengwei/aime-acp","version":"0.1.1-dev.1"}\n')
+  const packed = spawnSync('tar', ['-czf', tgz, '-C', archiveRoot, 'package'], { encoding: 'utf8' })
+  assert.equal(packed.status, 0, packed.stderr)
+
+  const result = runShell([
+    'set -euo pipefail',
+    'NPM_GLOBAL_PREFIX=/tmp/aamp-cross-scope-prefix',
+    'AAMP_TASK_DEFAULT_AIME_ACP_PKG=@zengxingyuan/aime-acp@0.1.2-dev.0',
+    'AIME_ACP_PKG="$1"',
+    aimeAuthFunctions(source),
+    'printf "%s|%s" "$(aime_acp_package_name)" "$(aime_acp_package_dir)"',
+  ], [tgz])
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(
+    result.stdout,
+    '@tengchengwei/aime-acp|/tmp/aamp-cross-scope-prefix/lib/node_modules/@tengchengwei/aime-acp',
   )
 })
 
@@ -933,7 +977,7 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
   const feishuResult = runOuter({ FEISHU_BRIDGE_PKG: `file:${feishuDir}` })
   assert.equal(feishuResult.status, 0, feishuResult.stderr)
   assert.deepEqual(JSON.parse(feishuResult.stdout), {
-    acp: '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.36',
+    acp: '@luckyterry/aamp-acp-bridge@0.1.28-dev.36',
     feishu: `file:${feishuDir}`,
     aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
   })

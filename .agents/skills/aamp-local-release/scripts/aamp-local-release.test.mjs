@@ -37,6 +37,56 @@ function writeFixturePackage(root, relativeDir, manifest) {
   }
 }
 
+function writeTaskAgentPinSources(root, overrides = {}) {
+  const {
+    publicRegistry = 'https://registry.npmjs.org/',
+    acpBridgePin = '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.36',
+    feishuBridgePin = '@zengxingyuan/aamp-feishu-bridge@0.1.51',
+    aimeAcpPin = '@tengchengwei/aime-acp@0.1.1-dev.1',
+    aimeRegistry = 'https://bnpm.byted.org',
+    taskAgentDefaultName = '@luckyterry/aamp-feishu-task-agent',
+    controllerAcpBridgePin = acpBridgePin,
+    controllerFeishuBridgePin = feishuBridgePin,
+  } = overrides
+
+  const bootstrapPath = path.join(
+    root,
+    'packages',
+    'aamp-feishu-task-agent',
+    'bootstrap',
+    'aamp-feishu-task-agent-bootstrap.sh',
+  )
+  const controllerPath = path.join(
+    root,
+    'packages',
+    'aamp-feishu-task-agent',
+    'bin',
+    'feishu-task-agent-controller.mjs',
+  )
+
+  fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true })
+  fs.mkdirSync(path.dirname(controllerPath), { recursive: true })
+  fs.writeFileSync(bootstrapPath, `#!/usr/bin/env bash
+NPM_REGISTRY="\${NPM_REGISTRY:-${publicRegistry}}"
+ACP_BRIDGE_PKG="\${ACP_BRIDGE_PKG:-${acpBridgePin}}"
+AIME_ACP_PKG="\${AIME_ACP_PKG:-${aimeAcpPin}}"
+AIME_ACP_REGISTRY="\${AIME_ACP_REGISTRY:-${aimeRegistry}}"
+FEISHU_BRIDGE_PKG="\${FEISHU_BRIDGE_PKG:-${feishuBridgePin}}"
+AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="$ACP_BRIDGE_PKG"
+AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
+AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
+AAMP_TASK_AGENT_NAME="\${AAMP_TASK_AGENT_NAME:-${taskAgentDefaultName}}"
+aime_acp_registry() {
+  printf '%s\\n' '${aimeRegistry}'
+}
+`, { mode: 0o755 })
+  fs.writeFileSync(controllerPath, `const NPM_REGISTRY = process.env.AAMP_TASK_NPM_REGISTRY || '${publicRegistry}';
+const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '${controllerAcpBridgePin}';
+const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || '${controllerFeishuBridgePin}';
+export { NPM_REGISTRY, ACP_PACKAGE, FEISHU_PACKAGE };
+`)
+}
+
 function createFakeNpm(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aamp-local-release-test-'))
   const fixtureRepo = path.join(root, 'repo')
@@ -63,6 +113,7 @@ function createFakeNpm(t) {
     version: '4.5.6-test.7',
     bin: { 'feishu-task-agent': 'bootstrap/aamp-feishu-task-agent-bootstrap.sh' },
   })
+  writeTaskAgentPinSources(fixtureRepo)
   const fixtureHelperPath = path.join(
     fixtureRepo,
     '.agents',
@@ -135,7 +186,8 @@ if (args[0] === 'install') {
     "const action = process.argv[2] || ''",
     "const log = process.env.FAKE_TASK_AGENT_LOG",
     "if (log) fs.appendFileSync(log, JSON.stringify({ action, executable: process.argv[1], autoUpdate: process.env.AAMP_TASK_AUTO_UPDATE || '', allowOverrides: process.env.AAMP_TASK_ALLOW_PACKAGE_OVERRIDES || '', acp: process.env.ACP_BRIDGE_PKG || '', feishu: process.env.FEISHU_BRIDGE_PKG || '', aime: process.env.AIME_ACP_PKG || '', cache: process.env.NPM_CONFIG_CACHE || '', globalPrefix: process.env.NPM_GLOBAL_PREFIX || '', binDir: process.env.AAMP_BIN_DIR || '', commandName: process.env.AAMP_TASK_COMMAND_NAME || '', commandPath: process.env.AAMP_TASK_COMMAND_PATH || '', shimDir: process.env.AAMP_TASK_SHIM_DIR || '', agentName: process.env.AAMP_TASK_AGENT_NAME || '', agentLegacyName: process.env.AAMP_TASK_AGENT_LEGACY_NAME || '', agentChannel: process.env.AAMP_TASK_AGENT_CHANNEL || '', npmRegistry: process.env.NPM_REGISTRY || '', taskNpmRegistry: process.env.AAMP_TASK_NPM_REGISTRY || '', installCommand: process.env.AAMP_TASK_INSTALL_COMMAND || '', internal: process.env.AAMP_TASK_INTERNAL || '', overridesResolved: process.env.AAMP_TASK_PACKAGE_OVERRIDES_RESOLVED || '' }) + '\\n')",
-    "if (action === 'update') { const shortCommand = path.join(process.env.HOME, '.aamp', 'bin', 'feishu-task-agent'); fs.mkdirSync(path.dirname(shortCommand), { recursive: true }); fs.copyFileSync(process.argv[1], shortCommand); fs.chmodSync(shortCommand, 0o755) }",
+    "if (action === 'update' && process.env.FAKE_TASK_AGENT_UPDATE_EXIT) process.exit(Number(process.env.FAKE_TASK_AGENT_UPDATE_EXIT))",
+    "if (action === 'update' || action === 'start') { const shortCommand = path.join(process.env.HOME, '.aamp', 'bin', 'feishu-task-agent'); fs.mkdirSync(path.dirname(shortCommand), { recursive: true }); fs.copyFileSync(process.argv[1], shortCommand); fs.chmodSync(shortCommand, 0o755) }",
   ].join('\n') + '\n'
   fs.mkdirSync(path.dirname(target), { recursive: true })
   fs.writeFileSync(target, launcher, { mode: 0o755 })
@@ -159,6 +211,20 @@ if (args[0] === 'exec') {
   process.stdout.write(verified.stdout || '')
   process.stderr.write(verified.stderr || '')
   process.exit(verified.status ?? 1)
+}
+if (args[0] === 'view') {
+  const packageSpec = args[1] || ''
+  const registryIndex = args.indexOf('--registry')
+  const registry = registryIndex >= 0 ? args[registryIndex + 1] : ''
+  const failures = String(process.env.FAKE_VIEW_FAIL_SPECS || '').split(',').filter(Boolean)
+  if (failures.includes(packageSpec) || failures.includes(packageSpec + '|' + registry)) {
+    process.stderr.write('missing package: ' + packageSpec + '\n')
+    process.exit(44)
+  }
+  const versionIndex = packageSpec.lastIndexOf('@')
+  const version = versionIndex > 0 ? packageSpec.slice(versionIndex + 1) : ''
+  process.stdout.write(JSON.stringify(version) + '\n')
+  process.exit(0)
 }
 process.exit(0)
 `
@@ -262,6 +328,112 @@ test('selecting AIME ACP auto-includes Task Agent but plan-only stays non-runnab
   assert.match(parsed.startupCommand, /run without --plan-only/i)
   assert.doesNotMatch(parsed.startupCommand, /\.tgz/)
   assert.equal(parsed.packages.some(({ key }) => key === 'acpBridge'), false)
+  assert.match(parsed.notes.join('\n'), /preflight/i)
+  assert.match(parsed.notes.join('\n'), /plan-only|non-runnable|unchecked/i)
+})
+
+test('taskAgent plus local Feishu bridge fails early on an unresolved unselected ACP default pin', (t) => {
+  const fake = createFakeNpm(t)
+  const outDir = path.join(fake.root, 'missing-default-pin-artifacts')
+  const result = runHelper([
+    '--package', 'taskAgent',
+    '--package', 'feishuBridge',
+    '--out-dir', outDir,
+    '--json',
+  ], {
+    env: fakeNpmEnv(fake, {
+      FAKE_VIEW_FAIL_SPECS: '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.36',
+    }),
+  })
+
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /@zengxingyuan\/aamp-acp-bridge@0\.1\.28-dev\.36/)
+  assert.match(result.stderr, /--package acpBridge/)
+  const calls = readJsonLines(fake.log)
+  assert.equal(calls.some(({ args }) => args[0] === 'view' && args[1] === '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.36'), true)
+  assert.equal(calls.some(({ args }) => args[0] === 'view' && args[1] === '@zengxingyuan/aamp-feishu-bridge@0.1.51'), false)
+  assert.equal(calls.some(({ args }) => args[0] === 'run' && args[1] === 'build'), false)
+  assert.equal(calls.some(({ args }) => args[0] === 'pack'), false)
+})
+
+test('taskAgent with all relevant local overrides skips default-pin registry preflight', (t) => {
+  const fake = createFakeNpm(t)
+  const outDir = path.join(fake.root, 'all-local-artifacts')
+  const result = runHelper([
+    '--package', 'taskAgent',
+    '--package', 'acpBridge',
+    '--package', 'feishuBridge',
+    '--package', 'aimeAcp',
+    '--out-dir', outDir,
+    '--json',
+  ], { env: fakeNpmEnv(fake) })
+
+  assert.equal(result.status, 0, result.stderr)
+  const parsed = JSON.parse(result.stdout)
+  assert.equal(parsed.startupCommandRunnable, true)
+  assert.deepEqual(parsed.packages.map(({ key }) => key), ['aimeAcp', 'acpBridge', 'feishuBridge', 'taskAgent'])
+  assert.equal(readJsonLines(fake.log).some(({ args }) => args[0] === 'view'), false)
+})
+
+test('bridge-only local Feishu run stays runnable without unrelated default-pin preflight', (t) => {
+  const fake = createFakeNpm(t)
+  const outDir = path.join(fake.root, 'feishu-only-artifacts')
+  const result = runHelper([
+    '--package', 'feishuBridge',
+    '--out-dir', outDir,
+    '--json',
+  ], { env: fakeNpmEnv(fake) })
+
+  assert.equal(result.status, 0, result.stderr)
+  const parsed = JSON.parse(result.stdout)
+  assert.equal(parsed.startupCommandRunnable, true)
+  assert.match(parsed.startupCommand, /FEISHU_BRIDGE_PKG="file:\$PWD\/packages\/aamp-feishu-bridge"/)
+  assert.equal(readJsonLines(fake.log).some(({ args }) => args[0] === 'view'), false)
+})
+
+test('taskAgent preflight fails closed when bootstrap and controller ACP defaults disagree', (t) => {
+  const fake = createFakeNpm(t)
+  writeTaskAgentPinSources(fake.fixtureRepo, {
+    controllerAcpBridgePin: '@zengxingyuan/aamp-acp-bridge@9.9.9-dev.9',
+  })
+
+  const result = runHelper([
+    '--package', 'taskAgent',
+    '--out-dir', path.join(fake.root, 'inconsistent-pin-artifacts'),
+    '--json',
+  ], { env: fakeNpmEnv(fake) })
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /ACP/i)
+  assert.match(result.stderr, /inconsistent|mismatch/i)
+  assert.equal(readJsonLines(fake.log).length, 0)
+})
+
+test('taskAgent startup command exports the packed local manifest name before direct start', (t) => {
+  const fake = createFakeNpm(t)
+  writeTaskAgentPinSources(fake.fixtureRepo, {
+    taskAgentDefaultName: '@luckyterry/aamp-feishu-task-agent',
+  })
+
+  const result = runHelper([
+    '--package', 'taskAgent',
+    '--out-dir', path.join(fake.root, 'task-name-artifacts'),
+    '--json',
+  ], { env: fakeNpmEnv(fake) })
+
+  assert.equal(result.status, 0, result.stderr)
+  const parsed = JSON.parse(result.stdout)
+  const command = parsed.startupCommand
+  const localTaskAgentName = '@fixture/aamp-feishu-task-agent'
+
+  assert.match(command, new RegExp(`export AAMP_TASK_AGENT_NAME=${localTaskAgentName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}`))
+  assert.ok(
+    command.indexOf(`export AAMP_TASK_AGENT_NAME=${localTaskAgentName}`) < command.indexOf('"$HOME/.aamp/npm-global/bin/feishu-task-agent" start'),
+    'local task-agent name must be exported before direct start',
+  )
+  assert.doesNotMatch(command, /feishu-task-agent" update/)
+  assert.doesNotMatch(command, /"\$HOME\/\.aamp\/bin\/feishu-task-agent" start/)
 })
 
 test('AIME ACP builds and packs with Task Agent using tgz overrides even in file mode', (t) => {
@@ -288,8 +460,9 @@ test('AIME ACP builds and packs with Task Agent using tgz overrides even in file
   assert.doesNotMatch(parsed.startupCommand, /AIME_ACP_PKG=.*file:/)
   assert.match(parsed.startupCommand, /AAMP_TASK_AUTO_UPDATE=false/)
   assert.match(parsed.startupCommand, /npm install -g --prefix "\$HOME\/\.aamp\/npm-global" --force/)
-  assert.match(parsed.startupCommand, /npm-global\/bin\/feishu-task-agent" update/)
-  assert.match(parsed.startupCommand, /\.aamp\/bin\/feishu-task-agent" start/)
+  assert.match(parsed.startupCommand, /npm-global\/bin\/feishu-task-agent" start/)
+  assert.doesNotMatch(parsed.startupCommand, /feishu-task-agent" update/)
+  assert.doesNotMatch(parsed.startupCommand, /\.aamp\/bin\/feishu-task-agent" start/)
 
   const calls = readJsonLines(fake.log)
   assert.equal(calls.some(({ args, cwd }) => args[0] === 'run' && args[1] === 'build' && cwd.endsWith('/packages/aime-acp')), true)
@@ -524,8 +697,11 @@ printf 'after|%s|%s|%s|%s|%s\n' "\${ACP_BRIDGE_PKG-}" "\${FEISHU_BRIDGE_PKG-}" "
   assert.equal(shell.stdout.trim(), 'after|caller-acp|stale-feishu|stale-aime|caller-cache|caller-allow')
 })
 
-test('Task Agent startup installs, synchronizes, and starts the packed local launcher in one scope', (t) => {
+test('Task Agent startup installs and directly starts the packed local launcher even if update would fail', (t) => {
   const fake = createFakeNpm(t)
+  writeTaskAgentPinSources(fake.fixtureRepo, {
+    taskAgentDefaultName: '@luckyterry/aamp-feishu-task-agent',
+  })
   const home = path.join(fake.root, 'home')
   const outDir = path.join(fake.root, 'task-artifacts')
   fs.mkdirSync(home, { recursive: true })
@@ -552,6 +728,7 @@ test('Task Agent startup installs, synchronizes, and starts the packed local lau
       AAMP_TASK_INSTALL_COMMAND: 'stale install command',
       AAMP_TASK_INTERNAL: 'true',
       AAMP_TASK_PACKAGE_OVERRIDES_RESOLVED: 'true',
+      FAKE_TASK_AGENT_UPDATE_EXIT: '23',
     }),
   })
   assert.equal(started.status, 0, started.stderr)
@@ -560,19 +737,28 @@ test('Task Agent startup installs, synchronizes, and starts the packed local lau
   assert.ok(npmInstall)
   assert.equal(npmInstall.args.at(-1), taskAgent.tgz)
   const actions = readJsonLines(fake.taskAgentLog)
-  assert.deepEqual(actions.map(({ action }) => action), ['update', 'start'])
+  assert.deepEqual(actions.map(({ action }) => action), ['start'])
+  assert.match(actions[0].executable, /\.aamp\/npm-global\/bin\/feishu-task-agent$/)
   assert.equal(actions.every(({ autoUpdate }) => autoUpdate === 'false'), true)
   assert.equal(actions.every(({ allowOverrides }) => allowOverrides === 'true'), true)
+  assert.equal(actions.every(({ agentName }) => agentName === '@fixture/aamp-feishu-task-agent'), true)
   assert.equal(actions.every(({ globalPrefix, binDir, commandName, commandPath, shimDir }) => !globalPrefix && !binDir && !commandName && !commandPath && !shimDir), true)
   assert.equal(actions.every(({ agentName, agentLegacyName, agentChannel, npmRegistry, taskNpmRegistry, installCommand, internal, overridesResolved }) => (
-    !agentName && !agentLegacyName && !agentChannel && !npmRegistry && !taskNpmRegistry
+    !agentLegacyName && !agentChannel && !npmRegistry && !taskNpmRegistry
       && !installCommand && !internal && !overridesResolved
   )), true)
   assert.equal(fs.existsSync(path.join(home, '.aamp', 'bin', 'feishu-task-agent')), true)
   assert.equal(fs.existsSync(actions[0].cache), false)
+
+  const after = spawnSync('bash', ['-lc', 'printf %s "${AAMP_TASK_AGENT_NAME-}"'], {
+    encoding: 'utf8',
+    env: fakeNpmEnv(fake, { HOME: home }),
+  })
+  assert.equal(after.status, 0, after.stderr)
+  assert.equal(after.stdout, '')
 })
 
-test('startup subshell removes its runtime cache when Task Agent update fails', (t) => {
+test('startup subshell removes its runtime cache when direct Task Agent start fails', (t) => {
   const fake = createFakeNpm(t)
   const home = path.join(fake.root, 'failed-start-home')
   const outDir = path.join(fake.root, 'failed-start-artifacts')
@@ -584,7 +770,7 @@ test('startup subshell removes its runtime cache when Task Agent update fails', 
   assert.equal(packed.status, 0, packed.stderr)
   const command = JSON.parse(packed.stdout).startupCommand
     .replace(
-      '"$HOME/.aamp/npm-global/bin/feishu-task-agent" update',
+      '"$HOME/.aamp/npm-global/bin/feishu-task-agent" start',
       `printf '%s' "$NPM_CONFIG_CACHE" > ${JSON.stringify(failureCacheLog)}; false`,
     )
   const started = spawnSync('bash', ['-c', command], {
