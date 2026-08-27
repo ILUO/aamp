@@ -970,7 +970,7 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
   assert.equal(acpResult.status, 0, acpResult.stderr)
   assert.deepEqual(JSON.parse(acpResult.stdout), {
     acp: acpTgz,
-    feishu: '@luckyterry/aamp-feishu-bridge@0.1.52-dev.4',
+    feishu: '@iluolyx/aamp-feishu-bridge@0.1.52-dev.5',
     aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
   })
 

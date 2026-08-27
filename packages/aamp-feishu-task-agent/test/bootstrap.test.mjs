@@ -32,7 +32,7 @@ test('global Task Agent installation requires the TraeCode readiness helper', ()
 
 test('task agent source keeps canonical package metadata and records the last successful release pins', () => {
   const canonicalPackage = '@larktask/aamp-feishu-task-agent'
-  const releasedTaskAgent = '@luckyterry/aamp-feishu-task-agent'
+  const releasedTaskAgent = '@iluolyx/aamp-feishu-task-agent'
   const releasedAcpBridge = '@luckyterry/aamp-acp-bridge@0.1.29-dev.0'
   const source = readFileSync(bootstrap, 'utf8')
   const controller = readFileSync(path.resolve(__dirname, '../bin/feishu-task-agent-controller.mjs'), 'utf8')
@@ -88,7 +88,7 @@ test('internal profile probe reports hit or miss without profile mutation, auth 
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-profile-probe-'))
   const fakeCli = path.join(root, 'lark-cli')
   const callsFile = path.join(root, 'calls.log')
-  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@luckyterry/aamp-feishu-task-agent/bin/agent-metadata.mjs')
+  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@iluolyx/aamp-feishu-task-agent/bin/agent-metadata.mjs')
   mkdirSync(path.dirname(metadataFile), { recursive: true })
   writeFileSync(metadataFile, readFileSync(path.resolve(__dirname, '../bin/agent-metadata.mjs')))
   writeFileSync(fakeCli, `#!/usr/bin/env bash
@@ -165,7 +165,7 @@ test('internal profile probe does not install lark-cli when no existing candidat
   const binDir = path.join(root, 'bin')
   const callsFile = path.join(root, 'calls.log')
   const resultFile = path.join(root, 'result.json')
-  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@luckyterry/aamp-feishu-task-agent/bin/agent-metadata.mjs')
+  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@iluolyx/aamp-feishu-task-agent/bin/agent-metadata.mjs')
   mkdirSync(binDir)
   mkdirSync(path.dirname(metadataFile), { recursive: true })
   writeFileSync(metadataFile, readFileSync(path.resolve(__dirname, '../bin/agent-metadata.mjs')))

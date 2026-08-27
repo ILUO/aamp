@@ -9,7 +9,7 @@ Run the standalone one-click command. Its existing Node.js/npm dependency
 installation flow is unchanged:
 
 ```bash
-npx -y --package @luckyterry/aamp-feishu-task-agent@dev \
+npx -y --package @iluolyx/aamp-feishu-task-agent@dev \
   feishu-task-agent install
 ```
 
