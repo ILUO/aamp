@@ -185,12 +185,30 @@ version. They remain visible to `list` and can be deleted with `remove`, but
 `start` skips them with an explicit error and continues with the next binding.
 
 If a saved `lark-cli` profile is missing, `start` recreates it from the stored
-App ID/App Secret and resumes user authorization. If the persisted Agent or
-Feishu Bridge mailbox identity is missing or has changed, startup rejects that
-pair and asks the user to bind it again instead of reporting a false success.
-The same Online `LARKSUITE_CLI_CONFIG_DIR` is passed to Feishu Bridge, Agent
-Bridge, and the local Codex/Cursor/Trae process so task execution resolves the exact
-profile created during binding.
+App ID/App Secret. User OAuth is optional by default and never blocks Task/IM
+Bridge startup. The embedded version-2 scope manifest configures only the Task
+and IM application capabilities used by this package; it does not expand
+Base, Calendar, Mail, Minutes, VC, Wiki, or other user domains. Existing bot
+profiles are rewritten with `domains: ["task"]` when they are saved again.
+
+`FEISHU_USER_AUTH_MODE` controls the local user capability policy:
+
+- `optional` (default) reuses an existing valid token, records unavailable
+  optional capabilities, and continues without opening a browser.
+- `required` requests the fixed Task user scope set once and fails only when
+  those explicit scopes remain missing. The command never passes `--domain`.
+- `disabled` skips user capability checks and runs Task-only.
+
+Granted and missing user scopes are recorded without credentials under
+`~/.aamp/feishu-bridge/auth-capabilities/<profile>.json`. Legacy
+`FEISHU_USER_AUTH_EXCLUDES` values are intersected with the current explicit
+request, so stale or tenant-invisible scope names cannot create a new failure.
+
+If the persisted Agent or Feishu Bridge mailbox identity is missing or has
+changed, startup rejects that pair and asks the user to bind it again instead
+of reporting a false success. The same Online `LARKSUITE_CLI_CONFIG_DIR` is
+passed to Feishu Bridge, Agent Bridge, and the local Codex/Cursor/Trae process
+so task execution resolves the exact profile created during binding.
 
 ## Local logs and diagnostics
 

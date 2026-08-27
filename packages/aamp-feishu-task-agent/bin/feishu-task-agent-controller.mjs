@@ -74,10 +74,7 @@ const NETWORK_PROBE_TIMEOUT_MS = Math.max(1_000, Number(process.env.AAMP_TASK_NE
 const FEISHU_START_CONCURRENCY = 4;
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
-const PROFILE_DOMAINS = [
-  'base', 'calendar', 'contact', 'docs', 'im', 'mail', 'mindnotes', 'minutes',
-  'note', 'sheets', 'slides', 'task', 'vc', 'wiki',
-];
+const PROFILE_DOMAINS = ['task'];
 
 const secrets = new Set();
 const managedProcesses = new Set();
@@ -3478,5 +3475,6 @@ export {
   startupSummaryLines,
   cleanupAll,
   upsertBindings,
+  writeFeishuRuntimeProfile,
   writeManifest,
 };

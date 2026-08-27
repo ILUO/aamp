@@ -69,13 +69,23 @@ WORKBUDDY_APP_CLI="/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpac
 WORKBUDDY_AI_APP_CLI="/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
 LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
 LARK_CLI_MIN_VERSION="${LARK_CLI_MIN_VERSION:-1.0.64}"
-FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-im:message,im:message:send_as_bot,im:message:readonly,im:resource,cardkit:card:write,task:task,task:comment,task:task:readonly,task:comment:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly,search:docs:read,base:app:copy,base:app:create,base:app:read,base:app:update,base:block:create,base:block:delete,base:block:read,base:block:update,base:dashboard:create,base:dashboard:delete,base:dashboard:read,base:dashboard:update,base:field:create,base:field:delete,base:field:read,base:field:update,base:form:create,base:form:delete,base:form:read,base:form:update,base:history:read,base:record:create,base:record:delete,base:record:read,base:record:update,base:role:create,base:role:delete,base:role:read,base:role:update,base:table:create,base:table:delete,base:table:read,base:table:update,base:view:read,base:view:write_only,base:workflow:create,base:workflow:read,base:workflow:update,board:whiteboard:node:create,board:whiteboard:node:read,calendar:calendar.event:create,calendar:calendar.event:delete,calendar:calendar.event:read,calendar:calendar.event:reply,calendar:calendar.event:update,calendar:calendar.free_busy:read,calendar:calendar:create,calendar:calendar:delete,calendar:calendar:read,calendar:calendar:update,contact:user.base:readonly,contact:user.basic_profile:readonly,docs:document.media:download,docs:document.media:upload,docs:document:export,docs:document:import,docx:document:create,docx:document:readonly,docx:document:write_only,drive:drive.metadata:readonly,drive:file:download,drive:file:upload,im:chat.managers:write_only,im:chat.members:read,im:chat.members:write_only,im:chat.moderation:read,im:chat:moderation:write_only,im:message.pins:read,im:message.pins:write_only,im:message.reactions:read,im:message.reactions:write_only,im:message:recall,mail:user_mailbox.event.mail_address:read,mail:user_mailbox.mail_contact:read,mail:user_mailbox.message.address:read,mail:user_mailbox.message.body:read,mail:user_mailbox.message.subject:read,mindnote:node:create,mindnote:node:read,minutes:minutes.basic:read,minutes:minutes.media:export,minutes:minutes:readonly,sheets:spreadsheet.meta:read,sheets:spreadsheet.meta:write_only,sheets:spreadsheet:create,sheets:spreadsheet:read,sheets:spreadsheet:write_only,slides:presentation:create,slides:presentation:read,slides:presentation:update,slides:presentation:write_only,task:custom_field:read,task:custom_field:write,task:section:read,task:section:write,vc:meeting.bot.join:write,vc:meeting.meetingevent:read,vc:meeting.message:write,vc:record:readonly,wiki:member:create,wiki:member:retrieve,wiki:member:update,wiki:node:copy,wiki:node:create,wiki:node:move,wiki:node:read,wiki:node:retrieve,wiki:space:read,wiki:space:retrieve,wiki:space:write_only}"
-FEISHU_APP_SCOPES_USER="${FEISHU_APP_SCOPES_USER:-im:message,im:message:readonly,im:resource,cardkit:card:write,task:task,task:comment,task:task:readonly,task:comment:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly,search:docs:read,search:message,base:app:copy,base:app:create,base:app:read,base:app:update,base:block:create,base:block:delete,base:block:read,base:block:update,base:dashboard:create,base:dashboard:delete,base:dashboard:read,base:dashboard:update,base:field:create,base:field:delete,base:field:read,base:field:update,base:form:create,base:form:delete,base:form:read,base:form:update,base:history:read,base:record:create,base:record:delete,base:record:read,base:record:update,base:role:create,base:role:delete,base:role:read,base:role:update,base:table:create,base:table:delete,base:table:read,base:table:update,base:view:read,base:view:write_only,base:workflow:create,base:workflow:read,base:workflow:update,board:whiteboard:node:create,board:whiteboard:node:read,calendar:calendar.event:create,calendar:calendar.event:delete,calendar:calendar.event:read,calendar:calendar.event:reply,calendar:calendar.event:update,calendar:calendar.free_busy:read,calendar:calendar:create,calendar:calendar:delete,calendar:calendar:read,calendar:calendar:update,contact:user.base:readonly,contact:user.basic_profile:readonly,contact:user:search,docs:document.media:download,docs:document.media:upload,docs:document:export,docs:document:import,docx:document:create,docx:document:readonly,docx:document:write_only,drive:drive.metadata:readonly,drive:file:download,drive:file:upload,im:chat.managers:write_only,im:chat.members:read,im:chat.members:write_only,im:chat.moderation:read,im:chat.nickname:read,im:chat.nickname:write,im:chat.user_setting:read,im:chat.user_setting:write,im:chat:read,im:chat:update,im:chat:create_by_user,im:chat:moderation:write_only,im:feed.flag:read,im:feed.flag:write,im:feed.shortcut:read,im:feed.shortcut:write,im:feed_group_v1:read,im:feed_group_v1:write,im:message.group_msg:get_as_user,im:message.p2p_msg:get_as_user,im:message.pins:read,im:message.pins:write_only,im:message.reactions:read,im:message.reactions:write_only,im:message:recall,mail:event,mail:user_mailbox.event.mail_address:read,mail:user_mailbox.mail_contact:read,mail:user_mailbox.message.address:read,mail:user_mailbox.message.body:read,mail:user_mailbox.message.subject:read,mindnote:node:create,mindnote:node:read,minutes:minutes.artifacts:read,minutes:minutes.basic:read,minutes:minutes.media:export,minutes:minutes.search:read,minutes:minutes.upload:write,minutes:minutes:readonly,minutes:minutes:update,profile:user_profile:read,sheets:spreadsheet.meta:read,sheets:spreadsheet.meta:write_only,sheets:spreadsheet:create,sheets:spreadsheet:read,sheets:spreadsheet:write_only,slides:presentation:create,slides:presentation:read,slides:presentation:update,slides:presentation:write_only,task:custom_field:read,task:custom_field:write,task:section:read,task:section:write,vc:meeting.bot.join:write,vc:meeting.meetingevent:read,vc:meeting.message:write,vc:meeting.search:read,vc:note:read,vc:record:readonly,wiki:member:create,wiki:member:retrieve,wiki:member:update,wiki:node:copy,wiki:node:create,wiki:node:move,wiki:node:read,wiki:node:retrieve,wiki:space:read,wiki:space:retrieve,wiki:space:write_only}"
+AAMP_FEISHU_APP_SCOPES_TENANT_OVERRIDE="${FEISHU_APP_SCOPES_TENANT-}"
+AAMP_FEISHU_APP_SCOPES_USER_OVERRIDE="${FEISHU_APP_SCOPES_USER-}"
+AAMP_FEISHU_USER_AUTH_REQUIRED_SCOPES_OVERRIDE="${FEISHU_USER_AUTH_REQUIRED_SCOPES-}"
+AAMP_FEISHU_USER_AUTH_REQUESTED_SCOPES_OVERRIDE="${FEISHU_USER_AUTH_REQUESTED_SCOPES-}"
+AAMP_FEISHU_USER_AUTH_EXCLUDES_OVERRIDE="${FEISHU_USER_AUTH_EXCLUDES-}"
+FEISHU_APP_SCOPES_TENANT="$AAMP_FEISHU_APP_SCOPES_TENANT_OVERRIDE"
+FEISHU_APP_SCOPES_USER="$AAMP_FEISHU_APP_SCOPES_USER_OVERRIDE"
 FEISHU_APP_EVENTS_TENANT="${FEISHU_APP_EVENTS_TENANT:-task.task.update_user_access_v2}"
 FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v2}"
-FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs,im,mail,mindnotes,minutes,note,sheets,slides,task,vc,wiki}"
-FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
-FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
+FEISHU_USER_AUTH_EXCLUDES="$AAMP_FEISHU_USER_AUTH_EXCLUDES_OVERRIDE"
+FEISHU_USER_AUTH_REQUIRED_SCOPES="$AAMP_FEISHU_USER_AUTH_REQUIRED_SCOPES_OVERRIDE"
+FEISHU_USER_AUTH_REQUESTED_SCOPES="$AAMP_FEISHU_USER_AUTH_REQUESTED_SCOPES_OVERRIDE"
+FEISHU_USER_AUTH_CORE_SCOPES="${FEISHU_USER_AUTH_CORE_SCOPES:-}"
+FEISHU_USER_AUTH_OPTIONAL_SCOPES="${FEISHU_USER_AUTH_OPTIONAL_SCOPES:-}"
+FEISHU_USER_AUTH_MODE="${FEISHU_USER_AUTH_MODE:-optional}"
+FEISHU_TASK_PROFILE_DOMAINS="${FEISHU_TASK_PROFILE_DOMAINS:-task}"
+AAMP_FEISHU_AUTH_STATE_DIR="${AAMP_FEISHU_AUTH_STATE_DIR:-$HOME/.aamp/feishu-bridge/auth-capabilities}"
 AAMP_TASK_ALLOW_PACKAGE_OVERRIDES="${AAMP_TASK_ALLOW_PACKAGE_OVERRIDES:-false}"
 if [ "$AAMP_TASK_INTERNAL" = "true" ] \
   && [ "${AAMP_TASK_PACKAGE_OVERRIDES_RESOLVED:-false}" = "true" ]; then
@@ -2002,7 +2012,7 @@ save_bot_config() {
   local profile="$3"
   local app_secret="${4:-}"
   mkdir -p "$(dirname "$BOT_CONFIG_FILE")"
-  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" BOT_APP_SECRET="$app_secret" FEISHU_USER_AUTH_DOMAINS="$FEISHU_USER_AUTH_DOMAINS" node -e '
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" BOT_APP_SECRET="$app_secret" FEISHU_TASK_PROFILE_DOMAINS="$FEISHU_TASK_PROFILE_DOMAINS" FEISHU_SCOPE_MANIFEST_VERSION="$FEISHU_SCOPE_MANIFEST_VERSION" FEISHU_USER_AUTH_MODE="$FEISHU_USER_AUTH_MODE" node -e '
 const fs = require("fs");
 const file = process.env.BOT_CONFIG_FILE;
 const appSecret = String(process.env.BOT_APP_SECRET || "").trim();
@@ -2013,7 +2023,9 @@ const next = {
   profile: process.env.BOT_PROFILE,
   auth_mode: "lark-cli",
   capabilities: ["im", "task"],
-  domains: String(process.env.FEISHU_USER_AUTH_DOMAINS || "").split(",").map((item) => item.trim()).filter(Boolean),
+  domains: String(process.env.FEISHU_TASK_PROFILE_DOMAINS || "task").split(",").map((item) => item.trim()).filter(Boolean),
+  scope_manifest_version: Number(process.env.FEISHU_SCOPE_MANIFEST_VERSION || 0),
+  user_auth_mode: process.env.FEISHU_USER_AUTH_MODE || "optional",
   updated_at: new Date().toISOString(),
 };
 let parsed = { version: 1, profiles: [] };
@@ -2246,15 +2258,65 @@ ensure_lark_cli_min_version() {
   select_lark_cli_bin
 }
 
+feishu_scope_manifest_json() {
+  cat <<'JSON'
+{"version":2,"app":{"tenant":["im:message","im:message:send_as_bot","im:message:readonly","im:resource","cardkit:card:write","task:task","task:comment","task:task:readonly","task:comment:readonly","task:attachment:read","task:attachment:write","task:comment:read","task:comment:write","task:task:read","task:task:write","task:tasklist:read","task:tasklist:write","task:custom_field:read","task:custom_field:write","task:section:read","task:section:write"],"user":["im:message","im:message:readonly","im:resource","cardkit:card:write","task:task","task:comment","task:task:readonly","task:comment:readonly","task:attachment:read","task:attachment:write","task:comment:read","task:comment:write","task:task:read","task:task:write","task:tasklist:read","task:tasklist:write","task:custom_field:read","task:custom_field:write","task:section:read","task:section:write"]},"userAuth":{"core":[],"optional":["task:task","task:comment","task:task:readonly","task:comment:readonly","task:attachment:read","task:attachment:write","task:comment:read","task:comment:write","task:task:read","task:task:write","task:tasklist:read","task:tasklist:write","task:custom_field:read","task:custom_field:write","task:section:read","task:section:write"]}}
+JSON
+}
+
+initialize_feishu_scope_manifest() {
+  local manifest_values=()
+  local value
+
+  while IFS= read -r value; do
+    manifest_values+=("$value")
+  done < <(feishu_scope_manifest_json | node -e '
+const fs = require("fs");
+const manifest = JSON.parse(fs.readFileSync(0, "utf8"));
+console.log(String(manifest.version));
+console.log(manifest.app.tenant.join(","));
+console.log(manifest.app.user.join(","));
+console.log(manifest.userAuth.core.join(" "));
+console.log(manifest.userAuth.optional.join(" "));
+')
+
+  [ "${#manifest_values[@]}" -eq 5 ] || agent_fail "invalid embedded Feishu scope manifest"
+  FEISHU_SCOPE_MANIFEST_VERSION="${FEISHU_SCOPE_MANIFEST_VERSION:-${manifest_values[0]}}"
+  FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-${manifest_values[1]}}"
+  FEISHU_APP_SCOPES_USER="${FEISHU_APP_SCOPES_USER:-${manifest_values[2]}}"
+  FEISHU_USER_AUTH_CORE_SCOPES="${FEISHU_USER_AUTH_CORE_SCOPES:-${manifest_values[3]}}"
+  FEISHU_USER_AUTH_OPTIONAL_SCOPES="${FEISHU_USER_AUTH_OPTIONAL_SCOPES:-${manifest_values[4]}}"
+  if [ -n "${FEISHU_USER_AUTH_REQUIRED_SCOPES:-}" ]; then
+    FEISHU_USER_AUTH_CORE_SCOPES="$FEISHU_USER_AUTH_REQUIRED_SCOPES"
+  else
+    FEISHU_USER_AUTH_REQUIRED_SCOPES="$FEISHU_USER_AUTH_CORE_SCOPES"
+  fi
+  if [ -z "${FEISHU_USER_AUTH_REQUESTED_SCOPES:-}" ]; then
+    if [ -n "${AAMP_FEISHU_USER_AUTH_REQUIRED_SCOPES_OVERRIDE:-}" ]; then
+      FEISHU_USER_AUTH_REQUESTED_SCOPES="$FEISHU_USER_AUTH_REQUIRED_SCOPES"
+    else
+      FEISHU_USER_AUTH_REQUESTED_SCOPES="${FEISHU_USER_AUTH_CORE_SCOPES} ${FEISHU_USER_AUTH_OPTIONAL_SCOPES}"
+    fi
+  fi
+  export FEISHU_SCOPE_MANIFEST_VERSION
+  export FEISHU_APP_SCOPES_TENANT FEISHU_APP_SCOPES_USER
+  export FEISHU_USER_AUTH_CORE_SCOPES FEISHU_USER_AUTH_OPTIONAL_SCOPES
+  export FEISHU_USER_AUTH_REQUIRED_SCOPES FEISHU_USER_AUTH_REQUESTED_SCOPES
+}
+
 lark_cli_user_auth_satisfied() {
   local profile="$1"
+  local required_scopes="${2:-${FEISHU_USER_AUTH_REQUIRED_SCOPES:-${FEISHU_USER_AUTH_CORE_SCOPES:-}}}"
   local status_json auth_check
   LARK_CLI_CMD="${LARK_CLI_CMD:-lark-cli}"
 
+  if [ -z "${required_scopes//[[:space:],]/}" ]; then
+    return 0
+  fi
   status_json="$("$LARK_CLI_CMD" --profile "$profile" auth status --json 2>/dev/null)" || return 1
 
   set +e
-  auth_check="$(AUTH_STATUS_JSON="$status_json" FEISHU_USER_AUTH_REQUIRED_SCOPES="$FEISHU_USER_AUTH_REQUIRED_SCOPES" FEISHU_USER_AUTH_EXCLUDES="$FEISHU_USER_AUTH_EXCLUDES" node -e '
+  auth_check="$(AUTH_STATUS_JSON="$status_json" FEISHU_USER_AUTH_REQUIRED_SCOPES="$required_scopes" FEISHU_USER_AUTH_EXCLUDES="$FEISHU_USER_AUTH_EXCLUDES" node -e '
 function parseJsonOutput(value, label) {
   const raw = String(value || "");
   const start = raw.indexOf("{");
@@ -2295,10 +2357,76 @@ console.log("ok");
   return 1
 }
 
+write_lark_cli_auth_capability_snapshot() {
+  local profile="$1"
+  local status_json="{}"
+  local state_dir="$AAMP_FEISHU_AUTH_STATE_DIR"
+  local safe_profile state_file temp_file
+
+  set +e
+  status_json="$("$LARK_CLI_CMD" --profile "$profile" auth status --json 2>/dev/null)"
+  local status_code=$?
+  set -e
+  if [ "$status_code" -ne 0 ] || [ -z "$status_json" ]; then
+    status_json="{}"
+  fi
+
+  mkdir -p "$state_dir" || return 1
+  safe_profile="$(PROFILE="$profile" node -e 'process.stdout.write(String(process.env.PROFILE || "profile").replace(/[^A-Za-z0-9._-]/g, "_"))')" || return 1
+  state_file="$state_dir/$safe_profile.json"
+  temp_file="$(mktemp "$state_dir/.auth-capabilities.XXXXXX")" || return 1
+  if ! AUTH_STATUS_JSON="$status_json" \
+    AUTH_PROFILE="$profile" \
+    FEISHU_SCOPE_MANIFEST_VERSION="$FEISHU_SCOPE_MANIFEST_VERSION" \
+    FEISHU_USER_AUTH_CORE_SCOPES="$FEISHU_USER_AUTH_CORE_SCOPES" \
+    FEISHU_USER_AUTH_OPTIONAL_SCOPES="$FEISHU_USER_AUTH_OPTIONAL_SCOPES" \
+    node -e '
+const raw = String(process.env.AUTH_STATUS_JSON || "{}");
+const start = raw.indexOf("{");
+let status = {};
+try { status = JSON.parse(start >= 0 ? raw.slice(start) : "{}"); } catch {}
+const user = status?.identities?.user;
+const usable = Boolean(user?.available) && new Set(["valid", "needs_refresh"]).has(user?.tokenStatus);
+const split = (value) => [...new Set(String(value || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean))];
+const granted = new Set(split(user?.scope));
+const core = split(process.env.FEISHU_USER_AUTH_CORE_SCOPES);
+const optional = split(process.env.FEISHU_USER_AUTH_OPTIONAL_SCOPES);
+const missingCoreScopes = core.filter((scope) => !granted.has(scope));
+const missingOptionalScopes = optional.filter((scope) => !granted.has(scope));
+process.stdout.write(JSON.stringify({
+  schemaVersion: 1,
+  manifestVersion: Number(process.env.FEISHU_SCOPE_MANIFEST_VERSION || 0),
+  profile: process.env.AUTH_PROFILE,
+  tokenStatus: user?.tokenStatus || "missing",
+  grantedScopes: [...granted],
+  missingCoreScopes,
+  missingOptionalScopes,
+  capabilities: { task_user: usable && missingOptionalScopes.length === 0 },
+  checkedAt: new Date().toISOString(),
+}, null, 2));
+' >"$temp_file"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+  if ! mv "$temp_file" "$state_file"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+  chmod 600 "$state_file" 2>/dev/null || true
+}
+
+persist_lark_cli_auth_capability_snapshot() {
+  local profile="$1"
+  if ! write_lark_cli_auth_capability_snapshot "$profile"; then
+    agent_log "warning: unable to persist optional user capability snapshot for profile: $profile"
+  fi
+}
+
 normalize_lark_cli_auth_excludes() {
-  EXCLUDES="$1" node -e '
+  EXCLUDES="$1" REQUESTED_SCOPES="${2:-${FEISHU_USER_AUTH_REQUESTED_SCOPES:-}}" node -e '
 const excludes = String(process.env.EXCLUDES || "").split(",").map((item) => item.trim()).filter(Boolean);
-console.log([...new Set(excludes)].join(","));
+const requested = new Set(String(process.env.REQUESTED_SCOPES || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean));
+console.log([...new Set(excludes)].filter((scope) => requested.has(scope)).join(","));
 '
 }
 
@@ -2445,12 +2573,14 @@ run_lark_cli_auth_login_with_browser_open() {
 run_lark_cli_auth_login() {
   local profile="$1"
   local auth_excludes="$2"
+  local requested_scopes="${FEISHU_USER_AUTH_REQUESTED_SCOPES:-}"
 
-  auth_excludes="$(normalize_lark_cli_auth_excludes "$auth_excludes")"
+  [ -n "${requested_scopes//[[:space:],]/}" ] || return 0
+  auth_excludes="$(normalize_lark_cli_auth_excludes "$auth_excludes" "$requested_scopes")"
   if [ -z "$auth_excludes" ]; then
-    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES"
+    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --scope "$requested_scopes"
   else
-    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES" --exclude "$auth_excludes"
+    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --scope "$requested_scopes" --exclude "$auth_excludes"
   fi
 }
 
@@ -2459,11 +2589,32 @@ ensure_lark_cli_profile() {
   with_lark_cli_config_lock ensure_lark_cli_profile_locked "$@"
 }
 
+validate_feishu_user_auth_mode() {
+  case "$FEISHU_USER_AUTH_MODE" in
+    optional|required|disabled) ;;
+    *) agent_fail "FEISHU_USER_AUTH_MODE must be optional, required, or disabled" ;;
+  esac
+}
+
 probe_lark_cli_profile_locked() {
   local profile="$1"
+  local required_scopes
+
+  initialize_feishu_scope_manifest
+  validate_feishu_user_auth_mode
   "$LARK_CLI_CMD" profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1 \
     || return 1
-  lark_cli_user_auth_satisfied "$profile"
+  if [ "$FEISHU_USER_AUTH_MODE" = "disabled" ]; then
+    persist_lark_cli_auth_capability_snapshot "$profile"
+    return 0
+  fi
+  if [ "$FEISHU_USER_AUTH_MODE" = "required" ]; then
+    required_scopes="$FEISHU_USER_AUTH_REQUESTED_SCOPES"
+  else
+    required_scopes="$FEISHU_USER_AUTH_CORE_SCOPES"
+  fi
+  lark_cli_user_auth_satisfied "$profile" "$required_scopes" || return 1
+  persist_lark_cli_auth_capability_snapshot "$profile"
 }
 
 ensure_lark_cli_profile_locked() {
@@ -2471,6 +2622,10 @@ ensure_lark_cli_profile_locked() {
   local app_secret="$2"
   local profile="$3"
   local auth_excludes
+  local required_scopes
+
+  initialize_feishu_scope_manifest
+  validate_feishu_user_auth_mode
 
   if "$LARK_CLI_CMD" profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1; then
     agent_detail "lark-cli profile already exists: $profile"
@@ -2483,13 +2638,38 @@ ensure_lark_cli_profile_locked() {
       --app-secret-stdin
   fi
 
-  agent_detail "ensuring lark-cli user auth domains for profile: $profile"
-  auth_excludes="$FEISHU_USER_AUTH_EXCLUDES"
-  if lark_cli_user_auth_satisfied "$profile"; then
-    agent_detail "lark-cli user auth already has required scopes for profile: $profile"
-  else
-    run_lark_cli_auth_login "$profile" "$auth_excludes"
+  if [ "$FEISHU_USER_AUTH_MODE" = "disabled" ]; then
+    persist_lark_cli_auth_capability_snapshot "$profile"
+    agent_log "Task bridge ready; optional user capabilities disabled for profile: $profile"
+    return 0
   fi
+
+  auth_excludes="$FEISHU_USER_AUTH_EXCLUDES"
+  if [ "$FEISHU_USER_AUTH_MODE" = "required" ]; then
+    required_scopes="$FEISHU_USER_AUTH_REQUESTED_SCOPES"
+    agent_detail "ensuring explicit lark-cli user auth scopes for profile: $profile"
+    if ! lark_cli_user_auth_satisfied "$profile" "$required_scopes"; then
+      run_lark_cli_auth_login "$profile" "$auth_excludes"
+      lark_cli_user_auth_satisfied "$profile" "$required_scopes" \
+        || agent_fail "lark-cli user authorization did not grant the required explicit scopes"
+    fi
+    persist_lark_cli_auth_capability_snapshot "$profile"
+    agent_detail "lark-cli user auth has the requested scopes for profile: $profile"
+    return 0
+  fi
+
+  if ! lark_cli_user_auth_satisfied "$profile" "$FEISHU_USER_AUTH_CORE_SCOPES"; then
+    agent_detail "ensuring explicitly configured lark-cli core scopes for profile: $profile"
+    run_lark_cli_auth_login "$profile" "$auth_excludes"
+    lark_cli_user_auth_satisfied "$profile" "$FEISHU_USER_AUTH_CORE_SCOPES" \
+      || agent_fail "lark-cli user authorization did not grant the configured core scopes"
+  fi
+  if lark_cli_user_auth_satisfied "$profile" "$FEISHU_USER_AUTH_OPTIONAL_SCOPES"; then
+    agent_detail "lark-cli optional user capabilities are available for profile: $profile"
+  else
+    agent_log "Task bridge ready; optional user capabilities unavailable for profile: $profile"
+  fi
+  persist_lark_cli_auth_capability_snapshot "$profile"
 }
 
 forget_current_bot_after_feishu_start_failure() {
@@ -2589,6 +2769,8 @@ register_feishu_app() {
   local register_status
   local default_name
   local bot_name
+
+  initialize_feishu_scope_manifest
 
   workdir="$(mktemp -d "${TMPDIR:-/tmp}/aamp-register-feishu-app.XXXXXX")"
   register_script="$workdir/register-app.mjs"
