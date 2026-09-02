@@ -5,8 +5,10 @@ user-owned Feishu Bots and running the corresponding Task bridges.
 
 ## Install and bind
 
-Run the standalone one-click command. Its existing Node.js/npm dependency
-installation flow is unchanged:
+Run the standalone one-click command. The launcher checks for Node.js and npm
+before setup. When either is unavailable, it stops before authorization and
+links to the official Node.js LTS download page; it does not install or modify
+the user's package managers automatically:
 
 ```bash
 npx -y --package @larktask/aamp-feishu-task-agent@dev \

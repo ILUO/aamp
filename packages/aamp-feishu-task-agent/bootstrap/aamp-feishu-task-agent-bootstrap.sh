@@ -112,7 +112,7 @@ AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.1-dev.3"
+AAMP_TASK_AGENT_VERSION="0.1.1-dev.4"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -683,98 +683,57 @@ path_prepend() {
   esac
 }
 
-run_brew() {
-  # Feed one "yes" for Homebrew prompts such as dependency installation confirmation.
-  printf 'y\n' | HOMEBREW_NO_ENV_HINTS=1 brew "$@"
-}
-
 refresh_node_toolchain_bins() {
   NPM_BIN="$(command -v npm || true)"
   NPX_BIN="$(command -v npx || true)"
 }
 
-print_node_toolchain_help() {
+print_missing_node_help() {
   cat >&2 <<'HELP'
 
-Automatic Node.js/npm installation did not complete.
-Install it manually with one of these commands, then reopen the terminal or fix PATH:
-  Homebrew: brew install node
-  Volta:    volta install node npm
-  fnm:      fnm install --lts
-  nvm:      nvm install --lts
+未检测到 Node.js 环境。
+
+请安装 Node.js LTS：
+https://nodejs.org/en/download
+
+安装完成后：
+1. 重新打开终端
+2. 执行 node -v && npm -v 验证
+3. 重新运行本安装命令
 
 HELP
 }
 
-try_install_node_toolchain() {
-  local node_path
-  node_path="$(command -v node || true)"
+print_incomplete_node_help() {
+  cat >&2 <<'HELP'
 
-  if command -v volta >/dev/null 2>&1 && { [ -z "$node_path" ] || [[ "$node_path" == *"/.volta/"* ]]; }; then
-    agent_log "installing Node.js/npm with Volta"
-    volta install node npm
-    return $?
-  fi
+Node.js 环境不完整，缺少 npm。
 
-  if command -v fnm >/dev/null 2>&1 && { [ -z "$node_path" ] || [[ "$node_path" == *"/.fnm/"* ]]; }; then
-    agent_log "installing Node.js/npm with fnm"
-    fnm install --lts
-    eval "$(fnm env --shell bash)"
-    return 0
-  fi
+请重新安装 Node.js LTS：
+https://nodejs.org/en/download
 
-  local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
-  if [ -s "$nvm_dir/nvm.sh" ] && { [ -z "$node_path" ] || [[ "$node_path" == *"/.nvm/"* ]]; }; then
-    agent_log "installing Node.js/npm with nvm"
-    # shellcheck disable=SC1090
-    source "$nvm_dir/nvm.sh"
-    nvm install --lts
-    nvm use --lts
-    return 0
-  fi
+安装完成后：
+1. 重新打开终端
+2. 执行 node -v && npm -v 验证
+3. 重新运行本安装命令
 
-  if command -v brew >/dev/null 2>&1; then
-    local formula="node"
-    if brew list --versions node@22 >/dev/null 2>&1; then
-      formula="node@22"
-    elif brew list --versions node >/dev/null 2>&1; then
-      formula="node"
-    fi
-
-    if brew list --versions "$formula" >/dev/null 2>&1; then
-      agent_log "reinstalling $formula with Homebrew to restore npm/npx"
-      run_brew reinstall "$formula"
-    else
-      agent_log "installing Node.js/npm with Homebrew"
-      run_brew install "$formula"
-    fi
-    return $?
-  fi
-
-  agent_log "no supported Node.js installer found; tried Volta, fnm, nvm, and Homebrew"
-  return 1
+HELP
 }
 
 ensure_node_toolchain() {
+  if ! command -v node >/dev/null 2>&1; then
+    print_missing_node_help
+    agent_fail "未检测到 Node.js，请先安装 Node.js LTS"
+  fi
+
   refresh_node_toolchain_bins
-  if [ -n "$NPM_BIN" ] && [ -n "$NPX_BIN" ]; then
+  if [ -n "$NPM_BIN" ]; then
     configure_npm_registry
     return 0
   fi
 
-  agent_log "npm/npx not found; installing Node.js/npm automatically"
-  if ! try_install_node_toolchain; then
-    print_node_toolchain_help
-    agent_fail "failed to install Node.js/npm automatically"
-  fi
-
-  hash -r 2>/dev/null || true
-  refresh_node_toolchain_bins
-  [ -n "$NPM_BIN" ] && [ -n "$NPX_BIN" ] || {
-    print_node_toolchain_help
-    agent_fail "npm/npx is still unavailable after installation"
-  }
-  configure_npm_registry
+  print_incomplete_node_help
+  agent_fail "Node.js 环境不完整，请重新安装 Node.js LTS"
 }
 
 configure_npm_registry() {

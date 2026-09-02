@@ -84,6 +84,82 @@ test('bootstrap accepts the legacy normal token passed by an older auto-updater'
   assert.match(result.stdout, /Usage:/)
 })
 
+function runNodeToolchainCheck({ node = false, npm = false, npx = false } = {}) {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-node-toolchain-'))
+  const binDir = path.join(root, 'bin')
+  const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
+  const brewCalls = path.join(root, 'brew-calls.log')
+  mkdirSync(binDir)
+  writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
+  writeFileSync(path.join(binDir, 'cat'), '#!/bin/bash\nexec /bin/cat "$@"\n')
+  writeFileSync(path.join(binDir, 'brew'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$BREW_CALLS"\nexit 0\n')
+  for (const name of ['cat', 'brew']) chmodSync(path.join(binDir, name), 0o755)
+  for (const [name, present] of Object.entries({ node, npm, npx })) {
+    if (!present) continue
+    writeFileSync(path.join(binDir, name), `#!/bin/bash\nprintf '${name} test\\n'\n`)
+    chmodSync(path.join(binDir, name), 0o755)
+  }
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+source "$BOOTSTRAP_LIB"
+PATH="$FAKE_BIN"
+agent_log() { printf 'LOG:%s\\n' "$*"; }
+agent_fail() { printf 'ERROR:%s\\n' "$*" >&2; exit 64; }
+configure_npm_registry() { printf 'configured\\n'; }
+ensure_node_toolchain
+`], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      BOOTSTRAP_LIB: bootstrapLib,
+      FAKE_BIN: binDir,
+      BREW_CALLS: brewCalls,
+      AAMP_TASK_AUTO_UPDATE: 'false',
+    },
+  })
+
+  return {
+    ...result,
+    brewCalls: existsSync(brewCalls) ? readFileSync(brewCalls, 'utf8') : '',
+  }
+}
+
+test('missing Node.js exits with official LTS installation guidance without invoking a package manager', () => {
+  const result = runNodeToolchainCheck()
+
+  assert.equal(result.status, 64)
+  assert.match(result.stderr, /未检测到 Node\.js 环境/)
+  assert.match(result.stderr, /https:\/\/nodejs\.org\/en\/download/)
+  assert.match(result.stderr, /node -v && npm -v/)
+  assert.match(result.stderr, /重新打开终端/)
+  assert.match(result.stderr, /ERROR:未检测到 Node\.js，请先安装 Node\.js LTS/)
+  assert.doesNotMatch(result.stderr, /Homebrew|Volta|fnm|nvm/)
+  assert.equal(result.brewCalls, '')
+})
+
+test('incomplete Node.js exits with the same official guidance instead of repairing through a package manager', () => {
+  const result = runNodeToolchainCheck({ node: true })
+
+  assert.equal(result.status, 64)
+  assert.match(result.stderr, /Node\.js 环境不完整/)
+  assert.match(result.stderr, /https:\/\/nodejs\.org\/en\/download/)
+  assert.match(result.stderr, /node -v && npm -v/)
+  assert.match(result.stderr, /ERROR:Node\.js 环境不完整，请重新安装 Node\.js LTS/)
+  assert.doesNotMatch(result.stderr, /Homebrew|Volta|fnm|nvm/)
+  assert.equal(result.brewCalls, '')
+})
+
+test('Node.js with npm continues when the legacy npx command is absent', () => {
+  const result = runNodeToolchainCheck({ node: true, npm: true })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /configured/)
+  assert.equal(result.brewCalls, '')
+})
+
 test('internal profile probe reports hit or miss without profile mutation, auth login, or prompting', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-profile-probe-'))
   const fakeCli = path.join(root, 'lark-cli')
