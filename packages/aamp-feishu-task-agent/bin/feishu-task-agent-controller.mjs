@@ -75,6 +75,10 @@ const FEISHU_START_CONCURRENCY = 4;
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
 const PROFILE_DOMAINS = ['task'];
+const OPEN_API_DOMAIN_BY_TENANT_BRAND = Object.freeze({
+  feishu: 'https://open.feishu.cn',
+  lark: 'https://open.larksuite.com',
+});
 
 const secrets = new Set();
 const managedProcesses = new Set();
@@ -782,6 +786,7 @@ function validateBinding(binding, index) {
   assertString(binding.environment?.name, `bindings[${index}].environment.name`);
   assertString(binding.bot?.app_id, `bindings[${index}].bot.app_id`);
   assertString(binding.bot?.app_secret, `bindings[${index}].bot.app_secret`);
+  normalizeTenantBrand(binding.bot?.tenant_brand, `bindings[${index}].bot.tenant_brand`);
   const metadata = resolveTaskAgentMetadata(binding.agent_type);
   if (metadata.executionLocation === 'local') {
     assertString(binding.bot?.lark_cli_profile, `bindings[${index}].bot.lark_cli_profile`);
@@ -841,12 +846,26 @@ function bindingExpectation(binding) {
   };
 }
 
+function normalizeTenantBrand(value, field = 'tenant_brand') {
+  if (value === undefined || value === null || value === '') return 'feishu';
+  if (value !== 'feishu' && value !== 'lark') {
+    throw new Error(`${field} 仅支持 feishu/lark`);
+  }
+  return value;
+}
+
+function openApiDomainForTenantBrand(value) {
+  return OPEN_API_DOMAIN_BY_TENANT_BRAND[normalizeTenantBrand(value)];
+}
+
 function sameBindingRelationship(existing, candidate) {
   return Boolean(existing && candidate
     && existing.agent_type === candidate.agent_type
     && existing.aamp_host === candidate.aamp_host
     && existing.environment?.name === candidate.environment?.name
-    && existing.bot?.app_id === candidate.bot?.app_id);
+    && existing.bot?.app_id === candidate.bot?.app_id
+    && normalizeTenantBrand(existing.bot?.tenant_brand)
+      === normalizeTenantBrand(candidate.bot?.tenant_brand));
 }
 
 async function upsertBindings(intents) {
@@ -2140,6 +2159,7 @@ function feishuArgs(binding, larkCliBin, target) {
     ...targetArgs,
     '--app-id', binding.bot.app_id,
     '--bot-name', binding.bot.display_name || binding.bot.app_id,
+    '--domain', openApiDomainForTenantBrand(binding.bot.tenant_brand),
     ...(metadata.executionLocation === 'local' ? [
       '--use-feishu-cli',
       '--feishu-cli-profile', binding.bot.lark_cli_profile,
@@ -3093,6 +3113,27 @@ async function discoverAgents() {
   return agents;
 }
 
+function buildPendingBinding(agent, registered, bindingId = randomId(), timestamp = nowIso()) {
+  const metadata = resolveTaskAgentMetadata(agent);
+  return {
+    binding_id: bindingId,
+    agent_type: agent,
+    bot: {
+      app_id: registered.app_id,
+      app_secret: registered.app_secret,
+      display_name: registered.display_name || registered.app_id,
+      tenant_brand: normalizeTenantBrand(registered.tenant_brand, 'registered.tenant_brand'),
+      ...(metadata.executionLocation === 'local' ? { lark_cli_profile: registered.lark_cli_profile } : {}),
+    },
+    environment: { name: 'online' },
+    state: 'pending',
+    aamp_host: DEFAULT_AAMP_HOST,
+    feishu_config_dir: expectedFeishuConfigDir(bindingId),
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+}
+
 async function createDraft(agents, selectedAppIds) {
   const agent = DEFAULT_AGENT || await chooseOne('请选择要绑定的智能体：', agents, agentSelectionDisplayName);
   const registered = await runBootstrapHelper('__register-binding', agent);
@@ -3106,24 +3147,7 @@ async function createDraft(agents, selectedAppIds) {
     throw new Error(`Bot ${registered.app_id} 已经选择过，不能重复绑定`);
   }
   selectedAppIds.add(registered.app_id);
-  const bindingId = randomId();
-  const timestamp = nowIso();
-  return {
-    binding_id: bindingId,
-    agent_type: agent,
-    bot: {
-      app_id: registered.app_id,
-      app_secret: registered.app_secret,
-      display_name: registered.display_name || registered.app_id,
-      ...(metadata.executionLocation === 'local' ? { lark_cli_profile: registered.lark_cli_profile } : {}),
-    },
-    environment: { name: 'online' },
-    state: 'pending',
-    aamp_host: DEFAULT_AAMP_HOST,
-    feishu_config_dir: expectedFeishuConfigDir(bindingId),
-    created_at: timestamp,
-    updated_at: timestamp,
-  };
+  return buildPendingBinding(agent, registered);
 }
 
 async function runBindingSession(mode) {
@@ -3437,6 +3461,7 @@ if (isMainModule) {
 }
 
 export {
+  buildPendingBinding,
   bindingExpectation,
   acpBridgeAgentPolicy,
   commitPreparedAgentBindings,

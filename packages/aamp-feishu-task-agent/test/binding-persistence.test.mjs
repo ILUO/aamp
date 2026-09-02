@@ -113,11 +113,47 @@ test('sameBindingRelationship rejects every routing-field difference', () => {
     ['aamp_host', { ...candidate, aamp_host: 'https://other.meshmail.ai' }],
     ['environment.name', { ...candidate, environment: { name: 'boe' } }],
     ['bot.app_id', { ...candidate, bot: { ...candidate.bot, app_id: 'cli_other' } }],
+    ['bot.tenant_brand', { ...candidate, bot: { ...candidate.bot, tenant_brand: 'lark' } }],
   ]
 
   for (const [field, value] of changed) {
     assert.equal(controller.sameBindingRelationship(existing, value), false, field)
   }
+  assert.equal(
+    controller.sameBindingRelationship(existing, {
+      ...candidate,
+      bot: { ...candidate.bot, tenant_brand: 'feishu' },
+    }),
+    true,
+    'legacy missing brand must remain equivalent to Feishu',
+  )
+})
+
+test('pending bindings persist the registered tenant brand and default legacy registrations to Feishu', () => {
+  assert.equal(typeof controller.buildPendingBinding, 'function')
+  const timestamp = '2026-09-02T00:00:00.000Z'
+  const registered = {
+    app_id: 'cli_lark',
+    app_secret: 'secret-lark',
+    display_name: 'Lark Bot',
+    lark_cli_profile: 'profile-lark',
+    tenant_brand: 'lark',
+  }
+  const lark = controller.buildPendingBinding(
+    'codex',
+    registered,
+    '33333333-3333-4333-8333-333333333333',
+    timestamp,
+  )
+  const legacy = controller.buildPendingBinding(
+    'codex',
+    { ...registered, app_id: 'cli_legacy', tenant_brand: undefined },
+    '44444444-4444-4444-8444-444444444444',
+    timestamp,
+  )
+
+  assert.equal(lark.bot.tenant_brand, 'lark')
+  assert.equal(legacy.bot.tenant_brand, 'feishu')
 })
 
 test('upsertBindings appends new Bots without removing existing bindings', async () => {
@@ -129,6 +165,16 @@ test('upsertBindings appends new Bots without removing existing bindings', async
 
   assert.equal(result.replacedCount, 0)
   assert.deepEqual(readStore().bindings.map(({ bot }) => bot.app_id), ['cli_old', 'cli_new'])
+})
+
+test('binding validation rejects unsupported tenant brands', async () => {
+  const invalid = pendingBinding('55555555-5555-4555-8555-555555555555', 'cli_invalid_brand')
+  invalid.bot.tenant_brand = 'unknown'
+
+  await assert.rejects(
+    controller.upsertBindings([{ binding: invalid, expected: undefined }]),
+    /bot\.tenant_brand 仅支持 feishu\/lark/,
+  )
 })
 
 test('upsertBindings atomically replaces the approved Bot in its original position', async () => {

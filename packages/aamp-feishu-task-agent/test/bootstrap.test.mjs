@@ -235,7 +235,7 @@ test('remote AIME internal registration and preparation never call local lark-cl
     'ensure_lark_cli() { record ensure-lark-cli; exit 97; }',
     'ensure_lark_cli_profile() { record ensure-lark-cli-profile; exit 97; }',
     'probe_lark_cli_profile_locked() { record probe-lark-cli-profile; exit 97; }',
-    'register_feishu_app() { record bot-registration; APP_ID=cli_remote; APP_SECRET=remote-secret-sentinel; BOT_NAME="Remote AIME"; }',
+    'register_feishu_app() { record bot-registration; APP_ID=cli_remote; APP_SECRET=remote-secret-sentinel; BOT_NAME="Remote AIME"; APP_TENANT_BRAND="lark"; }',
     'ensure_agent_cli() { record pinned-aime-preparation; }',
     'ensure_codex_cli_updated() { :; }',
     'ensure_agent_login() { record aime-auth-status-doctor; }',
@@ -266,6 +266,7 @@ test('remote AIME internal registration and preparation never call local lark-cl
     app_id: 'cli_remote',
     app_secret: 'remote-secret-sentinel',
     display_name: 'Remote AIME',
+    tenant_brand: 'lark',
     auth_mode: 'app-secret',
   })
   assert.deepEqual(preparation, {
@@ -281,6 +282,157 @@ test('remote AIME internal registration and preparation never call local lark-cl
     'acpx',
   ])
   assert.doesNotMatch(result.stderr, /remote-secret-sentinel/)
+})
+
+test('app registration preserves the SDK tenant brand and uses its OpenAPI domain', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-register-tenant-brand-'))
+  const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
+  const fakeSdkDir = path.join(root, 'fake-sdk')
+  const clientOptionsFile = path.join(root, 'client-options.json')
+  mkdirSync(fakeSdkDir, { recursive: true })
+  writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
+  writeFileSync(path.join(fakeSdkDir, 'package.json'), JSON.stringify({
+    name: '@larksuiteoapi/node-sdk',
+    version: 'test-sdk',
+    type: 'module',
+    main: './index.js',
+  }))
+  writeFileSync(path.join(fakeSdkDir, 'index.js'), `
+import { writeFileSync } from 'node:fs'
+export const Domain = { Feishu: 'feishu-domain', Lark: 'lark-domain' }
+export async function registerApp(options) {
+  if (process.env.FAKE_REGISTER_MODE === 'domain-switch'
+    || process.env.FAKE_REGISTER_MODE === 'explicit-feishu-after-switch') {
+    options.onStatusChange?.({ status: 'domain_switched' })
+  }
+  const tenantBrand = process.env.FAKE_REGISTER_MODE === 'domain-switch'
+    ? undefined
+    : process.env.FAKE_REGISTER_MODE === 'explicit-feishu-after-switch'
+      ? 'feishu'
+      : process.env.FAKE_REGISTER_MODE === 'invalid-brand'
+        ? 'unknown'
+        : 'lark'
+  return {
+    client_id: 'cli_lark_registration',
+    client_secret: 'registration-secret-sentinel',
+    user_info: { open_id: 'ou_test', ...(tenantBrand ? { tenant_brand: tenantBrand } : {}) },
+  }
+}
+export class Client {
+  constructor(options) {
+    writeFileSync(process.env.CLIENT_OPTIONS_FILE, JSON.stringify(options))
+    this.application = {
+      application: {
+        get: async () => ({ data: { app: { app_name: 'Lark Registration' } } }),
+      },
+    }
+  }
+}
+`)
+
+  for (const mode of ['user-info', 'domain-switch']) {
+    const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+source "$BOOTSTRAP_LIB"
+AAMP_TASK_INTERNAL="true"
+AGENT="codex"
+AGENT_EXECUTION_LOCATION="remote"
+initialize_feishu_scope_manifest() { :; }
+npm_install_register_helper() {
+  mkdir -p "$1/node_modules/@larksuiteoapi/node-sdk"
+  cp -R "$FAKE_SDK_DIR/." "$1/node_modules/@larksuiteoapi/node-sdk/"
+}
+agent_detail() { :; }
+agent_log() { :; }
+agent_fail() { printf '%s\\n' "$*" >&2; exit 1; }
+register_feishu_app
+printf '%s\\n' "$APP_ID|$BOT_NAME|$APP_TENANT_BRAND"
+`, 'bash'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        ...bootstrapBaseEnv,
+        HOME: root,
+        BOOTSTRAP_LIB: bootstrapLib,
+        FAKE_SDK_DIR: fakeSdkDir,
+        CLIENT_OPTIONS_FILE: clientOptionsFile,
+        FAKE_REGISTER_MODE: mode,
+        AAMP_TASK_AUTO_UPDATE: 'false',
+      },
+    })
+
+    assert.equal(result.status, 0, `${mode}: ${result.stderr}`)
+    assert.equal(result.stdout.trim(), 'cli_lark_registration|Lark Registration|lark', mode)
+    assert.deepEqual(JSON.parse(readFileSync(clientOptionsFile, 'utf8')), {
+      appId: 'cli_lark_registration',
+      appSecret: 'registration-secret-sentinel',
+      domain: 'lark-domain',
+    }, mode)
+  }
+
+  const explicitFeishu = spawnSync('bash', ['-c', `
+set -euo pipefail
+source "$BOOTSTRAP_LIB"
+AAMP_TASK_INTERNAL="true"
+AGENT="codex"
+AGENT_EXECUTION_LOCATION="remote"
+initialize_feishu_scope_manifest() { :; }
+npm_install_register_helper() {
+  mkdir -p "$1/node_modules/@larksuiteoapi/node-sdk"
+  cp -R "$FAKE_SDK_DIR/." "$1/node_modules/@larksuiteoapi/node-sdk/"
+}
+agent_detail() { :; }
+agent_log() { :; }
+agent_fail() { printf '%s\\n' "$*" >&2; exit 1; }
+register_feishu_app
+printf '%s\\n' "$APP_ID|$BOT_NAME|$APP_TENANT_BRAND"
+`, 'bash'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      BOOTSTRAP_LIB: bootstrapLib,
+      FAKE_SDK_DIR: fakeSdkDir,
+      CLIENT_OPTIONS_FILE: clientOptionsFile,
+      FAKE_REGISTER_MODE: 'explicit-feishu-after-switch',
+      AAMP_TASK_AUTO_UPDATE: 'false',
+    },
+  })
+  assert.equal(explicitFeishu.status, 0, explicitFeishu.stderr)
+  assert.equal(explicitFeishu.stdout.trim(), 'cli_lark_registration|Lark Registration|feishu')
+  assert.equal(JSON.parse(readFileSync(clientOptionsFile, 'utf8')).domain, 'feishu-domain')
+
+  const invalidBrand = spawnSync('bash', ['-c', `
+set -euo pipefail
+source "$BOOTSTRAP_LIB"
+AAMP_TASK_INTERNAL="true"
+AGENT="codex"
+AGENT_EXECUTION_LOCATION="remote"
+initialize_feishu_scope_manifest() { :; }
+npm_install_register_helper() {
+  mkdir -p "$1/node_modules/@larksuiteoapi/node-sdk"
+  cp -R "$FAKE_SDK_DIR/." "$1/node_modules/@larksuiteoapi/node-sdk/"
+}
+agent_detail() { :; }
+agent_log() { :; }
+agent_fail() { printf '%s\\n' "$*" >&2; exit 1; }
+register_feishu_app
+`, 'bash'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      BOOTSTRAP_LIB: bootstrapLib,
+      FAKE_SDK_DIR: fakeSdkDir,
+      CLIENT_OPTIONS_FILE: clientOptionsFile,
+      FAKE_REGISTER_MODE: 'invalid-brand',
+      AAMP_TASK_AUTO_UPDATE: 'false',
+    },
+  })
+  assert.notEqual(invalidBrand.status, 0)
+  assert.match(invalidBrand.stderr, /unsupported tenant brand: unknown/)
 })
 
 test('remote AIME profile actions reject before touching a retained legacy profile sentinel', () => {
@@ -898,6 +1050,84 @@ save_bot_config "Task Bot" cli_task profile-task secret
   assert.deepEqual(saved.domains, ['task'])
   assert.equal(saved.scope_manifest_version, 2)
   assert.equal(saved.user_auth_mode, 'optional')
+})
+
+test('creating a Lark profile passes the tenant brand to lark-cli', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('feishu_scope_manifest_json()')
+  const end = source.indexOf('\nforget_current_bot_after_feishu_start_failure()', start)
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const helpers = source.slice(start, end)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-lark-profile-brand-'))
+  const fakeCli = path.join(home, 'lark-cli')
+  const callsFile = path.join(home, 'calls.log')
+  writeFileSync(fakeCli, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$CALLS_FILE"
+case "$*" in
+  "profile list") printf '[]\\n' ;;
+  "profile add "*) cat >/dev/null ;;
+esac
+`)
+  chmodSync(fakeCli, 0o755)
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+LARK_CLI_CMD="$1"
+CALLS_FILE="$2"
+export CALLS_FILE
+AAMP_FEISHU_AUTH_STATE_DIR="$3"
+FEISHU_USER_AUTH_MODE="disabled"
+FEISHU_SCOPE_MANIFEST_VERSION=""
+FEISHU_APP_SCOPES_TENANT=""
+FEISHU_APP_SCOPES_USER=""
+FEISHU_USER_AUTH_CORE_SCOPES=""
+FEISHU_USER_AUTH_OPTIONAL_SCOPES=""
+FEISHU_USER_AUTH_REQUIRED_SCOPES=""
+FEISHU_USER_AUTH_REQUESTED_SCOPES=""
+FEISHU_USER_AUTH_EXCLUDES=""
+agent_detail() { :; }
+agent_log() { :; }
+agent_fail() { printf '%s\\n' "$*" >&2; exit 1; }
+${helpers}
+initialize_feishu_scope_manifest
+ensure_lark_cli_profile_locked cli_task secret profile-task lark
+`, 'bash', fakeCli, callsFile, path.join(home, 'state')], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0, result.stderr)
+  const calls = readFileSync(callsFile, 'utf8')
+  assert.match(calls, /^profile add --name profile-task --app-id cli_task --brand lark --app-secret-stdin$/m)
+  assert.doesNotMatch(calls, /profile add .*--brand feishu/)
+})
+
+test('Lark registrations use an isolated profile name while Feishu keeps the legacy name', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('task_profile_name_for_app_id()')
+  const end = source.indexOf('\nsave_bot_config()', start)
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const helper = source.slice(start, end)
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+agent_fail() { printf '%s\\n' "$*" >&2; exit 1; }
+${helper}
+task_profile_name_for_app_id cli_task
+printf '\\n'
+task_profile_name_for_app_id cli_task feishu
+printf '\\n'
+task_profile_name_for_app_id cli_task lark
+printf '\\n'
+`], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, [
+    'aamp-feishu-task-cli_task',
+    'aamp-feishu-task-cli_task',
+    'aamp-feishu-task-cli_task-lark',
+    '',
+  ].join('\n'))
 })
 
 test('optional user auth keeps an existing profile ready without login', () => {

@@ -5,6 +5,7 @@ umask 077
 AGENT=""
 APP_ID=""
 APP_SECRET=""
+APP_TENANT_BRAND="feishu"
 BOT_NAME=""
 LARK_CLI_PROFILE=""
 AGENT_EXECUTION_LOCATION=""
@@ -111,7 +112,7 @@ AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.1-dev.2"
+AAMP_TASK_AGENT_VERSION="0.1.1-dev.3"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -1815,12 +1816,13 @@ for (const bot of bots) {
   const profile = String(bot?.profile || "").trim();
   const name = String(bot?.display_name || appId).trim();
   const appSecret = String(bot?.app_secret || "").trim();
+  const tenantBrand = bot?.tenant_brand === "lark" ? "lark" : "feishu";
   if (!appId || !profile || seen.has(appId) || activeAppIds.has(appId)) continue;
   if (!appSecret) {
     continue;
   }
   seen.add(appId);
-  console.log([appId, name, profile, appSecret].join("\t"));
+  console.log([appId, name, profile, appSecret, tenantBrand].join("\t"));
 }
 '
 }
@@ -2003,7 +2005,12 @@ process.exit(bots.some((bot) => String(bot?.app_id || "").trim() && String(bot?.
 
 task_profile_name_for_app_id() {
   local app_id="$1"
-  printf 'aamp-feishu-task-%s' "$app_id"
+  local tenant_brand="${2:-feishu}"
+  case "$tenant_brand" in
+    feishu) printf 'aamp-feishu-task-%s' "$app_id" ;;
+    lark) printf 'aamp-feishu-task-%s-lark' "$app_id" ;;
+    *) agent_fail "unsupported tenant brand: $tenant_brand" ;;
+  esac
 }
 
 save_bot_config() {
@@ -2011,14 +2018,20 @@ save_bot_config() {
   local app_id="$2"
   local profile="$3"
   local app_secret="${4:-}"
+  local tenant_brand="${5:-feishu}"
   mkdir -p "$(dirname "$BOT_CONFIG_FILE")"
-  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" BOT_APP_SECRET="$app_secret" FEISHU_TASK_PROFILE_DOMAINS="$FEISHU_TASK_PROFILE_DOMAINS" FEISHU_SCOPE_MANIFEST_VERSION="$FEISHU_SCOPE_MANIFEST_VERSION" FEISHU_USER_AUTH_MODE="$FEISHU_USER_AUTH_MODE" node -e '
+  case "$tenant_brand" in
+    feishu|lark) ;;
+    *) agent_fail "unsupported tenant brand: $tenant_brand" ;;
+  esac
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" BOT_APP_SECRET="$app_secret" BOT_TENANT_BRAND="$tenant_brand" FEISHU_TASK_PROFILE_DOMAINS="$FEISHU_TASK_PROFILE_DOMAINS" FEISHU_SCOPE_MANIFEST_VERSION="$FEISHU_SCOPE_MANIFEST_VERSION" FEISHU_USER_AUTH_MODE="$FEISHU_USER_AUTH_MODE" node -e '
 const fs = require("fs");
 const file = process.env.BOT_CONFIG_FILE;
 const appSecret = String(process.env.BOT_APP_SECRET || "").trim();
 const next = {
   display_name: process.env.BOT_NAME || process.env.BOT_APP_ID,
   app_id: process.env.BOT_APP_ID,
+  tenant_brand: process.env.BOT_TENANT_BRAND || "feishu",
   ...(appSecret ? { app_secret: appSecret } : {}),
   profile: process.env.BOT_PROFILE,
   auth_mode: "lark-cli",
@@ -2621,11 +2634,16 @@ ensure_lark_cli_profile_locked() {
   local app_id="$1"
   local app_secret="$2"
   local profile="$3"
+  local tenant_brand="${4:-feishu}"
   local auth_excludes
   local required_scopes
 
   initialize_feishu_scope_manifest
   validate_feishu_user_auth_mode
+  case "$tenant_brand" in
+    feishu|lark) ;;
+    *) agent_fail "unsupported tenant brand: $tenant_brand" ;;
+  esac
 
   if "$LARK_CLI_CMD" profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1; then
     agent_detail "lark-cli profile already exists: $profile"
@@ -2635,6 +2653,7 @@ ensure_lark_cli_profile_locked() {
     printf '%s\n' "$app_secret" | "$LARK_CLI_CMD" profile add \
       --name "$profile" \
       --app-id "$app_id" \
+      --brand "$tenant_brand" \
       --app-secret-stdin
   fi
 
@@ -2705,17 +2724,19 @@ select_existing_bot_or_create() {
   local names=()
   local profiles=()
   local app_secrets=()
+  local tenant_brands=()
   local bot_labels=()
-  local app_id name profile app_secret
+  local app_id name profile app_secret tenant_brand
   local index create_index selected
 
   acquire_bot_selection_lock
-  while IFS=$'\t' read -r app_id name profile app_secret; do
+  while IFS=$'\t' read -r app_id name profile app_secret tenant_brand; do
     [ -n "$app_id" ] || continue
     app_ids+=("$app_id")
     names+=("${name:-$app_id}")
     profiles+=("$profile")
     app_secrets+=("$app_secret")
+    tenant_brands+=("${tenant_brand:-feishu}")
     bot_labels+=("${name:-$app_id} ($app_id)")
   done < <(load_bot_configs)
 
@@ -2754,11 +2775,12 @@ select_existing_bot_or_create() {
   BOT_NAME="${names[$index]}"
   LARK_CLI_PROFILE="${profiles[$index]}"
   APP_SECRET="${app_secrets[$index]:-}"
+  APP_TENANT_BRAND="${tenant_brands[$index]:-feishu}"
   reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$BOT_NAME"
   release_bot_selection_lock
   agent_detail "using Feishu bot: $BOT_NAME ($APP_ID, profile=$LARK_CLI_PROFILE)"
   agent_log "正在检查飞书授权..."
-  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE" "$APP_TENANT_BRAND"
 }
 
 register_feishu_app() {
@@ -2808,6 +2830,7 @@ const userScopes = splitList(process.env.FEISHU_APP_SCOPES_USER);
 const tenantEvents = splitList(process.env.FEISHU_APP_EVENTS_TENANT);
 const userEvents = splitList(process.env.FEISHU_APP_EVENTS_USER);
 const appName = process.env.FEISHU_APP_PRESET_NAME || '飞书 CLI';
+let detectedTenantBrand = 'feishu';
 
 function userLog(message) {
   writeSync(5, `${message}\n`);
@@ -2860,15 +2883,24 @@ const result = await lark.registerApp({
   },
   onStatusChange(info) {
     if (info.status === 'polling') return;
+    if (info.status === 'domain_switched') detectedTenantBrand = 'lark';
     console.log(`[aamp-one-click] registerApp status: ${info.status}`);
   },
 });
 
-async function fetchRegisteredAppName(appId, appSecret) {
+const reportedTenantBrand = result?.user_info?.tenant_brand;
+const tenantBrand = reportedTenantBrand === undefined || reportedTenantBrand === null || reportedTenantBrand === ''
+  ? detectedTenantBrand
+  : reportedTenantBrand;
+const tenantBrandIsSupported = tenantBrand === 'feishu' || tenantBrand === 'lark';
+const openApiDomain = tenantBrand === 'lark' ? lark.Domain.Lark : lark.Domain.Feishu;
+
+async function fetchRegisteredAppName(appId, appSecret, domain) {
   try {
     const client = new lark.Client({
       appId,
       appSecret,
+      domain,
     });
     const response = await client.application.application.get({
       path: { app_id: appId },
@@ -2882,11 +2914,14 @@ async function fetchRegisteredAppName(appId, appSecret) {
   }
 }
 
-const registeredAppName = await fetchRegisteredAppName(result.client_id, result.client_secret);
+const registeredAppName = tenantBrandIsSupported
+  ? await fetchRegisteredAppName(result.client_id, result.client_secret, openApiDomain)
+  : '';
 const resultPayload = {
   app_id: result.client_id,
   app_secret: result.client_secret,
   app_name: registeredAppName || appName,
+  tenant_brand: tenantBrand,
 };
 await import('node:fs/promises').then(({ writeFile }) => writeFile(process.env.AAMP_REGISTER_APP_RESULT_FILE, JSON.stringify(resultPayload)));
 console.log(`[aamp-one-click] Feishu app registration completed: ${result.client_id}`);
@@ -2914,24 +2949,29 @@ NODE
   APP_ID="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_id || "")' "$register_result_file")"
   APP_SECRET="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_secret || "")' "$register_result_file")"
   bot_name="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_name || "")' "$register_result_file")"
+  APP_TENANT_BRAND="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.tenant_brand || "feishu")' "$register_result_file")"
   : >"$register_result_file"
   [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || agent_fail "Feishu app registration returned incomplete credentials"
+  case "$APP_TENANT_BRAND" in
+    feishu|lark) ;;
+    *) agent_fail "Feishu app registration returned unsupported tenant brand: $APP_TENANT_BRAND" ;;
+  esac
 
   bot_name="${bot_name:-$default_name}"
   BOT_NAME="$bot_name"
   if [ "$AGENT_EXECUTION_LOCATION" = "remote" ]; then
     LARK_CLI_PROFILE=""
   else
-    LARK_CLI_PROFILE="$(task_profile_name_for_app_id "$APP_ID")"
+    LARK_CLI_PROFILE="$(task_profile_name_for_app_id "$APP_ID" "$APP_TENANT_BRAND")"
     source_lark_env
-    ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+    ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE" "$APP_TENANT_BRAND"
   fi
   if [ "$AAMP_TASK_INTERNAL" = "true" ]; then
     agent_detail "Feishu Bot 已授权：$BOT_NAME ($APP_ID)"
     return 0
   fi
   acquire_bot_selection_lock
-  save_bot_config "$bot_name" "$APP_ID" "$LARK_CLI_PROFILE" "$APP_SECRET"
+  save_bot_config "$bot_name" "$APP_ID" "$LARK_CLI_PROFILE" "$APP_SECRET" "$APP_TENANT_BRAND"
   reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$bot_name"
   release_bot_selection_lock
   agent_log "saved Feishu task profile config: $bot_name ($APP_ID, profile=$LARK_CLI_PROFILE)"
@@ -4941,9 +4981,9 @@ run_internal_register_binding() {
   load_agent_metadata
   register_feishu_app
   if [ "$AGENT_EXECUTION_LOCATION" = "remote" ]; then
-    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"auth_mode\":\"app-secret\"}"
+    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"tenant_brand\":\"$(json_escape "$APP_TENANT_BRAND")\",\"auth_mode\":\"app-secret\"}"
   else
-    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\",\"auth_mode\":\"lark-cli\"}"
+    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"tenant_brand\":\"$(json_escape "$APP_TENANT_BRAND")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\",\"auth_mode\":\"lark-cli\"}"
   fi
 }
 
@@ -5002,11 +5042,13 @@ run_internal_ensure_profile() {
   APP_ID="$(binding_json_field bot.app_id)"
   APP_SECRET="$(binding_json_field bot.app_secret)"
   BOT_NAME="$(binding_json_field bot.display_name)"
+  APP_TENANT_BRAND="$(binding_json_field bot.tenant_brand)"
+  APP_TENANT_BRAND="${APP_TENANT_BRAND:-feishu}"
   LARK_CLI_PROFILE="$(binding_json_field bot.lark_cli_profile)"
   [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] && [ -n "$LARK_CLI_PROFILE" ] || agent_fail "binding is missing Feishu credentials or profile"
   AAMP_TASK_INTERNAL_BINDING_JSON=""
   source_lark_env
-  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE" "$APP_TENANT_BRAND"
   APP_SECRET=""
   emit_internal_result "{\"lark_cli_bin\":\"$(json_escape "$LARK_CLI_CMD")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
 }

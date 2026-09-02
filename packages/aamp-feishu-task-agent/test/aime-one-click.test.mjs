@@ -1239,14 +1239,16 @@ test('Feishu startup argv branches by execution metadata without leaking app sec
     '--target-agent', 'agent@meshmail.ai',
     '--app-id', 'cli_remote',
     '--bot-name', 'Remote AIME',
+    '--domain', 'https://open.feishu.cn',
     '--json',
   ])
   assert.doesNotMatch(remote.join(' '), /--use-feishu-cli|--feishu-cli-profile|--feishu-cli-bin|remote-app-secret-sentinel/)
 
   const local = module.feishuArgs(localBinding, '/safe/bin/lark-cli', target)
-  assert.deepEqual(local.slice(-10), [
+  assert.deepEqual(local.slice(-12), [
     '--app-id', 'cli_local',
     '--bot-name', 'Remote AIME',
+    '--domain', 'https://open.feishu.cn',
     '--use-feishu-cli',
     '--feishu-cli-profile', 'local-profile',
     '--feishu-cli-bin', '/safe/bin/lark-cli',
@@ -1254,6 +1256,39 @@ test('Feishu startup argv branches by execution metadata without leaking app sec
   ])
   assert.ok(local.includes('--agent-execution-location'))
   assert.equal(local[local.indexOf('--agent-execution-location') + 1], 'local')
+})
+
+test('Feishu startup argv selects the OpenAPI domain from the registered tenant brand', async () => {
+  const module = await import(pathToFileURL(controller).href)
+  const target = { agentTargetEmail: 'agent@meshmail.ai' }
+  const base = {
+    agent_type: 'aime',
+    aamp_host: 'https://meshmail.ai',
+    feishu_config_dir: '/safe/remote-feishu-config',
+    bot: {
+      app_id: 'cli_domain',
+      app_secret: 'domain-secret-sentinel',
+      display_name: 'Domain Bot',
+    },
+  }
+  const cases = [
+    ['lark', 'https://open.larksuite.com'],
+    ['feishu', 'https://open.feishu.cn'],
+    [undefined, 'https://open.feishu.cn'],
+  ]
+
+  for (const [tenantBrand, expectedDomain] of cases) {
+    const binding = {
+      ...base,
+      bot: {
+        ...base.bot,
+        ...(tenantBrand ? { tenant_brand: tenantBrand } : {}),
+      },
+    }
+    const args = module.feishuArgs(binding, '/safe/bin/lark-cli', target)
+    assert.equal(args[args.indexOf('--domain') + 1], expectedDomain, String(tenantBrand))
+    assert.doesNotMatch(args.join(' '), /domain-secret-sentinel/)
+  }
 })
 
 test('remote managed startup sanitizes real child output and uses location-aware startup copy', async () => {
