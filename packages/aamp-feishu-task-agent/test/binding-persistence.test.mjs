@@ -262,11 +262,93 @@ test('declining a replacement returns to the continue-selection prompt', () => {
 test('selection copy allows both local and remote agents', () => {
   const source = readFileSync(controllerPath, 'utf8')
   const create = functionRange(source, 'async function createDraft(', 'async function runBindingSession(')
-  const discover = functionRange(source, 'async function discoverAgents()', 'async function createDraft(')
+  const discover = functionRange(source, 'async function discoverAgents(', 'async function createDraft(')
 
   assert.match(create, /请选择要绑定的智能体：/)
   assert.match(discover, /暂未检测到智能体/)
   assert.doesNotMatch(create, /请选择要绑定的本地智能体：/)
+})
+
+test('draft registration and CLI tenant lookup complete before agent selection', async () => {
+  const calls = []
+  const registered = {
+    app_id: 'cli_ordered',
+    app_secret: 'secret-ordered',
+    display_name: 'Ordered Bot',
+    tenant_brand: 'feishu',
+    tenant_key: '736588c9260f175d',
+    lark_cli_profile: 'profile-ordered',
+  }
+  const draft = await controller.createDraft(new Set(), {
+    registerBinding: async () => {
+      calls.push('register-and-login')
+      return registered
+    },
+    discoverAgents: async (tenantKey) => {
+      assert.deepEqual(calls, ['register-and-login'])
+      assert.equal(tenantKey, '736588c9260f175d')
+      calls.push('discover')
+      return ['codex', 'aime']
+    },
+    chooseAgent: async (agents) => {
+      assert.deepEqual(agents, ['codex', 'aime'])
+      calls.push('choose')
+      return 'codex'
+    },
+    defaultAgent: '',
+    bindingId: '66666666-6666-4666-8666-666666666666',
+    timestamp: '2026-09-04T00:00:00.000Z',
+  })
+
+  assert.deepEqual(calls, ['register-and-login', 'discover', 'choose'])
+  assert.equal(draft.agent_type, 'codex')
+  assert.equal(draft.bot.app_id, 'cli_ordered')
+})
+
+test('explicit AIME selection cannot bypass tenant-filtered discovery', async () => {
+  await assert.rejects(
+    controller.createDraft(new Set(), {
+      registerBinding: async () => ({
+        app_id: 'cli_external',
+        app_secret: 'secret-external',
+        display_name: 'External Bot',
+        tenant_brand: 'feishu',
+        tenant_key: 'external-tenant-key',
+        lark_cli_profile: 'profile-external',
+      }),
+      discoverAgents: async () => ['codex', 'aime'],
+      chooseAgent: async () => assert.fail('explicit selection must not open the menu'),
+      defaultAgent: 'aime',
+    }),
+    /AIME.*字节租户/,
+  )
+})
+
+test('unknown tenant still allows non-AIME agent selection', async () => {
+  const draft = await controller.createDraft(new Set(), {
+    registerBinding: async () => ({
+      app_id: 'cli_unknown_tenant',
+      app_secret: 'secret-unknown-tenant',
+      display_name: 'Unknown Tenant Bot',
+      tenant_brand: 'feishu',
+      tenant_key: '',
+      lark_cli_profile: 'profile-unknown-tenant',
+    }),
+    discoverAgents: async (tenantKey) => {
+      assert.equal(tenantKey, '')
+      return ['codex', 'aime']
+    },
+    chooseAgent: async (agents) => {
+      assert.deepEqual(agents, ['codex'])
+      return 'codex'
+    },
+    defaultAgent: '',
+    bindingId: '77777777-7777-4777-8777-777777777777',
+    timestamp: '2026-09-04T00:00:00.000Z',
+  })
+
+  assert.equal(draft.agent_type, 'codex')
+  assert.equal(draft.bot.app_id, 'cli_unknown_tenant')
 })
 
 test('install saves draft intents then launches all accepted bindings in selection order', () => {
@@ -322,12 +404,31 @@ test('add accepts reused bindings without persisting or starting them', () => {
   assert.match(runAdd, /if \(!result\.acceptedBindings\.length\)/)
 })
 
-test('install completion distinguishes accepted bindings from newly saved bindings', () => {
-  const source = readFileSync(controllerPath, 'utf8')
-  const runInstall = functionRange(source, 'async function runInstall()', 'async function runAdd()')
-
-  assert.match(runInstall, /if \(!result\.acceptedBindings\.length\)/)
-  assert.match(runInstall, /\$\{result\.acceptedBindings\.length\} 个绑定配置已保存/)
+test('install completion distinguishes accepted bindings from newly saved bindings', async () => {
+  const acceptedBindings = [
+    { binding_id: 'accepted-a', agent_type: 'codex' },
+    { binding_id: 'accepted-b', agent_type: 'cursor' },
+  ]
+  const result = {
+    acceptedBindings,
+    saved: [],
+    selectedCount: 2,
+    running: [],
+    failed: acceptedBindings.map((binding) => ({ binding, reason: 'startup failed' })),
+    cancelled: [],
+    selectionFailures: [],
+    groups: new Map(),
+  }
+  const originalLog = console.log
+  console.log = () => {}
+  try {
+    await assert.rejects(
+      controller.finalizeInstallRuntime(result, { shutdown: async () => {} }),
+      /2 个绑定配置已保存/,
+    )
+  } finally {
+    console.log = originalLog
+  }
 })
 
 test('saved binding output does not use the ready-state green icon', () => {

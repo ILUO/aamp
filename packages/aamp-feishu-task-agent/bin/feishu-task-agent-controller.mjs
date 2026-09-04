@@ -38,10 +38,19 @@ import {
   safeDiagnosticUrl,
   withNetworkRetry,
 } from './runtime-network.mjs';
+import {
+  createLaunchdServiceManager,
+  findOwnedControllerPids,
+  readProcessIdentity,
+  stopOwnedControllerProcesses,
+} from './launchd-service.mjs';
 
 process.umask(0o077);
 
 const COMMAND = process.argv[2] || 'help';
+const NON_INTERACTIVE = COMMAND === '__service-run'
+  || process.env.AAMP_TASK_NON_INTERACTIVE === 'true';
+const CONTROLLER_PATH = path.resolve(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
 const STATE_HOME = process.env.AAMP_TASK_STATE_HOME || path.join(HOME, '.aamp', 'feishu-task-agent');
 const CONFIG_FILE = process.env.AAMP_TASK_CONFIG_FILE || path.join(STATE_HOME, 'bindings-v1.json');
@@ -68,10 +77,31 @@ const DEFAULT_AGENT = process.env.AAMP_TASK_DEFAULT_AGENT || '';
 const DEFAULT_AAMP_HOST = process.env.AAMP_TASK_AAMP_HOST || 'https://meshmail.ai';
 const DEBUG_MODE = process.env.AAMP_TASK_DEBUG_MODE === 'true';
 const READY_TIMEOUT_MS = Number(process.env.AAMP_TASK_READY_TIMEOUT_MS || 90_000);
+const FOREGROUND_MODE = process.env.AAMP_TASK_FOREGROUND === 'true';
+const SERVICE_BOOTSTRAP = BOOTSTRAP || path.join(HOME, '.aamp', 'bin', 'feishu-task-agent');
+const SERVICE_PATH = [...new Set([
+  path.dirname(process.execPath),
+  ...(path.isAbsolute(NPM_BIN) ? [path.dirname(NPM_BIN)] : []),
+  ...String(process.env.PATH || '').split(path.delimiter),
+  '/usr/local/bin',
+  '/opt/homebrew/bin',
+  '/usr/bin',
+  '/bin',
+  '/usr/sbin',
+  '/sbin',
+].filter(Boolean))].join(path.delimiter);
+const launchdService = createLaunchdServiceManager({
+  home: HOME,
+  uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+  platform: process.platform,
+  bootstrapPath: SERVICE_BOOTSTRAP,
+  pathValue: SERVICE_PATH,
+});
 const NETWORK_MAX_ATTEMPTS = Math.max(1, Number(process.env.AAMP_TASK_NETWORK_MAX_ATTEMPTS || 3));
 const NETWORK_RETRY_BASE_DELAY_MS = Math.max(0, Number(process.env.AAMP_TASK_NETWORK_RETRY_BASE_DELAY_MS || 500));
 const NETWORK_PROBE_TIMEOUT_MS = Math.max(1_000, Number(process.env.AAMP_TASK_NETWORK_PROBE_TIMEOUT_MS || 10_000));
 const FEISHU_START_CONCURRENCY = 4;
+const AIME_ALLOWED_TENANT_KEY = '736588c9260f175d';
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
 const PROFILE_DOMAINS = ['task'];
@@ -108,6 +138,7 @@ const manifestWriter = createSerializedRunner(async () => {
 let stopRequested = false;
 let stopSignal = '';
 let terminal;
+let processStartedAtPromise;
 
 function createResourceCleanup(drain) {
   const runner = createSerializedRunner(drain);
@@ -138,6 +169,13 @@ const promptInterrupter = createPromptInterrupter();
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+async function currentProcessStartedAt() {
+  processStartedAtPromise ||= readProcessIdentity(process.pid)
+    .then((identity) => identity?.startedAt || '')
+    .catch(() => '');
+  return processStartedAtPromise;
 }
 
 function terminalStreams() {
@@ -602,11 +640,15 @@ async function acquireDirectoryLock(lockDir, label, timeoutMs = 10_000) {
   while (Date.now() - started < timeoutMs) {
     try {
       await fsp.mkdir(lockDir, { mode: 0o700 });
+      const processStartedAt = await currentProcessStartedAt();
       await writeJsonAtomic(path.join(lockDir, 'owner.json'), {
         pid: process.pid,
         run_id: RUN_ID,
         label,
         created_at: nowIso(),
+        controller_path: CONTROLLER_PATH,
+        runtime_home: RUNTIME_HOME,
+        ...(processStartedAt ? { process_started_at: processStartedAt } : {}),
       });
       return async () => {
         await fsp.rm(lockDir, { recursive: true, force: true }).catch(() => {});
@@ -676,14 +718,14 @@ async function hasActiveAgentLease() {
 
 async function acquireRuntimeSessionLease(action) {
   if (await hasActiveAgentLease()) {
-    throw new Error(`检测到已有 feishu-task-agent 正在运行。请先回到之前启动的终端，按 Ctrl+C 关闭后再运行 feishu-task-agent ${action}`);
+    throw new Error(`检测到已有 feishu-task-agent 正在运行。请先执行 feishu-task-agent status 查看状态；如需重启，执行 feishu-task-agent stop 后再运行 feishu-task-agent ${action}`);
   }
   let release;
   try {
     release = await acquireDirectoryLock(RUNTIME_SESSION_LOCK, 'Bridge 启动流程', 1_500);
   } catch (error) {
     if (String(error?.message || error).includes('正在被另一个 feishu-task-agent 进程使用')) {
-      throw new Error(`检测到已有 feishu-task-agent 正在运行。请先回到之前启动的终端，按 Ctrl+C 关闭后再运行 feishu-task-agent ${action}`);
+      throw new Error(`检测到已有 feishu-task-agent 正在运行。请先执行 feishu-task-agent status 查看状态；如需重启，执行 feishu-task-agent stop 后再运行 feishu-task-agent ${action}`);
     }
     throw error;
   }
@@ -1285,17 +1327,18 @@ async function runBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
     : bindingOrAgent;
   let executionLocation = 'local';
   if (helperAgent) executionLocation = resolveTaskAgentMetadata(helperAgent).executionLocation;
-  const input = executionLocation === 'remote' && !process.stdin.isTTY
-    ? process.stdin
-    : terminalStreams().input;
   const helperEnv = { ...extraEnv };
+  const nonInteractive = NON_INTERACTIVE
+    || helperEnv.AAMP_TASK_NON_INTERACTIVE === 'true';
+  if (nonInteractive) helperEnv.AAMP_TASK_NON_INTERACTIVE = 'true';
   const inputPayload = helperEnv.AAMP_TASK_INTERNAL_BINDING_JSON || '';
   delete helperEnv.AAMP_TASK_INTERNAL_BINDING_JSON;
   const remoteHelper = executionLocation === 'remote';
   const helperProcessGroup = remoteHelper && process.platform !== 'win32';
   // node (v25) aborts at startup when spawned detached with a /dev/tty stdin.
-  // Remote helpers never read stdin (interactive prompts use /dev/tty directly).
-  const helperStdin = remoteHelper ? 'ignore' : input;
+  // Remote helpers and service workers never read stdin. Interactive preparation
+  // is completed by the foreground process before launchd takes ownership.
+  const helperStdin = remoteHelper || nonInteractive ? 'ignore' : terminalStreams().input;
   const helperOutputOptions = {
     executionLocation,
     agentExecutionLocations: trustedAgentExecutionLocations(
@@ -1787,6 +1830,9 @@ function groupProcessExecutionLocation(agents) {
 
 async function initializeAgentGroups(bindings, operations = {}) {
   const prepareAgent = operations.runBootstrapHelper || runBootstrapHelper;
+  const prepareAgentEnv = operations.nonInteractive
+    ? { AAMP_TASK_NON_INTERACTIVE: 'true' }
+    : {};
   const byHost = new Map();
   for (const binding of bindings) {
     if (!byHost.has(binding.aamp_host)) byHost.set(binding.aamp_host, new Map());
@@ -1832,7 +1878,7 @@ async function initializeAgentGroups(bindings, operations = {}) {
         group.leases.set(agentType, lease);
         const metadata = resolveTaskAgentMetadata(agentType);
         console.log(`[aamp-one-click] 正在检查 ${agentSelectionDisplayName(agentType)} ${metadata.executionLocation === 'remote' ? '远程智能体' : '本地智能体'}...`);
-        const prepared = await prepareAgent('__prepare-agent', sampleBinding);
+        const prepared = await prepareAgent('__prepare-agent', sampleBinding, prepareAgentEnv);
         throwIfStopping();
         runtimeAgentType = prepared.agent_type || agentType;
         if (prepared.cancelled === true) {
@@ -2907,6 +2953,7 @@ async function orchestrateStartupBindings(
   bindings,
   existingGroups,
   operations = startupOrchestrationOperations,
+  runtimeOptions = {},
 ) {
   const validationFailures = [];
   const onlineBindings = [];
@@ -2928,7 +2975,10 @@ async function orchestrateStartupBindings(
   let groups = existingGroups;
   let profileProbes;
   if (!groups) {
-    const initialization = Promise.resolve().then(() => operations.initializeAgentGroups(onlineBindings));
+    const initialization = Promise.resolve().then(() => operations.initializeAgentGroups(
+      onlineBindings,
+      runtimeOptions,
+    ));
     const probing = operations.probeReadyBindingProfiles
       ? Promise.resolve().then(() => operations.probeReadyBindingProfiles(onlineBindings))
       : Promise.resolve(new Map());
@@ -2963,8 +3013,14 @@ async function dispatchStartupResult(result, operations) {
   return operations.allFailed();
 }
 
-async function startSelectedBindings(bindings, existingGroups) {
-  const result = await orchestrateStartupBindings(bindings, existingGroups);
+async function startSelectedBindings(bindings, existingGroups, options = {}) {
+  const orchestrate = options.orchestrate || orchestrateStartupBindings;
+  const result = await orchestrate(
+    bindings,
+    existingGroups,
+    undefined,
+    { nonInteractive: Boolean(options.serviceWorker) },
+  );
   printStartupSummary({
     title: '已成功启动',
     plannedCount: bindings.length,
@@ -2972,10 +3028,29 @@ async function startSelectedBindings(bindings, existingGroups) {
     failed: result.failed,
     cancelled: result.cancelled,
   });
+  if (options.serviceWorker && result.running.length !== bindings.length) {
+    const shutdown = options.shutdown || shutdownGroups;
+    await shutdown(result.groups);
+    throw new Error(`后台服务绑定未全部启动（${result.running.length}/${bindings.length}），将由 launchd 稍后重试`);
+  }
   await dispatchStartupResult(result, {
     supervise: async (running, groups) => {
-      console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
-      await supervise(running, groups);
+      if (!options.background) {
+        console.log(options.serviceWorker
+          ? '🟢 Task Agent 后台服务运行中'
+          : '🟢 保持终端打开，你可以给 agent 派发飞书任务');
+      }
+      const runtime = await continueStartedRuntime({
+        background: Boolean(options.background),
+        serviceWorker: Boolean(options.serviceWorker),
+        serviceGeneration: options.serviceGeneration,
+        bindings: running.map((item) => item.binding),
+        running,
+        groups,
+      }, options.runtimeOperations);
+      if (runtime.mode === 'background') {
+        console.log(`🟢 后台服务已启动${runtime.pid ? `（PID ${runtime.pid}）` : ''}，现在可以关闭终端。`);
+      }
     },
     shutdown: shutdownGroups,
     onlyCancelled: async () => {},
@@ -3104,11 +3179,13 @@ function displayBindings(bindings) {
   rows.forEach((row) => console.log(`${row.index.padEnd(widths.index)}  ${row.agent.padEnd(widths.agent)}  ${row.bot.padEnd(widths.bot)}  ${row.appId.padEnd(widths.appId)}  ${row.environment.padEnd(6)}  ${row.state}`));
 }
 
-async function discoverAgents() {
-  const result = await runBootstrapHelper('__discover-agents', '');
+async function discoverAgents(tenantKey) {
+  const result = await runBootstrapHelper('__discover-agents', '', {
+    AAMP_TASK_USER_TENANT_KEY: tenantKey || '',
+  });
   const agents = (result.agents || []).filter((agent) => TASK_AGENT_TYPES.includes(agent));
   if (!agents.length) {
-    throw new Error('暂未检测到智能体。请先安装 Codex、Cursor、Trae CLI、TraeCode CLI、WorkBuddy 或 WorkBuddy AI，或连接公司内网使用 AIME。');
+    throw new Error('暂未检测到智能体。请先安装 Codex、Cursor、Trae CLI、TraeCode CLI、WorkBuddy 或 WorkBuddy AI；AIME 仅对已登录的字节租户开放。');
   }
   return agents;
 }
@@ -3134,20 +3211,39 @@ function buildPendingBinding(agent, registered, bindingId = randomId(), timestam
   };
 }
 
-async function createDraft(agents, selectedAppIds) {
-  const agent = DEFAULT_AGENT || await chooseOne('请选择要绑定的智能体：', agents, agentSelectionDisplayName);
-  const registered = await runBootstrapHelper('__register-binding', agent);
+async function createDraft(selectedAppIds, overrides = {}) {
+  const registerBinding = overrides.registerBinding
+    || (() => runBootstrapHelper('__register-binding', ''));
+  const discoverAvailableAgents = overrides.discoverAgents || discoverAgents;
+  const chooseAgent = overrides.chooseAgent
+    || ((agents) => chooseOne('请选择要绑定的智能体：', agents, agentSelectionDisplayName));
+  const defaultAgent = overrides.defaultAgent ?? DEFAULT_AGENT;
+  const registered = await registerBinding();
   addSecret(registered.app_secret);
-  const metadata = resolveTaskAgentMetadata(agent);
-  if (!registered.app_id || !registered.app_secret
-    || (metadata.executionLocation === 'local' && !registered.lark_cli_profile)) {
+  if (!registered.app_id || !registered.app_secret || !registered.lark_cli_profile) {
     throw new Error('飞书应用授权结果不完整');
   }
+  const tenantKey = typeof registered.tenant_key === 'string' ? registered.tenant_key.trim() : '';
+  const detectedAgents = await discoverAvailableAgents(tenantKey);
+  const agents = detectedAgents.filter((candidate) => (
+    candidate !== 'aime' || tenantKey === AIME_ALLOWED_TENANT_KEY
+  ));
+  const agent = defaultAgent || await chooseAgent(agents);
+  if (!agents.includes(agent)) {
+    if (agent === 'aime') throw new Error('AIME 仅对字节租户开放；当前飞书 CLI 登录账号不可用');
+    throw new Error(`未检测到指定智能体：${agent}`);
+  }
+  const metadata = resolveTaskAgentMetadata(agent);
   if (selectedAppIds.has(registered.app_id)) {
     throw new Error(`Bot ${registered.app_id} 已经选择过，不能重复绑定`);
   }
   selectedAppIds.add(registered.app_id);
-  return buildPendingBinding(agent, registered);
+  return buildPendingBinding(
+    agent,
+    registered,
+    overrides.bindingId,
+    overrides.timestamp,
+  );
 }
 
 async function runBindingSession(mode) {
@@ -3155,8 +3251,6 @@ async function runBindingSession(mode) {
   throwIfStopping();
   const existingByAppId = new Map(store.bindings.map((binding) => [binding.bot.app_id, binding]));
   const selectedAppIds = new Set();
-  const agents = DEFAULT_AGENT ? [DEFAULT_AGENT] : await discoverAgents();
-  throwIfStopping();
   const bindingIntents = [];
   const acceptedBindings = [];
   const selectedBindings = [];
@@ -3172,7 +3266,7 @@ async function runBindingSession(mode) {
   while (keepGoing) {
     throwIfStopping();
     try {
-      const draft = await createDraft(agents, selectedAppIds);
+      const draft = await createDraft(selectedAppIds);
       throwIfStopping();
       selectedCount += 1;
       const existing = existingByAppId.get(draft.bot.app_id);
@@ -3282,23 +3376,7 @@ async function runBindingSession(mode) {
   };
 }
 
-async function runInstall() {
-  const result = await withMutationLock('install 绑定流程', async () => {
-    const bound = await runBindingSession('install');
-    throwIfStopping();
-    const composed = await reconcileStartupResults(bound.selectedBindings, {
-      running: bound.running,
-      failed: bound.failed,
-      cancelled: bound.cancelled,
-    });
-    throwIfStopping();
-    bound.running = composed.running;
-    bound.failed = composed.failed;
-    bound.cancelled = composed.cancelled;
-    bound.disposition = composed.disposition;
-    return bound;
-  });
-
+async function finalizeInstallRuntime(result, options = {}) {
   if (!result.acceptedBindings.length) {
     if (result.cancelled.length && !result.selectionFailures.length) {
       printStartupSummary({
@@ -3322,17 +3400,48 @@ async function runInstall() {
   await dispatchStartupResult(result, {
     extraFailureCount: result.selectionFailures.length,
     supervise: async (running, groups) => {
-      console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
+      if (!options.background) console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
       if (result.selectionFailures.length) {
         console.log(`另有 ${result.selectionFailures.length} 次选择未完成，详情见上方信息和本地日志。`);
       }
-      await supervise(running, groups);
+      const continueRuntime = options.continueRuntime || continueStartedRuntime;
+      const runtime = await continueRuntime({
+        background: Boolean(options.background),
+        serviceWorker: false,
+        bindings: running.map((item) => item.binding),
+        running,
+        groups,
+      });
+      if (runtime.mode === 'background') {
+        console.log(`🟢 后台服务已启动${runtime.pid ? `（PID ${runtime.pid}）` : ''}，现在可以关闭终端。`);
+      }
     },
-    shutdown: shutdownGroups,
+    shutdown: options.shutdown || shutdownGroups,
     onlyCancelled: async () => {},
     allFailed: async () => {
       throw new Error(`全部配置启动失败；${result.acceptedBindings.length} 个绑定配置已保存，可稍后运行 feishu-task-agent start 重试`);
     },
+  });
+}
+
+async function runInstall() {
+  const result = await withMutationLock('install 绑定流程', async () => {
+    const bound = await runBindingSession('install');
+    throwIfStopping();
+    const composed = await reconcileStartupResults(bound.selectedBindings, {
+      running: bound.running,
+      failed: bound.failed,
+      cancelled: bound.cancelled,
+    });
+    throwIfStopping();
+    bound.running = composed.running;
+    bound.failed = composed.failed;
+    bound.cancelled = composed.cancelled;
+    bound.disposition = composed.disposition;
+    return bound;
+  });
+  await finalizeInstallRuntime(result, {
+    background: shouldUseBackgroundService('install'),
   });
 }
 
@@ -3379,16 +3488,228 @@ async function runRemove() {
   console.log(`已移除 ${removed} 个绑定配置；当前已经运行的 Bridge 不受影响。`);
 }
 
-async function runStart() {
-  const store = await loadStore();
-  if (!store.bindings.length) {
+function selectServiceBindings(bindings, bindingIds) {
+  if (!bindingIds?.length) return [...bindings];
+  const byId = new Map(bindings.map((binding) => [binding.binding_id, binding]));
+  return bindingIds.map((bindingId) => byId.get(bindingId)).filter(Boolean);
+}
+
+function shouldUseBackgroundService(command, platform = process.platform, foreground = FOREGROUND_MODE) {
+  return platform === 'darwin' && !foreground && (command === 'install' || command === 'start');
+}
+
+async function handoffToBackground(bindings, operations = {}) {
+  const cleanupRuntime = operations.cleanupRuntime || cleanupAll;
+  const startService = operations.startService || ((bindingIds) => launchdService.start(bindingIds));
+  await cleanupRuntime();
+  return startService(bindings.map((binding) => binding.binding_id));
+}
+
+async function continueStartedRuntime(runtime, operations = {}) {
+  const handoff = operations.handoff || handoffToBackground;
+  const superviseRuntime = operations.superviseRuntime || supervise;
+  if (runtime.background) {
+    const service = await handoff(runtime.bindings);
+    return { mode: 'background', state: service.state, pid: service.pid };
+  }
+  if (runtime.serviceWorker) {
+    const markServiceReady = operations.markServiceReady
+      || ((bindings, generation) => launchdService.markReady(
+        bindings.map((binding) => binding.binding_id),
+        generation,
+      ));
+    await markServiceReady(runtime.bindings, runtime.serviceGeneration);
+  }
+  await superviseRuntime(runtime.running, runtime.groups);
+  return { mode: runtime.serviceWorker ? 'service' : 'foreground' };
+}
+
+async function resolveManagedRuntimeStatus(operations = {}) {
+  const launchdStatus = operations.launchdStatus || (process.platform === 'darwin'
+    ? () => launchdService.status()
+    : async () => ({ loaded: false, state: 'stopped', pid: null }));
+  const foregroundPids = operations.foregroundPids || (() => findOwnedControllerPids({
+    leasesHome: LEASES_HOME,
+    expectedControllerPath: CONTROLLER_PATH,
+    expectedRuntimeHome: RUNTIME_HOME,
+  }));
+  const service = await launchdStatus();
+  const pids = await foregroundPids();
+  if (service.loaded) {
+    return {
+      mode: 'background',
+      state: service.state,
+      pid: service.pid,
+      pids,
+    };
+  }
+  if (pids.length) {
+    return {
+      mode: 'foreground',
+      state: 'running',
+      pid: pids[0],
+      pids,
+    };
+  }
+  return { mode: 'stopped', state: 'stopped', pid: null, pids: [] };
+}
+
+async function stopManagedRuntime(operations = {}) {
+  const stopLaunchd = operations.stopLaunchd || (process.platform === 'darwin'
+    ? () => launchdService.stop()
+    : async () => ({ stopped: true, wasLoaded: false }));
+  const discoverOwnedControllerPids = () => findOwnedControllerPids({
+    leasesHome: LEASES_HOME,
+    expectedControllerPath: CONTROLLER_PATH,
+    expectedRuntimeHome: RUNTIME_HOME,
+  });
+  const foregroundPids = operations.foregroundPids || discoverOwnedControllerPids;
+  const stopForeground = operations.stopForeground || ((pids) => stopOwnedControllerProcesses({
+    pids,
+    validateProcess: async (pid) => (await discoverOwnedControllerPids()).includes(pid),
+  }));
+  const launchd = await stopLaunchd();
+  const pids = await foregroundPids();
+  const foreground = pids.length
+    ? await stopForeground(pids)
+    : { stopped: [], remaining: [] };
+  if (foreground.remaining.length) {
+    throw new Error(`以下 Task Agent 进程未能停止：${foreground.remaining.join(', ')}`);
+  }
+  return { launchd: launchd.wasLoaded, stoppedPids: foreground.stopped };
+}
+
+async function runServiceLifecycleCommand(command, operations = {}) {
+  const log = operations.log || console.log;
+  if (command === 'status') {
+    const getStatus = operations.getStatus || resolveManagedRuntimeStatus;
+    const status = await getStatus();
+    if (status.mode === 'background') {
+      if (status.state === 'running' && status.pid) {
+        log(`🟢 Task Agent 正在后台运行（PID ${status.pid}），终端可以关闭。`);
+      } else {
+        log(`🟡 Task Agent 后台服务已加载但未运行（状态：${status.state}）；请执行 feishu-task-agent logs 查看原因。`);
+      }
+    } else if (status.mode === 'foreground') {
+      log(`🟡 Task Agent 正在旧版前台模式运行（PID ${status.pid}）；可执行 feishu-task-agent stop 安全停止。`);
+    } else {
+      log('⚪ Task Agent 当前未运行。');
+    }
+    return status;
+  }
+  if (command === 'stop') {
+    const stopRuntime = operations.stopRuntime || stopManagedRuntime;
+    const result = await stopRuntime();
+    log(result.launchd || result.stoppedPids.length
+      ? '🟢 Task Agent 已停止。'
+      : '⚪ Task Agent 当前未运行。');
+    return result;
+  }
+  if (command === 'restart') {
+    if (process.platform !== 'darwin' && !operations.startService) {
+      throw new Error('后台服务当前仅支持 macOS；请使用 start --foreground');
+    }
+    const readSelection = operations.readSelection || (() => launchdService.selection());
+    const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
+    const stopRuntime = operations.stopRuntime || stopManagedRuntime;
+    const startService = operations.startService || ((bindingIds) => launchdService.start(bindingIds));
+    const savedBindingIds = await readSelection();
+    const bindingIds = selectServiceBindings(await loadBindings(), savedBindingIds)
+      .map((binding) => binding.binding_id);
+    if (!bindingIds.length) throw new Error('未找到已经绑定的智能体-Bot 配置，请先运行 install');
+    await stopRuntime();
+    const result = await startService(bindingIds);
+    log(`🟢 Task Agent 已重新启动${result.pid ? `（PID ${result.pid}）` : ''}。`);
+    return result;
+  }
+  if (command === 'logs') {
+    const recentLogs = operations.recentLogs || (() => launchdService.recentLogs(100));
+    const logFile = operations.logFile || launchdService.paths.logFile;
+    const content = await recentLogs();
+    log(`后台日志：${logFile}`);
+    log(content || '暂无后台日志。');
+    return content;
+  }
+  throw new Error(`unknown service lifecycle command: ${command}`);
+}
+
+async function runStart(operations = {}) {
+  const background = operations.background ?? shouldUseBackgroundService('start');
+  const log = operations.log || console.log;
+  const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
+  const availableBindings = await loadBindings();
+  if (!availableBindings.length) {
     console.error('未找到已经绑定的智能体-Bot 配置，请先运行安装命令重新绑定：');
     console.error(`  ${INSTALL_COMMAND}`);
     process.exitCode = 1;
     return;
   }
-  const selected = await chooseMany('请选择要启动的绑定配置：', store.bindings, bindingLabel);
-  await startSelectedBindings(selected);
+  if (background) {
+    const getStatus = operations.getStatus || resolveManagedRuntimeStatus;
+    const status = await getStatus();
+    if (status.mode === 'background') {
+      if (status.state === 'running' && status.pid) {
+        log(`🟢 Task Agent 已经在后台运行（PID ${status.pid}），无需重复启动。`);
+        return status;
+      }
+      const readSelection = operations.readSelection || (() => launchdService.selection());
+      const resumeService = operations.resumeService || ((bindingIds) => launchdService.start(bindingIds));
+      const savedBindingIds = await readSelection();
+      const selectedIds = selectServiceBindings(availableBindings, savedBindingIds)
+        .map((binding) => binding.binding_id);
+      if (!selectedIds.length) throw new Error('后台服务选择的绑定配置已被移除，请运行 feishu-task-agent stop 后重新 start');
+      const resumed = await resumeService(selectedIds);
+      log(`🟢 Task Agent 后台服务已启动${resumed.pid ? `（PID ${resumed.pid}）` : ''}。`);
+      return resumed;
+    }
+    if (status.mode === 'foreground') {
+      log(`🟡 Task Agent 已在旧版前台模式运行（PID ${status.pid}）；如需切换后台，请先执行 feishu-task-agent stop。`);
+      return status;
+    }
+  }
+  const acquireLease = operations.acquireLease || (() => acquireRuntimeSessionLease('start'));
+  const chooseBindings = operations.chooseBindings
+    || ((prompt, bindings) => chooseMany(prompt, bindings, bindingLabel));
+  const startBindings = operations.startBindings || startSelectedBindings;
+  await acquireLease();
+  const selected = await chooseBindings('请选择要启动的绑定配置：', availableBindings);
+  await startBindings(selected, undefined, { background });
+}
+
+async function runServiceWorker(operations = {}) {
+  const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
+  const readSelectionSnapshot = operations.readSelectionSnapshot
+    || (() => launchdService.selectionSnapshot());
+  const acquireLease = operations.acquireLease || (() => acquireRuntimeSessionLease('__service-run'));
+  const startBindings = operations.startBindings || startSelectedBindings;
+  const availableBindings = await loadBindings();
+  const selectionSnapshot = await readSelectionSnapshot();
+  if (!selectionSnapshot?.generation) throw new Error('后台服务选择配置缺少启动代次，请重新运行 start');
+  const selected = selectServiceBindings(availableBindings, selectionSnapshot.bindingIds);
+  if (!selected.length) throw new Error('后台服务没有可启动的绑定配置，请重新运行 install');
+  await acquireLease();
+  await startBindings(selected, undefined, {
+    serviceWorker: true,
+    serviceGeneration: selectionSnapshot.generation,
+  });
+}
+
+async function dispatchControllerCommand(command, operations = {}) {
+  if (command === 'install') {
+    const acquireLease = operations.acquireLease || acquireRuntimeSessionLease;
+    await acquireLease('install');
+    return (operations.install || runInstall)();
+  }
+  if (command === 'start') return (operations.start || runStart)();
+  if (command === '__service-run') return (operations.serviceWorker || runServiceWorker)();
+  if (['status', 'stop', 'restart', 'logs'].includes(command)) {
+    const lifecycle = operations.lifecycle || runServiceLifecycleCommand;
+    return lifecycle(command);
+  }
+  if (command === 'list') return (operations.list || runList)();
+  if (command === 'add') return (operations.add || runAdd)();
+  if (command === 'remove') return (operations.remove || runRemove)();
+  throw new Error(`unknown controller command: ${command}`);
 }
 
 async function main() {
@@ -3398,26 +3719,7 @@ async function main() {
   await ensurePrivateDir(RUN_LOG_DIR);
   await fsp.writeFile(ERRORS_LOG, '', { mode: 0o600, flag: 'a' });
   await writeManifest();
-  if (COMMAND === 'install' || COMMAND === 'start') await acquireRuntimeSessionLease(COMMAND);
-  switch (COMMAND) {
-    case 'install':
-      await runInstall();
-      break;
-    case 'start':
-      await runStart();
-      break;
-    case 'list':
-      await runList();
-      break;
-    case 'add':
-      await runAdd();
-      break;
-    case 'remove':
-      await runRemove();
-      break;
-    default:
-      throw new Error(`unknown controller command: ${COMMAND}`);
-  }
+  await dispatchControllerCommand(COMMAND);
 }
 
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
@@ -3462,12 +3764,15 @@ if (isMainModule) {
 
 export {
   buildPendingBinding,
+  createDraft,
   bindingExpectation,
   acpBridgeAgentPolicy,
   commitPreparedAgentBindings,
+  continueStartedRuntime,
   createPromptInterrupter,
   createResourceCleanup,
   dispatchStartupResult,
+  dispatchControllerCommand,
   executePreparedBindingStart,
   executePreparedPendingBindingStart,
   executePreparedReadyBindingStart,
@@ -3480,6 +3785,8 @@ export {
   resolveConfiguredPendingPairingFile,
   resolvePendingPairingFile,
   feishuArgs,
+  finalizeInstallRuntime,
+  handoffToBackground,
   prepareAndCommitAgentBindings,
   probeReadyBindingProfiles,
   reconcileStartupResults,
@@ -3488,6 +3795,7 @@ export {
   recordError,
   recordStableAgentFailure,
   resolvePreparedAgentBindings,
+  resolveManagedRuntimeStatus,
   orchestrateStartupBindings,
   runOverlappedStartup,
   runPreparedBindingStarts,
@@ -3495,9 +3803,16 @@ export {
   startBindingsWithGroups,
   startAgentGroups,
   startManagedProcess,
+  startSelectedBindings,
   runBootstrapHelper,
+  runServiceLifecycleCommand,
+  runServiceWorker,
+  runStart,
   setBindingStatus,
+  selectServiceBindings,
+  shouldUseBackgroundService,
   startupSummaryLines,
+  stopManagedRuntime,
   cleanupAll,
   upsertBindings,
   writeFeishuRuntimeProfile,

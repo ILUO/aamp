@@ -15,11 +15,14 @@ AAMP_HOST="https://meshmail.ai"
 DEBUG_MODE="false"
 AAMP_TASK_START_MODE="install"
 AAMP_TASK_ACTION=""
+AAMP_TASK_FOREGROUND="${AAMP_TASK_FOREGROUND:-false}"
 AAMP_TASK_ENTRY="${AAMP_TASK_ENTRY:-}"
 AAMP_TASK_INTERNAL="${AAMP_TASK_INTERNAL:-false}"
 AAMP_TASK_INTERNAL_RESULT_FD="${AAMP_TASK_INTERNAL_RESULT_FD:-3}"
 AAMP_TASK_INTERNAL_INPUT_FD="${AAMP_TASK_INTERNAL_INPUT_FD:-4}"
 AAMP_TASK_INTERNAL_EXECUTION_LOCATION="${AAMP_TASK_INTERNAL_EXECUTION_LOCATION:-}"
+AAMP_TASK_NON_INTERACTIVE="${AAMP_TASK_NON_INTERACTIVE:-false}"
+AAMP_TASK_USER_TENANT_KEY="${AAMP_TASK_USER_TENANT_KEY:-}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
@@ -112,7 +115,7 @@ AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.1-dev.4"
+AAMP_TASK_AGENT_VERSION="0.1.1-dev.6"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -124,6 +127,7 @@ ACP_TAIL_PID=""
 CLI_TAIL_PID=""
 FEISHU_TAIL_PID=""
 DETECTED_AGENTS=()
+AIME_ALLOWED_TENANT_KEY="736588c9260f175d"
 ACP_LOG=""
 CLI_LOG=""
 FEISHU_LOG=""
@@ -138,6 +142,7 @@ PAIRING_URL=""
 ACP_AGENT_COMMAND=""
 AGENT_PREPARE_CANCELLED="false"
 AGENT_PREPARE_CANCEL_REASON=""
+APP_USER_TENANT_KEY=""
 STARTED_BRIDGE_PID=""
 ONE_CLICK_RUN_ID="$(date +%s)-$$"
 BOT_RESERVED="false"
@@ -176,8 +181,14 @@ remote_internal_helper() {
 usage() {
   cat <<'USAGE'
 Usage:
-  feishu-task-agent install         # bind multiple Agent-Bot pairs, then start them
-  feishu-task-agent start           # choose saved pairs to start
+  feishu-task-agent install         # 绑定 Agent-Bot，并通过 macOS 后台服务运行
+  feishu-task-agent start           # 启动已保存配置的 macOS 后台服务
+  feishu-task-agent start --foreground
+                                     # run in the current terminal for diagnostics
+  feishu-task-agent status          # show background or foreground runtime status
+  feishu-task-agent stop            # stop the managed service or a verified legacy foreground run
+  feishu-task-agent restart         # restart the macOS background service
+  feishu-task-agent logs            # show recent background service logs
   feishu-task-agent list            # list saved pairs
   feishu-task-agent add             # bind and save more pairs without leaving bridges running
   feishu-task-agent remove          # remove saved pairs without stopping running bridges
@@ -193,6 +204,7 @@ Options:
                                Use this Agent for every new binding in the command.
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
+  --foreground               Keep install/start attached to the current terminal
   -h, --help                 Show this help
 
 日志命令:
@@ -1301,13 +1313,8 @@ npm_install_register_helper() {
     }
 }
 
-aime_internal_network_reachable() {
-  command -v ping >/dev/null 2>&1 || return 1
-  if is_macos; then
-    ping -c 1 -W 1000 aime.bytedance.net >/dev/null 2>&1
-  else
-    ping -c 1 -W 1 aime.bytedance.net >/dev/null 2>&1
-  fi
+aime_tenant_available() {
+  [ "$AAMP_TASK_USER_TENANT_KEY" = "$AIME_ALLOWED_TENANT_KEY" ]
 }
 
 validate_agent_name() {
@@ -1319,8 +1326,8 @@ validate_agent_name() {
 
 ensure_agent_selection_available() {
   [ "$1" = "aime" ] || return 0
-  aime_internal_network_reachable \
-    || agent_fail "AIME 仅在公司内网可用；当前无法 ping 通 aime.bytedance.net。"
+  aime_tenant_available \
+    || agent_fail "AIME 仅对字节租户开放；当前飞书 CLI 登录账号不属于可用租户。"
 }
 
 agent_display_name() {
@@ -1362,7 +1369,7 @@ agent_cli_detected() {
       find_workbuddy_ai_cli >/dev/null 2>&1
       ;;
     aime)
-      aime_internal_network_reachable
+      aime_tenant_available
       ;;
     *)
       return 1
@@ -1617,7 +1624,7 @@ parse_args() {
   fi
 
   case "${1:-}" in
-    install|start|list|add|remove|update|help|__discover-agents|__register-binding|__prepare-agent|__probe-profile|__ensure-profile)
+    install|start|status|stop|restart|logs|list|add|remove|update|help|__service-run|__discover-agents|__register-binding|__prepare-agent|__probe-profile|__ensure-profile)
       AAMP_TASK_ACTION="$1"
       shift
       ;;
@@ -1628,7 +1635,7 @@ parse_args() {
   fi
 
   case "$AAMP_TASK_ACTION" in
-    install|start|add)
+    install|start|add|__service-run)
       AAMP_TASK_START_MODE="start"
       ;;
     *)
@@ -1648,6 +1655,10 @@ parse_args() {
         ;;
       --debug)
         DEBUG_MODE="true"
+        shift
+        ;;
+      --foreground)
+        AAMP_TASK_FOREGROUND="true"
         shift
         ;;
       --mock-fail-stage)
@@ -1673,7 +1684,7 @@ parse_args() {
   fi
   RESTART_ARGS=()
   case "${restart_source[$restart_index]:-}" in
-    install|start|list|add|remove|update|help)
+    install|start|status|stop|restart|logs|list|add|remove|update|help)
       ;;
     *)
       RESTART_ARGS[0]="$AAMP_TASK_ACTION"
@@ -2329,6 +2340,63 @@ console.log("ok");
   return 1
 }
 
+lark_cli_user_tenant_key() {
+  local profile="$1"
+  local user_info_json tenant_key
+  LARK_CLI_CMD="${LARK_CLI_CMD:-lark-cli}"
+
+  if [ -n "${ONE_CLICK_LOG:-}" ]; then
+    user_info_json="$(
+      LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 \
+      LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 \
+      "$LARK_CLI_CMD" --profile "$profile" api GET /open-apis/authen/v1/user_info \
+        --as user --format json 2>>"$ONE_CLICK_LOG"
+    )" || return 1
+  else
+    user_info_json="$(
+      LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 \
+      LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 \
+      "$LARK_CLI_CMD" --profile "$profile" api GET /open-apis/authen/v1/user_info \
+        --as user --format json 2>/dev/null
+    )" || return 1
+  fi
+
+  tenant_key="$(printf '%s' "$user_info_json" | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const start = input.indexOf("{");
+  if (start < 0) process.exit(1);
+  let payload;
+  try { payload = JSON.parse(input.slice(start)); } catch { process.exit(1); }
+  const value = payload?.data?.tenant_key;
+  if (typeof value !== "string" || !value.trim()) process.exit(1);
+  process.stdout.write(value.trim());
+});
+')" || return 1
+  [ -n "$tenant_key" ] || return 1
+  printf '%s' "$tenant_key"
+}
+
+ensure_lark_cli_user_tenant_key() {
+  local profile="$1"
+  local tenant_key
+
+  APP_USER_TENANT_KEY=""
+  tenant_key="$(lark_cli_user_tenant_key "$profile" || true)"
+  if [ -z "$tenant_key" ]; then
+    agent_log "正在登录飞书 CLI 以确认当前租户..."
+    run_lark_cli_auth_login "$profile" "$FEISHU_USER_AUTH_EXCLUDES"
+    tenant_key="$(lark_cli_user_tenant_key "$profile" || true)"
+  fi
+  if [ -z "$tenant_key" ]; then
+    agent_log "无法识别当前租户，将隐藏 AIME；其他智能体仍可继续。"
+    return 0
+  fi
+  APP_USER_TENANT_KEY="$tenant_key"
+}
+
 write_lark_cli_auth_capability_snapshot() {
   local profile="$1"
   local status_json="{}"
@@ -2548,6 +2616,8 @@ run_lark_cli_auth_login() {
   local requested_scopes="${FEISHU_USER_AUTH_REQUESTED_SCOPES:-}"
 
   [ -n "${requested_scopes//[[:space:],]/}" ] || return 0
+  [ "${AAMP_TASK_NON_INTERACTIVE:-false}" != "true" ] \
+    || agent_fail "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent stop && feishu-task-agent start' 完成登录或升级后重试。"
   auth_excludes="$(normalize_lark_cli_auth_excludes "$auth_excludes" "$requested_scopes")"
   if [ -z "$auth_excludes" ]; then
     run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --scope "$requested_scopes"
@@ -2763,7 +2833,11 @@ register_feishu_app() {
   fi
   chmod 600 "$register_log" 2>/dev/null || true
   register_result_file="$workdir/register-app-result.json"
-  default_name="${AGENT} 飞书 CLI"
+  if [ -n "$AGENT" ]; then
+    default_name="${AGENT} 飞书 CLI"
+  else
+    default_name="AAMP 飞书 CLI"
+  fi
 
   agent_detail "preparing Feishu app registration helper"
   npm_install_register_helper "$workdir"
@@ -3490,8 +3564,6 @@ ensure_agent_cli() {
   fi
 
   if [ "$AGENT" = "aime" ]; then
-    aime_internal_network_reachable \
-      || agent_fail "AIME 仅在公司内网可用；当前无法 ping 通 aime.bytedance.net。"
     ensure_aime_acp_cli
     return 0
   fi
@@ -3838,6 +3910,10 @@ confirm_codex_cli_update() {
 ensure_codex_cli_updated() {
   [ "$AGENT" = "codex" ] || return 0
   [ "$CODEX_AUTO_UPDATE" = "true" ] || return 0
+  if [ "${AAMP_TASK_NON_INTERACTIVE:-false}" = "true" ]; then
+    agent_detail "skipping Codex CLI update check in non-interactive service worker"
+    return 0
+  fi
 
   local codex_bin version_before latest_version version_line comparison_status confirmation_status refreshed_bin version_after status update_log
   codex_bin="$(resolve_codex_cli_for_acp || true)"
@@ -4046,6 +4122,8 @@ maybe_upgrade_legacy_trae_cli() {
     return 0
   fi
 
+  [ "${AAMP_TASK_NON_INTERACTIVE:-false}" != "true" ] \
+    || agent_fail "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent stop && feishu-task-agent start' 完成登录或升级后重试。"
   if confirm_trae_upgrade; then
     run_traex_installer || agent_fail "traex 安装失败。请手动执行：curl -fsSL $TRAEX_INSTALLER_URL | sh"
     hash -r 2>/dev/null || true
@@ -4071,6 +4149,8 @@ ensure_traex_login() {
     agent_fail "$(trae_login_status_timeout_message)"
   fi
   if [ "$trae_login_status" -ne 0 ]; then
+    [ "${AAMP_TASK_NON_INTERACTIVE:-false}" != "true" ] \
+      || agent_fail "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent stop && feishu-task-agent start' 完成登录或升级后重试。"
     agent_log "Trae CLI Next（内部版）未登录，正在启动登录流程。"
     run_traex_login || agent_fail "Trae CLI Next（内部版）登录失败。请先执行 'traex login' 完成登录后重新运行脚本。"
     set +e
@@ -4383,6 +4463,7 @@ ensure_traecode_acp() {
   [ "$probe_status" -ne 124 ] || agent_fail "TraeCode CLI ACP 能力检查超时，请稍后重试。"
   [ "$probe_status" -eq 3 ] || agent_fail "无法检查 TraeCode CLI 的 ACP 能力。"
 
+  ensure_interactive_agent_recovery_allowed
   set +e; confirm_traecode_update; confirm_status=$?; set -e
   if [ "$confirm_status" -eq 2 ]; then
     agent_fail "当前 TraeCode CLI 需要升级。请在交互式终端执行 'traecli update' 后重试。"
@@ -4457,6 +4538,7 @@ process.stdin.on("end", () => {
   if [ "$auth_status" -eq 0 ] && [ "$auth_kind" = "authenticated" ]; then
     agent_detail "AIME managed-user authentication is ready"
   elif [ "$auth_status" -eq 1 ] && [ "$auth_kind" = "unauthenticated" ]; then
+    ensure_interactive_agent_recovery_allowed
     agent_log "AIME 尚未登录，正在启动独立登录流程。"
     set +e
     run_aime_auth_login
@@ -4483,11 +4565,16 @@ process.stdin.on("end", () => {
     || agent_fail "AIME doctor 未通过。请确认公司内网与账号状态，并执行 'aime-acp doctor --site cn --json' 查看安全诊断。"
 }
 
+ensure_interactive_agent_recovery_allowed() {
+  [ "${AAMP_TASK_NON_INTERACTIVE:-false}" != "true" ] || agent_fail "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent stop && feishu-task-agent start' 完成登录或升级后重试。"
+}
+
 ensure_agent_login() {
   case "$AGENT" in
     codex)
       clear_codex_quarantine
       if ! run_codex_login_status; then
+        ensure_interactive_agent_recovery_allowed
         agent_log "codex CLI 未登录，正在启动登录流程。"
         run_codex_login || agent_fail "codex CLI 登录失败。请先执行 'codex login' 完成登录后重新运行脚本。"
         run_codex_login_status || agent_fail "codex CLI 仍未登录。请先执行 'codex login' 完成登录后重新运行脚本。"
@@ -4498,6 +4585,7 @@ ensure_agent_login() {
       if run_cursor_login_status; then
         agent_detail "cursor CLI is already logged in"
       else
+        ensure_interactive_agent_recovery_allowed
         agent_log "cursor CLI 未登录，正在启动登录流程。"
         run_cursor_login || agent_fail "cursor CLI 登录失败。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
         run_cursor_login_status || agent_fail "cursor CLI 仍未登录。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
@@ -4925,7 +5013,6 @@ process.stdout.write(JSON.stringify({ agents }));
 prepare_internal_agent_environment() {
   [ -n "$AGENT" ] || agent_fail "internal Agent preparation requires --agent"
   validate_agent_name "$AGENT"
-  ensure_agent_selection_available "$AGENT"
   load_agent_metadata
   if [ "$AGENT_EXECUTION_LOCATION" = "local" ]; then
     source_lark_env
@@ -4934,16 +5021,12 @@ prepare_internal_agent_environment() {
 }
 
 run_internal_register_binding() {
-  [ -n "$AGENT" ] || agent_fail "internal Bot registration requires --agent"
-  validate_agent_name "$AGENT"
-  ensure_agent_selection_available "$AGENT"
-  load_agent_metadata
+  local tenant_key
+  AGENT_EXECUTION_LOCATION="local"
   register_feishu_app
-  if [ "$AGENT_EXECUTION_LOCATION" = "remote" ]; then
-    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"tenant_brand\":\"$(json_escape "$APP_TENANT_BRAND")\",\"auth_mode\":\"app-secret\"}"
-  else
-    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"tenant_brand\":\"$(json_escape "$APP_TENANT_BRAND")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\",\"auth_mode\":\"lark-cli\"}"
-  fi
+  ensure_lark_cli_user_tenant_key "$LARK_CLI_PROFILE"
+  tenant_key="$APP_USER_TENANT_KEY"
+  emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"tenant_brand\":\"$(json_escape "$APP_TENANT_BRAND")\",\"tenant_key\":\"$(json_escape "$tenant_key")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\",\"auth_mode\":\"lark-cli\"}"
 }
 
 run_internal_prepare_agent() {
@@ -5157,6 +5240,7 @@ run_task_agent_controller() {
   export AAMP_TASK_DEFAULT_AGENT="$AGENT"
   export AAMP_TASK_AAMP_HOST="$AAMP_HOST"
   export AAMP_TASK_DEBUG_MODE="$DEBUG_MODE"
+  export AAMP_TASK_FOREGROUND
   export AAMP_TASK_INSTALL_COMMAND="$install_command"
   export AAMP_TASK_NPM_REGISTRY="$NPM_REGISTRY"
   export AAMP_TASK_NPM_CACHE_DIR="$NPM_CACHE_DIR"
@@ -5217,10 +5301,6 @@ main() {
       return 0
       ;;
   esac
-
-  if [ "$AGENT" = "aime" ]; then
-    ensure_agent_selection_available "$AGENT"
-  fi
 
   trap cleanup EXIT INT TERM HUP
   init_log_run

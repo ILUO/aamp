@@ -73,6 +73,50 @@ test('bootstrap --help remains side-effect light and prints usage', () => {
   assert.match(output, /feishu-task-agent/)
 })
 
+test('bootstrap exposes background lifecycle commands and foreground opt-in', () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-service-help-'))
+  const output = execFileSync('bash', [bootstrap, '--help'], {
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+  })
+
+  for (const command of ['status', 'stop', 'restart', 'logs']) {
+    assert.match(output, new RegExp(`feishu-task-agent ${command}`))
+  }
+  assert.match(output, /start --foreground/)
+  assert.match(output, /macOS.*后台/)
+})
+
+test('bootstrap parses foreground and private service actions without changing their intent', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-service-args-'))
+  const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
+  writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
+
+  const parse = (...args) => spawnSync('bash', ['-c', `
+set -euo pipefail
+source "$BOOTSTRAP_LIB"
+agent_fail() { printf '%s\\n' "$*" >&2; exit 64; }
+parse_args "$@"
+printf '%s|%s' "$AAMP_TASK_ACTION" "$AAMP_TASK_FOREGROUND"
+`, 'bash', ...args], {
+    encoding: 'utf8',
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      BOOTSTRAP_LIB: bootstrapLib,
+      AAMP_TASK_AUTO_UPDATE: 'false',
+    },
+  })
+
+  const foreground = parse('start', '--foreground')
+  assert.equal(foreground.status, 0, foreground.stderr)
+  assert.equal(foreground.stdout, 'start|true')
+
+  const service = parse('__service-run')
+  assert.equal(service.status, 0, service.stderr)
+  assert.equal(service.stdout, '__service-run|false')
+})
+
 test('bootstrap accepts the legacy normal token passed by an older auto-updater', () => {
   const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-legacy-update-'))
   const result = spawnSync('bash', [bootstrap, 'normal', '--help'], {
@@ -287,39 +331,25 @@ test('internal profile probe does not install lark-cli when no existing candidat
   assert.equal(existsSync(path.join(root, 'npm-global', 'bin')), false, 'probe must not install into the npm prefix')
 })
 
-test('remote AIME internal registration and preparation never call local lark-cli setup', () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-remote-bootstrap-'))
-  const packageDir = path.join(root, 'npm-global', 'lib/node_modules/@larktask/aamp-feishu-task-agent')
-  const metadataFile = path.join(packageDir, 'bin/agent-metadata.mjs')
+test('internal Bot registration authenticates lark-cli and returns the user tenant before agent selection', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-register-before-agent-'))
   const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
   const callsFile = path.join(root, 'calls.log')
-  mkdirSync(path.dirname(metadataFile), { recursive: true })
-  writeFileSync(metadataFile, readFileSync(path.resolve(__dirname, '../bin/agent-metadata.mjs')))
   writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
 
   const shell = [
     'set -euo pipefail',
     'source "$BOOTSTRAP_LIB"',
-    'AGENT="aime"',
+    'AGENT=""',
     'AAMP_TASK_INTERNAL_RESULT_FD=3',
     'record() { printf "%s\\n" "$1" >> "$CALLS_FILE"; }',
     'agent_fail() { printf "%s\\n" "$*" >&2; exit 64; }',
     'agent_log() { :; }',
     'agent_detail() { :; }',
-    'ensure_agent_selection_available() { record internal-network; }',
-    'source_lark_env() { record source-lark-env; exit 97; }',
-    'ensure_lark_cli() { record ensure-lark-cli; exit 97; }',
-    'ensure_lark_cli_profile() { record ensure-lark-cli-profile; exit 97; }',
-    'probe_lark_cli_profile_locked() { record probe-lark-cli-profile; exit 97; }',
-    'register_feishu_app() { record bot-registration; APP_ID=cli_remote; APP_SECRET=remote-secret-sentinel; BOT_NAME="Remote AIME"; APP_TENANT_BRAND="lark"; }',
-    'ensure_agent_cli() { record pinned-aime-preparation; }',
-    'ensure_codex_cli_updated() { :; }',
-    'ensure_agent_login() { record aime-auth-status-doctor; }',
-    'ensure_acpx() { record acpx; }',
-    'build_acp_agent_command() { ACP_AGENT_COMMAND="/safe/bin/aime-acp --site cn"; }',
+    'register_feishu_app() { record bot-registration; APP_ID=cli_remote; APP_SECRET=remote-secret-sentinel; BOT_NAME="Remote AIME"; APP_TENANT_BRAND="feishu"; LARK_CLI_PROFILE="profile-remote"; }',
+    'lark_cli_user_tenant_key() { record tenant-lookup; printf "%s" "736588c9260f175d"; }',
     'exec 3>&1',
     'run_internal_register_binding',
-    'run_internal_prepare_agent',
   ].join('\n')
   const result = spawnSync('bash', ['-c', shell], {
     encoding: 'utf8',
@@ -337,27 +367,144 @@ test('remote AIME internal registration and preparation never call local lark-cl
   })
 
   assert.equal(result.status, 0, result.stderr)
-  const [registration, preparation] = result.stdout.trim().split('\n').map(JSON.parse)
-  assert.deepEqual(registration, {
+  assert.deepEqual(JSON.parse(result.stdout), {
     app_id: 'cli_remote',
     app_secret: 'remote-secret-sentinel',
     display_name: 'Remote AIME',
-    tenant_brand: 'lark',
-    auth_mode: 'app-secret',
-  })
-  assert.deepEqual(preparation, {
-    agent_type: 'aime',
-    acp_command: '/safe/bin/aime-acp --site cn',
+    tenant_brand: 'feishu',
+    tenant_key: '736588c9260f175d',
+    lark_cli_profile: 'profile-remote',
+    auth_mode: 'lark-cli',
   })
   assert.deepEqual(readFileSync(callsFile, 'utf8').trim().split('\n'), [
-    'internal-network',
     'bot-registration',
-    'internal-network',
-    'pinned-aime-preparation',
-    'aime-auth-status-doctor',
-    'acpx',
+    'tenant-lookup',
   ])
   assert.doesNotMatch(result.stderr, /remote-secret-sentinel/)
+})
+
+test('first-time CLI login stays visible and cannot contaminate the registered tenant key', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-visible-cli-login-'))
+  const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
+  const resultFile = path.join(root, 'result.json')
+  const lookupCountFile = path.join(root, 'lookup-count')
+  writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
+  writeFileSync(lookupCountFile, '0')
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+source "$BOOTSTRAP_LIB"
+AGENT=""
+AAMP_TASK_INTERNAL_RESULT_FD=3
+agent_fail() { printf '%s\\n' "$*" >&2; exit 64; }
+agent_detail() { :; }
+register_feishu_app() {
+  APP_ID=cli_first_login
+  APP_SECRET=first-login-secret
+  BOT_NAME="First Login Bot"
+  APP_TENANT_BRAND=feishu
+  LARK_CLI_PROFILE=profile-first-login
+}
+lark_cli_user_tenant_key() {
+  count="$(cat "$LOOKUP_COUNT_FILE")"
+  count=$((count + 1))
+  printf '%s' "$count" > "$LOOKUP_COUNT_FILE"
+  [ "$count" -gt 1 ] || return 1
+  printf '%s' '736588c9260f175d'
+}
+run_lark_cli_auth_login() { printf '%s\\n' '[auth] browser authorization is visible'; }
+exec 3>"$RESULT_FILE"
+run_internal_register_binding
+`, 'bash'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      BOOTSTRAP_LIB: bootstrapLib,
+      RESULT_FILE: resultFile,
+      LOOKUP_COUNT_FILE: lookupCountFile,
+      AAMP_TASK_AUTO_UPDATE: 'false',
+    },
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /正在登录飞书 CLI/)
+  assert.match(result.stdout, /browser authorization is visible/)
+  assert.equal(JSON.parse(readFileSync(resultFile, 'utf8')).tenant_key, '736588c9260f175d')
+})
+
+test('unknown CLI tenant hides AIME without blocking other agent selection', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-unknown-cli-tenant-'))
+  const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
+  const resultFile = path.join(root, 'result.json')
+  writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+source "$BOOTSTRAP_LIB"
+AGENT=""
+AAMP_TASK_INTERNAL_RESULT_FD=3
+agent_fail() { printf '%s\\n' "$*" >&2; exit 64; }
+agent_detail() { :; }
+register_feishu_app() {
+  APP_ID=cli_unknown_tenant
+  APP_SECRET=unknown-tenant-secret
+  BOT_NAME="Unknown Tenant Bot"
+  APP_TENANT_BRAND=feishu
+  LARK_CLI_PROFILE=profile-unknown-tenant
+}
+lark_cli_user_tenant_key() { return 1; }
+run_lark_cli_auth_login() { printf '%s\\n' '[auth] login completed'; }
+exec 3>"$RESULT_FILE"
+run_internal_register_binding
+`, 'bash'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      BOOTSTRAP_LIB: bootstrapLib,
+      RESULT_FILE: resultFile,
+      AAMP_TASK_AUTO_UPDATE: 'false',
+    },
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /无法识别当前租户.*隐藏 AIME/)
+  assert.equal(JSON.parse(readFileSync(resultFile, 'utf8')).tenant_key, '')
+})
+
+test('lark-cli tenant lookup returns only tenant_key from the authenticated profile', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-lark-tenant-key-'))
+  const binDir = path.join(root, 'bin')
+  const callsFile = path.join(root, 'calls.log')
+  mkdirSync(binDir)
+  writeFileSync(path.join(binDir, 'lark-cli'), `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$CALLS_FILE"
+printf '%s\\n' '{"code":0,"msg":"success","data":{"name":"Private User","open_id":"ou_private","tenant_key":"736588c9260f175d"}}'
+`)
+  chmodSync(path.join(binDir, 'lark-cli'), 0o755)
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('lark_cli_user_auth_satisfied()')
+  const end = source.indexOf('\nforget_current_bot_after_feishu_start_failure()', start)
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+LARK_CLI_CMD="$1/bin/lark-cli"
+CALLS_FILE="$2"
+export CALLS_FILE
+${source.slice(start, end)}
+lark_cli_user_tenant_key profile-current
+`, 'bash', root, callsFile], { encoding: 'utf8', timeout: 10_000 })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '736588c9260f175d')
+  const invocation = readFileSync(callsFile, 'utf8')
+  assert.match(invocation, /--profile profile-current api GET \/open-apis\/authen\/v1\/user_info --as user/)
+  assert.doesNotMatch(result.stdout, /Private User|ou_private/)
 })
 
 test('app registration preserves the SDK tenant brand and uses its OpenAPI domain', () => {
@@ -365,6 +512,7 @@ test('app registration preserves the SDK tenant brand and uses its OpenAPI domai
   const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
   const fakeSdkDir = path.join(root, 'fake-sdk')
   const clientOptionsFile = path.join(root, 'client-options.json')
+  const registerOptionsFile = path.join(root, 'register-options.json')
   mkdirSync(fakeSdkDir, { recursive: true })
   writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
   writeFileSync(path.join(fakeSdkDir, 'package.json'), JSON.stringify({
@@ -377,6 +525,9 @@ test('app registration preserves the SDK tenant brand and uses its OpenAPI domai
 import { writeFileSync } from 'node:fs'
 export const Domain = { Feishu: 'feishu-domain', Lark: 'lark-domain' }
 export async function registerApp(options) {
+  if (process.env.REGISTER_OPTIONS_FILE) {
+    writeFileSync(process.env.REGISTER_OPTIONS_FILE, JSON.stringify(options))
+  }
   if (process.env.FAKE_REGISTER_MODE === 'domain-switch'
     || process.env.FAKE_REGISTER_MODE === 'explicit-feishu-after-switch') {
     options.onStatusChange?.({ status: 'domain_switched' })
@@ -411,7 +562,7 @@ export class Client {
 set -euo pipefail
 source "$BOOTSTRAP_LIB"
 AAMP_TASK_INTERNAL="true"
-AGENT="codex"
+AGENT=""
 AGENT_EXECUTION_LOCATION="remote"
 initialize_feishu_scope_manifest() { :; }
 npm_install_register_helper() {
@@ -432,6 +583,7 @@ printf '%s\\n' "$APP_ID|$BOT_NAME|$APP_TENANT_BRAND"
         BOOTSTRAP_LIB: bootstrapLib,
         FAKE_SDK_DIR: fakeSdkDir,
         CLIENT_OPTIONS_FILE: clientOptionsFile,
+        REGISTER_OPTIONS_FILE: registerOptionsFile,
         FAKE_REGISTER_MODE: mode,
         AAMP_TASK_AUTO_UPDATE: 'false',
       },
@@ -444,6 +596,7 @@ printf '%s\\n' "$APP_ID|$BOT_NAME|$APP_TENANT_BRAND"
       appSecret: 'registration-secret-sentinel',
       domain: 'lark-domain',
     }, mode)
+    assert.equal(JSON.parse(readFileSync(registerOptionsFile, 'utf8')).appPreset.name, 'AAMP 飞书 CLI', mode)
   }
 
   const explicitFeishu = spawnSync('bash', ['-c', `
@@ -884,6 +1037,36 @@ printf 'agent=%s\\ncommand=%s\\n' "$AGENT" "$ACP_AGENT_COMMAND"
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /agent=traex/)
   assert.match(result.stdout, new RegExp(`command=${path.join(binDir, 'traex').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} acp serve`))
+})
+
+test('non-interactive agent preparation never launches a Codex login flow', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const helperStart = source.indexOf('ensure_interactive_agent_recovery_allowed()')
+  const helperEnd = source.indexOf('\nrun_acp_bridge()', helperStart)
+  assert.notEqual(helperStart, -1)
+  assert.notEqual(helperEnd, -1)
+  const helpers = source.slice(helperStart, helperEnd)
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-codex-non-interactive-login-'))
+  const loginMarker = path.join(root, 'login-called')
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+AGENT=codex
+AAMP_TASK_NON_INTERACTIVE=true
+LOGIN_MARKER="$1"
+agent_detail() { :; }
+agent_log() { :; }
+agent_fail() { printf '%s\\n' "$*" >&2; exit 64; }
+clear_codex_quarantine() { :; }
+run_codex_login_status() { return 1; }
+run_codex_login() { touch "$LOGIN_MARKER"; return 0; }
+${helpers}
+ensure_agent_login
+`, 'bash', loginMarker], { encoding: 'utf8', timeout: 5000 })
+
+  assert.equal(result.status, 64)
+  assert.match(result.stderr, /后台服务无法完成交互式准备.*feishu-task-agent start/)
+  assert.equal(existsSync(loginMarker), false)
 })
 
 test('bootstrap help owns log commands and success output stays concise', () => {
@@ -1413,6 +1596,54 @@ ensure_lark_cli_profile_locked cli_task secret profile-task
 
   assert.equal(result.status, 0, result.stderr)
   assert.match(readFileSync(callsFile, 'utf8'), /auth login --scope/)
+})
+
+test('non-interactive profile preparation never launches Feishu authorization', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('feishu_scope_manifest_json()')
+  const end = source.indexOf('\nforget_current_bot_after_feishu_start_failure()', start)
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const helpers = source.slice(start, end)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-profile-non-interactive-auth-'))
+  const fakeCli = path.join(home, 'lark-cli')
+  const loginMarker = path.join(home, 'auth-login-called')
+  writeFileSync(fakeCli, `#!/usr/bin/env bash
+case "$*" in
+  "profile list") printf '["profile-task"]\\n' ;;
+  "--profile profile-task auth status --json") printf '{"identities":{"user":{"available":false,"tokenStatus":"missing","scope":""}}}\\n' ;;
+esac
+`)
+  chmodSync(fakeCli, 0o755)
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+LARK_CLI_CMD="$1"
+LOGIN_MARKER="$2"
+AAMP_FEISHU_AUTH_STATE_DIR="$3"
+AAMP_TASK_NON_INTERACTIVE=true
+FEISHU_USER_AUTH_MODE="optional"
+FEISHU_SCOPE_MANIFEST_VERSION=""
+FEISHU_APP_SCOPES_TENANT=""
+FEISHU_APP_SCOPES_USER=""
+FEISHU_USER_AUTH_CORE_SCOPES="task:task:read"
+FEISHU_USER_AUTH_OPTIONAL_SCOPES=""
+FEISHU_USER_AUTH_REQUIRED_SCOPES=""
+FEISHU_USER_AUTH_REQUESTED_SCOPES=""
+FEISHU_USER_AUTH_EXCLUDES=""
+agent_detail() { :; }
+agent_log() { :; }
+agent_fail() { printf '%s\\n' "$*" >&2; exit 64; }
+${helpers}
+run_lark_cli_auth_login_with_browser_open() { touch "$LOGIN_MARKER"; }
+initialize_feishu_scope_manifest
+ensure_lark_cli_profile_locked cli_task secret profile-task
+`, 'bash', fakeCli, loginMarker, path.join(home, 'state')], { encoding: 'utf8' })
+
+  assert.equal(result.status, 64)
+  assert.match(result.stderr, /后台服务无法完成交互式准备.*feishu-task-agent start/)
+  assert.equal(existsSync(loginMarker), false)
 })
 
 test('explicit user login uses fixed scopes and intersects stale excludes', () => {
