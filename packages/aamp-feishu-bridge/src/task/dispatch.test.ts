@@ -140,6 +140,32 @@ test('buildFeishuTaskPromptRules renders the selected lark-cli absolute path whe
     "unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' '/Applications/Test Tools/lark-cli' --profile aamp-feishu-task-cli_aac6764b90f89cd0 auth status --json",
   ))
 })
+
+test('buildFeishuTaskPromptRules renders an exact PowerShell profile command on Windows', () => {
+  const rules = buildFeishuTaskPromptRules({
+    platform: 'win32',
+    feishuLarkCliProfile: "profile'one",
+    feishuLarkCliBin: "C:\\Program Files\\Lark's CLI\\lark-cli.cmd",
+  })
+
+  assert.match(rules, /PowerShell invocation operator/)
+  assert.ok(rules.includes(
+    "& 'C:\\Program Files\\Lark''s CLI\\lark-cli.cmd' --profile 'profile''one' auth status --json",
+  ))
+  assert.doesNotMatch(rules, /unset -f|env -u|BASH_FUNC/)
+})
+
+test('buildFeishuTaskPromptRules keeps remote rules independent of the Windows host', () => {
+  const rules = buildFeishuTaskPromptRules({
+    platform: 'win32',
+    agentExecutionLocation: 'remote',
+    feishuLarkCliProfile: 'ignored-local-profile',
+    feishuLarkCliBin: 'C:\\lark-cli.cmd',
+  })
+
+  assert.match(rules, /remote sandbox/i)
+  assert.doesNotMatch(rules, /PowerShell|lark-cli|--profile|unset -f|env -u/)
+})
 test('buildFeishuTaskDispatchContext keeps only non-duplicated task routing source', () => {
   const context = buildFeishuTaskDispatchContext(event, task, 'task_create')
 
@@ -225,4 +251,13 @@ test('buildFeishuTaskPromptRules renders the complete remote-safe result schema'
   assert.match(rules, /Example remote failed:[^\n]*\\"status\\":\\"failed\\"/i)
   assert.match(rules, /Only the Feishu Bridge writes the current Task/i)
   assert.match(rules, /all work for this turn has settled/i)
+})
+
+
+test('Windows JavaScript lark CLI prompt invokes Node before the persistent entry', () => {
+  const entry="C:\\Lark's CLI\\lark-cli.mjs"
+  const rules=buildFeishuTaskPromptRules({platform:'win32',feishuLarkCliProfile:"profile'one",feishuLarkCliBin:entry})
+  const quote=(value:string)=>`'${value.replaceAll("'","''")}'`
+  assert.ok(rules.includes(`& ${quote(process.execPath)} ${quote(entry)} --profile 'profile''one' auth status --json`))
+  assert.doesNotMatch(rules,/unset -f|env -u/)
 })
