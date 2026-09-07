@@ -4,7 +4,15 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { AcpxClient, selectFinalAssistantOutput } from './acpx-client.js'
+import {
+  AcpxClient,
+  buildAcpxEnvironment,
+  selectFinalAssistantOutput,
+  selectOwnedWindowsTree,
+  terminateWindowsProcessTree,
+  WindowsOwnedProcessTree,
+  type WindowsProcessIdentity,
+} from './acpx-client.js'
 
 const tempDirectories: string[] = []
 const testDirectory = dirname(fileURLToPath(import.meta.url))
@@ -13,6 +21,217 @@ afterEach(() => {
   for (const directory of tempDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('terminateWindowsProcessTree kills only an unchanged owned process identity', () => {
+  const calls: Array<{ command: string; args: readonly string[]; options: unknown }> = []
+  const identity: WindowsProcessIdentity = {
+    pid: 4312,
+    creationDate: '20260907101010.000000+480',
+    executablePath: 'C:\\Program Files\\nodejs\\node.exe',
+    ownerSid: 'S-1-5-21-1000',
+  }
+  const killed = terminateWindowsProcessTree(identity, () => ({ status: 'found', identity: { ...identity } }), ((command: string, args: readonly string[], options: unknown) => {
+    calls.push({ command, args, options })
+    return Buffer.alloc(0)
+  }) as never)
+
+  assert.equal(killed, 'termination-requested')
+  assert.deepEqual(calls, [{
+    command: 'taskkill.exe',
+    args: ['/pid', '4312', '/t', '/f'],
+    options: { stdio: 'ignore', windowsHide: true },
+  }])
+})
+
+test('terminateWindowsProcessTree refuses a reused pid', () => {
+  const expected: WindowsProcessIdentity = {
+    pid: 4312,
+    creationDate: '20260907101010.000000+480',
+    executablePath: 'C:\\Program Files\\nodejs\\node.exe',
+    ownerSid: 'S-1-5-21-1000',
+  }
+  let spawned = false
+  const killed = terminateWindowsProcessTree(expected, () => ({ status: 'found', identity: {
+    ...expected, creationDate: '20260907101100.000000+480',
+  } }), (() => {
+    spawned = true
+    return Buffer.alloc(0)
+  }) as never)
+
+  assert.equal(killed, 'identity-changed')
+  assert.equal(spawned, false)
+})
+
+test('buildAcpxEnvironment pins local bin through one case-insensitive PATH key', () => {
+  const env = buildAcpxEnvironment('C:\\workspace', {
+    Path: 'C:\\global-bin',
+    PATH: 'C:\\stale-bin',
+    PATHEXT: '.CMD',
+  }, 'win32')
+
+  assert.deepEqual(Object.keys(env).filter((key) => key.toLowerCase() === 'path'), ['Path'])
+  assert.equal(env.Path, 'C:\\workspace\\node_modules\\.bin;C:\\global-bin')
+})
+
+test('exec reports synchronous native resolver failures after trying npx fallback', async () => {
+  const attempted: string[] = []
+  const client = new AcpxClient(process.cwd(), {
+    resolveCommand: (command) => {
+      attempted.push(command)
+      throw new Error(`${command} shim is unsupported`)
+    },
+  })
+
+  await assert.rejects(
+    () => client.ensureSession('codex', 'resolver-failure'),
+    /npx shim is unsupported/,
+  )
+  assert.deepEqual(attempted, ['acpx', 'npx'])
+})
+
+test('WindowsOwnedProcessTree cleans a retained orphan without touching reused or unrelated pids', () => {
+  const root: WindowsProcessIdentity = {
+    pid: 100,
+    creationDate: 'root-created',
+    executablePath: 'C:\\node.exe',
+    ownerSid: 'S-1-5-21-owner',
+  }
+  const child: WindowsProcessIdentity = {
+    pid: 101,
+    creationDate: 'child-created',
+    executablePath: 'C:\\agent.exe',
+    ownerSid: root.ownerSid,
+  }
+  const reused: WindowsProcessIdentity = {
+    pid: 102,
+    creationDate: 'old-child-created',
+    executablePath: 'C:\\helper.exe',
+    ownerSid: root.ownerSid,
+  }
+  const unrelated: WindowsProcessIdentity = {
+    pid: 900,
+    creationDate: 'unrelated-created',
+    executablePath: 'C:\\node.exe',
+    ownerSid: root.ownerSid,
+  }
+  let intervalCallback: (() => void) | undefined
+  let cleared = false
+  const live = new Map([
+    [child.pid, child],
+    [reused.pid, { ...reused, creationDate: 'reused-by-new-process' }],
+    [unrelated.pid, unrelated],
+  ])
+  const killed: number[] = []
+  const tree = new WindowsOwnedProcessTree(root, {
+    snapshot: () => [root, child, reused],
+    terminate: (identity) => {
+      const current = live.get(identity.pid)
+      if (current?.creationDate !== identity.creationDate) return 'identity-changed'
+      killed.push(identity.pid)
+      return 'termination-requested'
+    },
+    setIntervalFn: (callback: () => void) => {
+      intervalCallback = callback
+      return { unref() {} } as NodeJS.Timeout
+    },
+    clearIntervalFn: () => { cleared = true },
+  })
+
+  tree.start()
+  intervalCallback?.()
+  tree.stopPolling()
+  tree.terminateRetained()
+
+  assert.equal(cleared, true)
+  assert.deepEqual(killed, [101])
+  assert.equal(live.has(unrelated.pid), true)
+})
+
+test('WindowsOwnedProcessTree ignores a failed or root-mismatched snapshot', () => {
+  const root: WindowsProcessIdentity = {
+    pid: 200,
+    creationDate: 'root-created',
+    executablePath: 'C:\\node.exe',
+    ownerSid: 'S-1-5-21-owner',
+  }
+  const killed: number[] = []
+  const snapshots: Array<() => WindowsProcessIdentity[]> = [
+    () => { throw new Error('CIM unavailable') },
+    () => [{ ...root, creationDate: 'reused-root' }, {
+      pid: 201,
+      creationDate: 'not-owned',
+      executablePath: 'C:\\other.exe',
+      ownerSid: root.ownerSid,
+    }],
+  ]
+  const tree = new WindowsOwnedProcessTree(root, {
+    snapshot: () => snapshots.shift()?.() ?? [],
+    terminate: (identity) => { killed.push(identity.pid); return 'termination-requested' },
+    setIntervalFn: (() => ({ unref() {} })) as never,
+    clearIntervalFn: () => {},
+  })
+
+  tree.refresh()
+  tree.refresh()
+  tree.terminateRetained()
+  assert.deepEqual(killed, [])
+})
+
+test('selectOwnedWindowsTree rejects a child older than its parent after PID reuse', () => {
+  const root: WindowsProcessIdentity = {
+    pid: 300,
+    creationDate: '2026-09-07T10:00:00.9000000+08:00',
+    executablePath: 'C:\\node.exe',
+    ownerSid: 'S-1-5-21-owner',
+  }
+  const selected = selectOwnedWindowsTree(root, [
+    { ...root, parentPid: 1 },
+    {
+      pid: 301,
+      parentPid: 300,
+      creationDate: '2026-09-07T10:00:00.1000000+08:00',
+      executablePath: 'C:\\stale.exe',
+      ownerSid: root.ownerSid,
+    },
+    {
+      pid: 302,
+      parentPid: 300,
+      creationDate: '2026-09-07T10:00:01.0000000+08:00',
+      executablePath: 'C:\\owned.exe',
+      ownerSid: root.ownerSid,
+    },
+  ])
+
+  assert.deepEqual(selected.map((identity) => identity.pid), [300, 302])
+})
+
+test('WindowsOwnedProcessTree retains unconfirmed termination for a later retry', () => {
+  const root: WindowsProcessIdentity = {
+    pid: 400,
+    creationDate: 'root-created',
+    executablePath: 'C:\\node.exe',
+    ownerSid: 'S-1-5-21-owner',
+  }
+  const child = { ...root, pid: 401, creationDate: 'child-created' }
+  const attempts: number[] = []
+  let childOutcome: 'unconfirmed' | 'gone' = 'unconfirmed'
+  const tree = new WindowsOwnedProcessTree(root, {
+    snapshot: () => [root, child],
+    terminate: (identity) => {
+      attempts.push(identity.pid)
+      return identity.pid === child.pid ? childOutcome : 'gone'
+    },
+    setIntervalFn: (() => ({ unref() {} })) as never,
+    clearIntervalFn: () => {},
+  })
+
+  tree.refresh()
+  tree.terminateRetained()
+  childOutcome = 'gone'
+  tree.terminateRetained()
+
+  assert.deepEqual(attempts, [401, 400, 401])
 })
 
 function createFakeAcpx(mode: 'success' | 'auth-failure' | 'auth-with-output' | 'json-auth-failure' | 'json-aime-auth-failure' | 'json-aime-sources' | 'auth-discussion' | 'timeout' | 'close-retry'): { cwd: string; logFile: string } {

@@ -1,8 +1,252 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, join, win32 } from 'node:path'
+import { resolveNativeCommand } from './native-command.js'
+
+export interface WindowsProcessIdentity {
+  pid: number
+  creationDate: string
+  executablePath: string
+  ownerSid: string
+}
+
+const WINDOWS_PROCESS_IDENTITY_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AAMP_ACP_WINDOWS_INPUT_BASE64)) | ConvertFrom-Json
+$processId = [uint32]$config.pid
+$process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId"
+if ($null -eq $process) { exit 3 }
+$owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
+[pscustomobject]@{
+  pid = [uint32]$process.ProcessId
+  creationDate = $process.CreationDate.ToString('o')
+  executablePath = [string]$process.ExecutablePath
+  ownerSid = [string]$owner.Sid
+} | ConvertTo-Json -Compress
+`
+
+const WINDOWS_PROCESS_TREE_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AAMP_ACP_WINDOWS_INPUT_BASE64)) | ConvertFrom-Json
+$rootPid = [uint32]$config.pid
+$all = @(Get-CimInstance Win32_Process)
+$byPid = @{}
+foreach ($process in $all) { $byPid[[uint32]$process.ProcessId] = $process }
+$selected = New-Object 'System.Collections.Generic.HashSet[uint32]'
+[void]$selected.Add($rootPid)
+do {
+  $changed = $false
+  foreach ($process in $all) {
+    $parentPid = [uint32]$process.ParentProcessId
+    $parent = $byPid[$parentPid]
+    if ($selected.Contains($parentPid) -and $null -ne $parent -and $process.CreationDate -ge $parent.CreationDate -and $selected.Add([uint32]$process.ProcessId)) {
+      $changed = $true
+    }
+  }
+} while ($changed)
+$identities = @()
+foreach ($process in $all) {
+  if (-not $selected.Contains([uint32]$process.ProcessId)) { continue }
+  $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
+  if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) { throw 'owner SID unavailable' }
+  $identities += [pscustomobject]@{
+    pid = [uint32]$process.ProcessId
+    parentPid = [uint32]$process.ParentProcessId
+    creationDate = $process.CreationDate.ToString('o')
+    executablePath = [string]$process.ExecutablePath
+    ownerSid = [string]$owner.Sid
+  }
+}
+[pscustomobject]@{ processes = $identities } | ConvertTo-Json -Compress -Depth 3
+`
+
+const WINDOWS_PROCESS_INPUT_KEY = 'AAMP_ACP_WINDOWS_INPUT_BASE64'
+
+function windowsProcessEnvironment(pid: number): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    [WINDOWS_PROCESS_INPUT_KEY]: Buffer.from(JSON.stringify({ pid }), 'utf8').toString('base64'),
+  }
+}
+
+type WindowsIdentityRead =
+  | { status: 'found'; identity: WindowsProcessIdentity }
+  | { status: 'gone' }
+  | { status: 'unknown' }
+
+function inspectWindowsProcessIdentity(pid: number): WindowsIdentityRead {
+  try {
+    const value = JSON.parse(execFileSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_IDENTITY_SCRIPT,
+    ], { encoding: 'utf8', windowsHide: true, env: windowsProcessEnvironment(pid) })) as Partial<WindowsProcessIdentity>
+    if (value.pid !== pid || !value.creationDate || !value.executablePath || !value.ownerSid) return { status: 'unknown' }
+    return { status: 'found', identity: value as WindowsProcessIdentity }
+  } catch (error) {
+    return (error as { status?: number }).status === 3 ? { status: 'gone' } : { status: 'unknown' }
+  }
+}
+
+export function readWindowsProcessIdentity(pid: number): WindowsProcessIdentity | undefined {
+  const result = inspectWindowsProcessIdentity(pid)
+  return result.status === 'found' ? result.identity : undefined
+}
+
+export function snapshotOwnedWindowsTree(root: WindowsProcessIdentity): WindowsProcessIdentity[] {
+  try {
+    const value = JSON.parse(execFileSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_TREE_SCRIPT,
+    ], { encoding: 'utf8', windowsHide: true, env: windowsProcessEnvironment(root.pid) })) as { processes?: unknown }
+    if (!Array.isArray(value.processes)) return []
+    const identities = value.processes.filter((candidate): candidate is WindowsProcessIdentity => {
+      if (!candidate || typeof candidate !== 'object') return false
+      const identity = candidate as Partial<WindowsProcessIdentity>
+      return Number.isSafeInteger(identity.pid) && (identity.pid ?? 0) > 0
+        && Number.isSafeInteger((candidate as Partial<WindowsProcessRecord>).parentPid)
+        && typeof identity.creationDate === 'string' && Boolean(identity.creationDate)
+        && typeof identity.executablePath === 'string' && Boolean(identity.executablePath)
+        && typeof identity.ownerSid === 'string' && Boolean(identity.ownerSid)
+    })
+    return selectOwnedWindowsTree(root, identities as WindowsProcessRecord[])
+  } catch {
+    return []
+  }
+}
+
+export interface WindowsProcessRecord extends WindowsProcessIdentity { parentPid: number }
+
+export function selectOwnedWindowsTree(
+  root: WindowsProcessIdentity,
+  records: readonly WindowsProcessRecord[],
+): WindowsProcessIdentity[] {
+  const rootRecord = records.find((record) => record.pid === root.pid)
+  if (!rootRecord || !sameWindowsProcessIdentity(root, rootRecord)) return []
+  const selected = new Map<number, WindowsProcessRecord>([[root.pid, rootRecord]])
+  let changed = true
+  while (changed && selected.size < 256) {
+    changed = false
+    for (const record of records) {
+      if (selected.has(record.pid) || record.ownerSid !== root.ownerSid) continue
+      const parent = selected.get(record.parentPid)
+      if (!parent) continue
+      if (Date.parse(record.creationDate) < Date.parse(parent.creationDate)) continue
+      selected.set(record.pid, record)
+      changed = true
+      if (selected.size >= 256) break
+    }
+  }
+  return [...selected.values()]
+}
+
+function sameWindowsProcessIdentity(a: WindowsProcessIdentity, b: WindowsProcessIdentity): boolean {
+  return a.pid === b.pid
+    && a.creationDate === b.creationDate
+    && a.executablePath.toLowerCase() === b.executablePath.toLowerCase()
+    && a.ownerSid === b.ownerSid
+}
+
+interface WindowsOwnedProcessTreeOptions {
+  snapshot?: (root: WindowsProcessIdentity) => WindowsProcessIdentity[]
+  terminate?: (identity: WindowsProcessIdentity) => WindowsTerminationOutcome
+  setIntervalFn?: (callback: () => void, intervalMs: number) => NodeJS.Timeout
+  clearIntervalFn?: (timer: NodeJS.Timeout) => void
+  intervalMs?: number
+}
+
+export class WindowsOwnedProcessTree {
+  private retained = new Map<number, WindowsProcessIdentity>()
+  private timer: NodeJS.Timeout | undefined
+  private readonly snapshot: (root: WindowsProcessIdentity) => WindowsProcessIdentity[]
+  private readonly terminate: (identity: WindowsProcessIdentity) => WindowsTerminationOutcome
+  private readonly setIntervalFn: (callback: () => void, intervalMs: number) => NodeJS.Timeout
+  private readonly clearIntervalFn: (timer: NodeJS.Timeout) => void
+  private readonly intervalMs: number
+
+  constructor(
+    private readonly root: WindowsProcessIdentity,
+    options: WindowsOwnedProcessTreeOptions = {},
+  ) {
+    this.snapshot = options.snapshot ?? snapshotOwnedWindowsTree
+    this.terminate = options.terminate ?? ((identity) => terminateWindowsProcessTree(identity))
+    this.setIntervalFn = options.setIntervalFn ?? ((callback, intervalMs) => setInterval(callback, intervalMs))
+    this.clearIntervalFn = options.clearIntervalFn ?? ((timer) => clearInterval(timer))
+    this.intervalMs = options.intervalMs ?? 500
+  }
+
+  start(): void {
+    if (this.timer) return
+    this.refresh()
+    this.timer = this.setIntervalFn(() => this.refresh(), this.intervalMs)
+    this.timer.unref?.()
+  }
+
+  refresh(): void {
+    let identities: WindowsProcessIdentity[]
+    try { identities = this.snapshot(this.root) } catch { return }
+    const observedRoot = identities.find((identity) => identity.pid === this.root.pid)
+    if (!observedRoot || !sameWindowsProcessIdentity(this.root, observedRoot)) return
+    for (const identity of identities.slice(0, 256)) {
+      if (identity.ownerSid === this.root.ownerSid) this.retained.set(identity.pid, identity)
+    }
+  }
+
+  stopPolling(): void {
+    if (!this.timer) return
+    this.clearIntervalFn(this.timer)
+    this.timer = undefined
+  }
+
+  terminateRetained(): void {
+    this.stopPolling()
+    const identities = [...this.retained.values()].sort((a, b) => b.pid - a.pid)
+    for (const identity of identities) {
+      const outcome = this.terminate(identity)
+      if (outcome === 'gone' || outcome === 'identity-changed') this.retained.delete(identity.pid)
+    }
+  }
+}
+
+export type WindowsTerminationOutcome = 'termination-requested' | 'gone' | 'identity-changed' | 'unconfirmed'
+
+export function terminateWindowsProcessTree(
+  expected: WindowsProcessIdentity,
+  inspectIdentity: (pid: number) => WindowsIdentityRead = inspectWindowsProcessIdentity,
+  taskkill: typeof execFileSync = execFileSync,
+): WindowsTerminationOutcome {
+  const before = inspectIdentity(expected.pid)
+  if (before.status === 'gone') return 'gone'
+  if (before.status !== 'found') return 'unconfirmed'
+  if (!sameWindowsProcessIdentity(expected, before.identity)) return 'identity-changed'
+  try {
+    taskkill('taskkill.exe', ['/pid', String(expected.pid), '/t', '/f'], {
+      stdio: 'ignore', windowsHide: true,
+    })
+  } catch {
+    return 'unconfirmed'
+  }
+  const after = inspectIdentity(expected.pid)
+  if (after.status === 'gone') return 'gone'
+  if (after.status === 'found' && !sameWindowsProcessIdentity(expected, after.identity)) return 'identity-changed'
+  return after.status === 'unknown' ? 'unconfirmed' : 'termination-requested'
+}
+
+export function buildAcpxEnvironment(
+  cwd: string,
+  source: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const env = { ...source }
+  const pathKeys = Object.keys(env).filter((key) => key.toLowerCase() === 'path')
+  const pathKey = pathKeys[0] ?? (platform === 'win32' ? 'Path' : 'PATH')
+  const existingPath = pathKeys.map((key) => env[key]).find((value) => value !== undefined) ?? ''
+  for (const key of pathKeys) delete env[key]
+  const pathJoin = platform === 'win32' ? win32.join : join
+  const pathDelimiter = platform === 'win32' ? ';' : delimiter
+  env[pathKey] = [pathJoin(cwd, 'node_modules', '.bin'), existingPath]
+    .filter(Boolean).join(pathDelimiter)
+  return env
+}
 
 export interface AcpEvent {
   eventVersion?: number
@@ -13,6 +257,10 @@ export interface AcpEvent {
   messageId?: string
   content?: unknown
   [key: string]: unknown
+}
+
+export interface AcpxClientRuntime {
+  resolveCommand?: typeof resolveNativeCommand
 }
 
 export type AcpTextChunkChannel = 'assistant' | 'thought'
@@ -369,9 +617,14 @@ export class AcpxClient {
   private cwd: string
   private activeProcesses = new Map<ChildProcessWithoutNullStreams, Promise<void>>()
   private stopInFlight: Promise<void> | undefined
+  private windowsProcessIdentities = new WeakMap<ChildProcessWithoutNullStreams, WindowsProcessIdentity>()
+  private exitedProcesses = new WeakSet<ChildProcessWithoutNullStreams>()
+  private windowsProcessTrees = new WeakMap<ChildProcessWithoutNullStreams, WindowsOwnedProcessTree>()
+  private resolveCommand: typeof resolveNativeCommand
 
-  constructor(cwd?: string) {
+  constructor(cwd?: string, runtime: AcpxClientRuntime = {}) {
     this.cwd = cwd ?? process.cwd()
+    this.resolveCommand = runtime.resolveCommand ?? resolveNativeCommand
   }
 
   private isRawAgentCommand(agent: string): boolean {
@@ -398,7 +651,7 @@ export class AcpxClient {
   }
 
   private acpxEnv(): NodeJS.ProcessEnv {
-    const env = { ...process.env }
+    const env = buildAcpxEnvironment(this.cwd)
     const registry = env.npm_config_registry || env.NPM_CONFIG_REGISTRY || 'https://registry.npmjs.org/'
     const cache = env.npm_config_cache || env.NPM_CONFIG_CACHE || `${tmpdir()}/aamp-acpx-npm-cache`
 
@@ -418,10 +671,6 @@ export class AcpxClient {
     }
 
     mkdirSync(cache, { recursive: true })
-    env.PATH = [
-      join(this.cwd, 'node_modules', '.bin'),
-      process.env.PATH ?? '',
-    ].filter(Boolean).join(delimiter)
     env.npm_config_registry = registry
     env.NPM_CONFIG_REGISTRY = registry
     env.npm_config_cache = cache
@@ -430,23 +679,44 @@ export class AcpxClient {
   }
 
   private spawnAcpx(args: string[]): ChildProcessWithoutNullStreams {
-    return spawn('acpx', args, {
+    const env = this.acpxEnv()
+    const executable = this.resolveCommand('acpx', { env })
+    return this.trackWindowsProcess(spawn(executable.command, [...executable.argsPrefix, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.cwd,
-      env: this.acpxEnv(),
+      env,
       detached: process.platform !== 'win32',
       windowsHide: true,
-    })
+    }))
   }
 
   private spawnNpxAcpx(args: string[]): ChildProcessWithoutNullStreams {
-    return spawn('npx', ['-y', 'acpx', ...args], {
+    const env = this.acpxEnv()
+    const executable = this.resolveCommand('npx', { env })
+    return this.trackWindowsProcess(spawn(executable.command, [...executable.argsPrefix, '-y', 'acpx', ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.cwd,
-      env: this.acpxEnv(),
+      env,
       detached: process.platform !== 'win32',
       windowsHide: true,
-    })
+    }))
+  }
+
+  private trackWindowsProcess(proc: ChildProcessWithoutNullStreams): ChildProcessWithoutNullStreams {
+    if (process.platform === 'win32' && proc.pid) {
+      const identity = readWindowsProcessIdentity(proc.pid)
+      if (identity) {
+        this.windowsProcessIdentities.set(proc, identity)
+        const tree = new WindowsOwnedProcessTree(identity)
+        this.windowsProcessTrees.set(proc, tree)
+        tree.start()
+      }
+      proc.once('exit', () => {
+        this.exitedProcesses.add(proc)
+        this.windowsProcessTrees.get(proc)?.stopPolling()
+      })
+    }
+    return proc
   }
 
   private isSpawnNotFoundError(err: unknown): boolean {
@@ -488,6 +758,7 @@ export class AcpxClient {
         forcedKillTimers.delete(proc)
         ownedProcesses.delete(proc)
         this.activeProcesses.delete(proc)
+        this.windowsProcessTrees.get(proc)?.terminateRetained()
         resolveClosed()
       }
       proc.stdout.on('data', (chunk: Buffer) => handlers.onStdout?.(chunk))
@@ -511,7 +782,13 @@ export class AcpxClient {
         if (!proc.pid) forgetProcess()
         if (!cancelled && !startedFallback && this.isSpawnNotFoundError(err)) {
           startedFallback = true
-          attach(this.spawnNpxAcpx(args))
+          try {
+            attach(this.spawnNpxAcpx(args))
+          } catch (fallbackError) {
+            settled = true
+            handlers.onError(fallbackError as Error)
+            resolveExitedIfComplete()
+          }
           return
         }
         if (settled) {
@@ -524,7 +801,18 @@ export class AcpxClient {
       })
     }
 
-    attach(this.spawnAcpx(args))
+    try {
+      attach(this.spawnAcpx(args))
+    } catch (error) {
+      startedFallback = true
+      try {
+        attach(this.spawnNpxAcpx(args))
+      } catch (fallbackError) {
+        settled = true
+        handlers.onError(fallbackError instanceof Error ? fallbackError : error as Error)
+        resolveExitedIfComplete()
+      }
+    }
     return {
       cancel: async () => {
         if (!cancelled) {
@@ -609,9 +897,19 @@ export class AcpxClient {
       }
     }
 
-    try {
-      proc.kill(signal)
-    } catch { /* best-effort cleanup */ }
+    if (process.platform === 'win32') {
+      const tree = this.windowsProcessTrees.get(proc)
+      if (tree) {
+        tree.terminateRetained()
+        return
+      }
+      if (this.exitedProcesses.has(proc)) return
+      const identity = this.windowsProcessIdentities.get(proc)
+      if (identity) terminateWindowsProcessTree(identity)
+      return
+    }
+
+    try { proc.kill(signal) } catch { /* best-effort cleanup */ }
   }
 
   private formatProcessFailure(
