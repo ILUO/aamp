@@ -229,7 +229,7 @@ test('native command resolution unwraps a standard npm cmd shim to its real Java
   try {
     assert.deepEqual(await resolveNativeCommand('tool', {
       platform: 'win32',
-      env: { PATH: root, PATHEXT: '.CMD' },
+      env: { PATH: root, PATHEXT: '.cmd' },
       nodeExecutable: 'C:\\Program Files\\nodejs\\node.exe',
     }), {
       command: 'C:\\Program Files\\nodejs\\node.exe',
@@ -250,7 +250,7 @@ test('native command resolution selects the CLI assignment from a modern npx cmd
   await fsp.writeFile(path.join(root, 'npx.cmd'), `@ECHO OFF\r\nSETLOCAL\r\nSET "NODE_EXE=%~dp0\\node.exe"\r\nSET "NPM_PREFIX_JS=%~dp0\\node_modules\\npm\\bin\\npm-prefix.js"\r\nSET "NPX_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npx-cli.js"\r\n"%NODE_EXE%" "%NPX_CLI_JS%" %*\r\n`)
   try {
     assert.deepEqual(await resolveNativeCommand('npx', {
-      platform: 'win32', env: { PATH: root, PATHEXT: '.CMD' }, nodeExecutable: 'C:\\node.exe',
+      platform: 'win32', env: { PATH: root, PATHEXT: '.cmd' }, nodeExecutable: 'C:\\node.exe',
     }), { command: 'C:\\node.exe', argsPrefix: [cli] })
   } finally {
     await fsp.rm(root, { recursive: true, force: true })
@@ -308,7 +308,7 @@ test('native command resolution rejects a cmd shim whose argv handling cannot be
   try {
     await assert.rejects(resolveNativeCommand('legacy', {
       platform: 'win32',
-      env: { PATH: root, PATHEXT: '.CMD' },
+      env: { PATH: root, PATHEXT: '.cmd' },
     }), /cannot safely launch opaque Windows command shim/)
   } finally {
     await fsp.rm(root, { recursive: true, force: true })

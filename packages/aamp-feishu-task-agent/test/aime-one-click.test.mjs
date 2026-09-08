@@ -254,6 +254,8 @@ test('non-interactive local bootstrap helper does not require a controlling term
     'printf \'%s\n\' \'{"agent_type":"codex","acp_command":"codex-acp"}\' >&"$AAMP_TASK_INTERNAL_RESULT_FD"',
   ].join('\n'))
 
+  // Consume the controller input channel before exiting, including on Linux sockets.
+  writeFileSync(helper, readFileSync(helper, 'utf8').replace('#!/usr/bin/env bash\n', '#!/usr/bin/env bash\ncat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null\n'))
   const result = runControllerBootstrapHelper({
     root,
     helperBootstrap: helper,
@@ -275,6 +277,8 @@ test('service controller makes every local bootstrap helper non-interactive', ()
   ].join('\n'))
   const serviceFlagFile = path.join(root, 'service-flag')
 
+  // Consume the controller input channel before exiting, including on Linux sockets.
+  writeFileSync(helper, readFileSync(helper, 'utf8').replace('#!/usr/bin/env bash\n', '#!/usr/bin/env bash\ncat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null\n'))
   const result = runControllerBootstrapHelper({
     root,
     helperBootstrap: helper,
@@ -298,6 +302,8 @@ test('remote bootstrap preserves actionable failure text while redacting credent
     'exit 73',
   ].join('\n'))
 
+  // Consume the controller input channel before exiting, including on Linux sockets.
+  writeFileSync(helper, readFileSync(helper, 'utf8').replace('#!/usr/bin/env bash\n', '#!/usr/bin/env bash\ncat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null\n'))
   const result = runControllerBootstrapHelper({
     root,
     helperBootstrap: helper,
@@ -1973,12 +1979,14 @@ test('production cleanup stops the complete remote AIME helper process group', (
     'console.log(JSON.stringify({ type: \'cleanup.result\', npmPid, cleanupMs, helperOutcome, npmAliveAfterCleanup, prefixAtCleanup, prefixAfter, cacheAtCleanup, cacheAfter }))',
     '',
   ].join('\n'))
+  const cleanupBootstrap = path.join(root, 'cleanup-bootstrap.sh')
+  writeExecutable(cleanupBootstrap, 'cat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null\nexec bash '+JSON.stringify(bootstrap)+' "$@"')
   const result = spawnSync(process.execPath, [runner], {
     encoding: 'utf8',
     timeout: 25_000,
     env: isolatedBootstrapEnv({
       HOME: root,
-      AAMP_TASK_BOOTSTRAP_PATH: bootstrap,
+      AAMP_TASK_BOOTSTRAP_PATH: cleanupBootstrap,
       AAMP_TASK_STATE_HOME: path.join(root, 'state'),
       AAMP_TASK_RUNTIME_HOME: path.join(root, 'runtime'),
       AAMP_RUN_LOG_DIR: runLogDir,
