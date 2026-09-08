@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 25
     defaults:
       run:
-        shell: pwsh
+        shell: ${{ matrix.os == 'windows-latest' && 'powershell' || 'pwsh' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,7 +33,7 @@ jobs:
         run: |
           foreach ($name in @('aamp-feishu-task-agent','aamp-acp-bridge','aamp-feishu-bridge')) {
             Push-Location "packages/$name"
-            if ($IsWindows) { npm.cmd ci } else { npm ci }
+            if (($env:OS -eq 'Windows_NT')) { npm.cmd ci } else { npm ci }
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Pop-Location
           }
@@ -46,7 +46,7 @@ jobs:
       - name: ACP tests and types
         working-directory: packages/aamp-acp-bridge
         run: |
-          if ($IsWindows) { npm.cmd test } else { npm test }
+          if (($env:OS -eq 'Windows_NT')) { npm.cmd test } else { npm test }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node node_modules/typescript/bin/tsc --noEmit
       - name: Feishu tests and types
@@ -60,7 +60,7 @@ jobs:
           New-Item -ItemType Directory -Force artifacts | Out-Null
           foreach ($name in @('aamp-feishu-task-agent','aamp-acp-bridge','aamp-feishu-bridge')) {
             Push-Location "packages/$name"
-            if ($IsWindows) { npm.cmd pack --json --pack-destination ../../artifacts } else { npm pack --json --pack-destination ../../artifacts }
+            if (($env:OS -eq 'Windows_NT')) { npm.cmd pack --json --pack-destination ../../artifacts } else { npm pack --json --pack-destination ../../artifacts }
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Pop-Location
           }
