@@ -118,6 +118,7 @@ test('buildFeishuTaskPromptRules requires Codem-safe prefix for any lark-cli com
   const rules = buildFeishuTaskPromptRules({
     feishuLarkCliProfile: 'aamp-feishu-task-cli_aac6764b90f89cd0',
     feishuLarkCliBin: '/Users/bytedance/.local/bin/lark-cli',
+    platform: 'darwin',
   })
 
   assert.ok(rules.includes(
@@ -133,6 +134,7 @@ test('buildFeishuTaskPromptRules renders the selected lark-cli absolute path whe
   const rules = buildFeishuTaskPromptRules({
     feishuLarkCliProfile: 'aamp-feishu-task-cli_aac6764b90f89cd0',
     feishuLarkCliBin: '/Applications/Test Tools/lark-cli',
+    platform: 'darwin',
   })
 
   assert.doesNotMatch(rules, /AAMP_LARK_CLI_BIN/)
@@ -187,6 +189,7 @@ test('buildFeishuTaskDispatchContext excludes local profile details from dispatc
   const context = buildFeishuTaskDispatchContext(event, task, 'task_create', {
     feishuLarkCliProfile: 'aamp-feishu-task-cli_aac6764b90f89cd0',
     feishuLarkCliBin: '/Users/bytedance/.local/bin/lark-cli',
+    platform: 'darwin',
   })
 
   assert.deepEqual(context, { source: 'feishu-task' })

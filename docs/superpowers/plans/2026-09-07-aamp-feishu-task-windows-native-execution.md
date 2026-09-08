@@ -320,3 +320,8 @@ defaults:
 本执行计划更新后，设计约束以仓内 Spec 为准；聚合仓原方案保留为历史来源，不再作为并行维护的执行状态。用户指定当前 checkout 的指令覆盖旧方案中的另建 worktree 路径。
 
 本地交付提交按消费包组织：ACP `29c3506`、Feishu Bridge `8e3f9d5`、Task Agent `a5e49fe`；同包内入口、helper、平台原语与生命周期相互依赖，一并提交。原生验收相关未勾选项继续保留，不将代码交付解释为 Windows 支持发布完成。
+
+
+### 2026-09-08 原生实机增量
+
+用户确认后，在 Windows 10 22H2 Administrator SSH 环境完成三包原生测试、真实 npm tgz 安装入口、ACL/CIM/进程树及受控 Task Scheduler 启停验证。修复 npm eval、环境大小写、账户 SID 归一化、私密 ACL 与 Windows 原子替换；业务协议不变。完整证据及 package integrity 见 `docs/testing/feishu-task-windows-native-acceptance.md`。Task 10 的 Windows 11 普通用户、真实业务闭环与登录/故障恢复门禁继续保留未完成。

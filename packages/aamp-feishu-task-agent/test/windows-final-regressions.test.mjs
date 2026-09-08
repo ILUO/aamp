@@ -4,7 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { test } from 'node:test'
 import { resolveNativeCommand } from '../bin/windows-platform.mjs'
-import { runWindowsHelper } from '../bootstrap/windows-helper.mjs'
+import { runWindowsHelper, mergeHelperEnvironment } from '../bootstrap/windows-helper.mjs'
 import { withWindowsOperationLock } from '../bin/windows-operation-lock.mjs'
 const fixture = new URL('./fixtures/npm-cmd-shim.cmd', import.meta.url)
 async function root(t) {
@@ -253,4 +253,17 @@ await withWindowsOperationLock(dir+'/lock',async()=>{await fs.appendFile(dir+'/e
   assert.equal(events[0][0],events[1][0])
   assert.equal(events[2][0],events[3][0])
   assert.notEqual(events[0][0],events[2][0])
+})
+
+
+test('Windows helper overrides inherited Path casing before resolving the selected native CLI', async t => {
+  const dir = await root(t)
+  const executable = path.join(dir, 'selected.exe')
+  await fs.writeFile(executable, '')
+  for (const [inheritedKey, overrideKey] of [['Path', 'PATH'], ['PATH', 'Path']]) {
+    const env = mergeHelperEnvironment({[overrideKey]: dir, PATHEXT: '.exe', AAMP_WINDOWS_TEST_PLATFORM: 'win32'}, {[inheritedKey]: 'missing-parent-path', SystemRoot: 'preserved'})
+    assert.deepEqual(Object.keys(env).filter(key => key.toLowerCase() === 'path'), [overrideKey])
+    assert.equal(env.SystemRoot, 'preserved')
+    assert.deepEqual(await resolveNativeCommand('selected', {platform: 'win32', env}), {command: executable, argsPrefix: []})
+  }
 })

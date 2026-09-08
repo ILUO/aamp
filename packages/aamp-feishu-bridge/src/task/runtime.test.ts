@@ -1384,9 +1384,8 @@ test('runtime completes and comments briefly when agent result violates the fina
     await waitFor(() => {
       assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_bad_contract'])
       assert.equal(fakeFeishu.comments.length, 1)
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
     })
-
-    assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
     assert.match(fakeFeishu.comments[0]?.content ?? '', /^智能体返回的结果格式不符合任务协议，本次处理已结束。任务将流转为已完成。原因：/)
     assert.match(fakeFeishu.comments[0]?.content ?? '', /未按 FEISHU_TASK_RESULT_JSON 协议收尾/)
     assert.match(fakeFeishu.comments[0]?.content ?? '', /Task ID: feishu-task-task_guid_bad_contract-evt_bad_contract/)
@@ -1465,7 +1464,7 @@ test('runtime keeps lark-cli profile out of dispatch context and puts it in prom
 
     assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_lark_cli_profile, undefined)
     assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /Feishu lark-cli profile rules:/)
-    assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /--profile custom-feishu-profile/)
+    assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', process.platform === 'win32' ? /--profile 'custom-feishu-profile'/ : /--profile custom-feishu-profile/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

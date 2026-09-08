@@ -169,10 +169,10 @@ test('same package materializes once before four real business processes overlap
       await delay(40)
       if (activeMaterializations > 1) throw new Error('shared package tree was materialized concurrently')
       activeMaterializations -= 1
-      return directDescriptor(worker)
+      return directDescriptor(process.execPath)
     },
     spawnProcess(command, args, options) {
-      launched.push(args[0])
+      launched.push(args[1])
       return spawn(command, args, options)
     },
   })
@@ -182,7 +182,7 @@ test('same package materializes once before four real business processes overlap
       launcher.launch({
         packageSpec: 'fixture-package@1.0.0',
         executable: 'fixture-bridge',
-        args: [id, eventsFile, releaseFile],
+        args: [worker, id, eventsFile, releaseFile],
         spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
       })
     ))))
@@ -292,7 +292,7 @@ test('one business startup failure stays isolated after shared preparation', asy
   const launcher = createPackageExecutableLauncher({
     async materialize() {
       materializations += 1
-      return directDescriptor(worker)
+      return directDescriptor(process.execPath)
     },
   })
   const children = []
@@ -300,11 +300,11 @@ test('one business startup failure stays isolated after shared preparation', asy
     children.push(...await Promise.all([
       launcher.launch({
         packageSpec: 'fixture-package@1.0.0', executable: 'fixture-bridge',
-        args: ['bad', eventsFile, releaseFile, 'fail'], spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
+        args: [worker, 'bad', eventsFile, releaseFile, 'fail'], spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
       }),
       launcher.launch({
         packageSpec: 'fixture-package@1.0.0', executable: 'fixture-bridge',
-        args: ['good', eventsFile, releaseFile], spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
+        args: [worker, 'good', eventsFile, releaseFile], spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
       }),
     ]))
     const badExit = await waitForExit(children[0])
@@ -324,13 +324,13 @@ test('prepared direct-launch children remain independently stoppable', async () 
   const worker = await createWorkerFixture(root)
   const eventsFile = path.join(root, 'events.log')
   const releaseFile = path.join(root, 'never-release')
-  const launcher = createPackageExecutableLauncher({ materialize: async () => directDescriptor(worker) })
+  const launcher = createPackageExecutableLauncher({ materialize: async () => directDescriptor(process.execPath) })
   const children = []
   try {
     children.push(...await Promise.all(['one', 'two'].map((id) => launcher.launch({
       packageSpec: 'fixture-package@1.0.0',
       executable: 'fixture-bridge',
-      args: [id, eventsFile, releaseFile],
+      args: [worker, id, eventsFile, releaseFile],
       spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' },
     }))))
     await until(async () => {
@@ -346,13 +346,31 @@ test('prepared direct-launch children remain independently stoppable', async () 
   }
 })
 
+test('Windows npm resolver transports fixed source as a single-line data module', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-resolver-transport-'))
+  try {
+    const executable = process.platform === 'win32' ? 'transport-fixture.exe' : 'transport-fixture'
+    const native = path.join(root, executable)
+    await fsp.copyFile(process.execPath, native)
+    await fsp.chmod(native, 0o755)
+    const args = npmExecutableResolverArgs(executable, {platform: 'win32'})
+    assert.equal(args[0], '--input-type=module')
+    assert.equal(args[1], '--eval')
+    assert.match(args[2], /^import\('data:text\/javascript;base64,[A-Za-z0-9+/=]+'\)$/)
+    assert.equal(args[3], executable)
+    assert.match(npmExecutableResolverArgs(executable, {platform: 'linux'})[2], /\nimport fs/)
+    const {stdout} = await execFileAsync(process.execPath, args, {env: withoutNpmExecContext({...process.env, PATH: root}), timeout: 5000})
+    assert.equal(parseResolvedPackageExecutable(stdout, executable).command, native)
+  } finally {await fsp.rm(root, {recursive: true, force: true})}
+})
+
 test('resolver captures the executable shim and exact npm PATH without shell lookup', async () => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-package-resolver-'))
   try {
     const binDir = path.join(root, 'node_modules', '.bin')
     await fsp.mkdir(binDir, { recursive: true })
-    const shim = path.join(binDir, 'fixture-bridge')
-    await fsp.writeFile(shim, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    const shim = path.join(binDir, process.platform === 'win32' ? 'fixture-bridge.exe' : 'fixture-bridge')
+    await fsp.copyFile(process.execPath, shim)
     await fsp.chmod(shim, 0o755)
 
     for (const env of [

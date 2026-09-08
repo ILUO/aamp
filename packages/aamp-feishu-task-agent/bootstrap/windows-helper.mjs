@@ -36,6 +36,20 @@ const supportedActions = new Set([
 const quote = (value) => `"${String(value).replaceAll('"', '\\"')}"`
 const envValue = (env, key, fallback = '') =>
   env[key] ?? process.env[key] ?? fallback
+
+export function mergeHelperEnvironment(overrides = {}, inherited = process.env) {
+  const windows = process.platform === 'win32' || overrides.AAMP_WINDOWS_TEST_PLATFORM === 'win32'
+  const result = {}
+  for (const [key, value] of [...Object.entries(inherited), ...Object.entries(overrides)]) {
+    if (windows) {
+      for (const existing of Object.keys(result)) {
+        if (existing.toLowerCase() === key.toLowerCase()) delete result[existing]
+      }
+    }
+    result[key] = value
+  }
+  return result
+}
 async function exists(file) {
   try {
     await access(file, constants.X_OK)
@@ -65,7 +79,7 @@ function run(commandName, args, { env, input, stdio = 'pipe' } = {}) {
       descriptor.command,
       [...(descriptor.argsPrefix || []), ...args],
       {
-        env: { ...process.env, ...env },
+        env: mergeHelperEnvironment(env),
         stdio: stdio === 'inherit' ? 'inherit' : ['pipe', 'pipe', 'pipe'],
         shell: false,
       },
@@ -210,7 +224,7 @@ async function npxLaunch(extraEnv) {
   ) {
     const resolved = await resolveNativeCommand('npx', {
       platform: 'win32',
-      env: { ...process.env, ...extraEnv },
+      env: mergeHelperEnvironment(extraEnv),
     })
     return { command: resolved.command, args: resolved.argsPrefix }
   }
@@ -235,7 +249,7 @@ async function npmLaunch(extraEnv) {
   ) {
     const resolved = await resolveNativeCommand('npm', {
       platform: 'win32',
-      env: { ...process.env, ...extraEnv },
+      env: mergeHelperEnvironment(extraEnv),
     })
     return { command: resolved.command, args: resolved.argsPrefix }
   }
@@ -596,8 +610,7 @@ export async function runWindowsHelper(
   if (!supportedActions.has(action))
     throw new Error(`unknown Windows helper action: ${action}`)
   const env = {
-    ...process.env,
-    ...extraEnv,
+    ...mergeHelperEnvironment(extraEnv),
     LARKSUITE_CLI_CONFIG_DIR: envValue(
       extraEnv,
       'AAMP_LARK_CLI_CONFIG_DIR',

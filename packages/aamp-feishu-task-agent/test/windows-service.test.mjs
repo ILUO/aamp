@@ -73,3 +73,33 @@ test('independent service managers serialize entire stop transactions', async t 
   assert.equal(events[0].split(' ')[0],events[1].split(' ')[0])
   assert.equal(events[2].split(' ')[0],events[3].split(' ')[0])
 })
+
+
+test('native scheduler resolves SID and account-name principals and rejects unknown or foreign owners', {skip:process.platform !== 'win32' && 'requires native Windows account translation'}, async () => {
+  const {execFile}=await import('node:child_process')
+  const {promisify}=await import('node:util')
+  const execute=promisify(execFile)
+  // Shadow only the read cmdlet with an in-memory task. The production status
+  // script performs the real Windows SID/NTAccount translation; no task is mutated.
+  const fixture=String.raw`
+$current=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+$sid=$current.User.Value
+switch ($env:AAMP_PRINCIPAL_FIXTURE_KIND) {
+ 'sid' { $principal=$sid }
+ 'name' { $principal=$current.Name }
+ 'short' { $principal=($current.Name -split '\\')[-1] }
+ 'foreign' { $principal='S-1-5-7'; if ($sid -eq $principal) { $principal='S-1-5-18' } }
+ 'unknown' { $principal='AAMP-unknown-account-'+[guid]::NewGuid().ToString('N') }
+}
+$script:fixtureTask=[pscustomobject]@{Principal=[pscustomobject]@{UserId=$principal};State='Ready'}
+function Get-ScheduledTask { return $script:fixtureTask }
+$env:AAMP_SCHEDULER_INPUT=@{operation='status';name='in-memory-fixture';sid=$sid} | ConvertTo-Json -Compress
+`
+  const run=kind=>execute('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',fixture+mod.__test.schedulerScript],{env:{...process.env,AAMP_PRINCIPAL_FIXTURE_KIND:kind},encoding:'utf8',timeout:10000})
+  const direct=JSON.parse((await run('sid')).stdout.replace(/^\uFEFF/,''))
+  assert.match(direct.ownerSid,/^S-1-/)
+  assert.equal(direct.loaded,true)
+  for (const kind of ['name','short']) assert.deepEqual(JSON.parse((await run(kind)).stdout.replace(/^\uFEFF/,'')),direct)
+  await assert.rejects(run('foreign'),/Scheduled task belongs to another identity/)
+  await assert.rejects(run('unknown'),/Cannot verify scheduled task principal SID/)
+})

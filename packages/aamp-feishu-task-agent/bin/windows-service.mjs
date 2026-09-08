@@ -12,11 +12,25 @@ const schedulerScript = String.raw`
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
 $c=$env:AAMP_SCHEDULER_INPUT | ConvertFrom-Json
+function Resolve-TaskPrincipalSid([string]$userId) {
+  if ([string]::IsNullOrWhiteSpace($userId)) { throw 'Cannot verify scheduled task principal SID' }
+  try {
+    if ($userId -match '^S-\d(?:-\d+)+$') {
+      return ([System.Security.Principal.SecurityIdentifier]::new($userId)).Value
+    }
+    $account=[System.Security.Principal.NTAccount]::new($userId)
+    return ($account.Translate([System.Security.Principal.SecurityIdentifier])).Value
+  } catch { throw 'Cannot verify scheduled task principal SID' }
+}
 $t=Get-ScheduledTask -TaskName $c.name -ErrorAction SilentlyContinue
-if ($t -and $t.Principal.UserId -ne $c.sid) { throw 'Scheduled task belongs to another identity' }
+$ownerSid=$c.sid
+if ($t) {
+  $ownerSid=Resolve-TaskPrincipalSid ([string]$t.Principal.UserId)
+  if ($ownerSid -ne $c.sid) { throw 'Scheduled task belongs to another identity' }
+}
 switch ($c.operation) {
  'status' {
-  if ($t) { @{loaded=($t.State -ne 'Disabled');state=[string]$t.State;ownerSid=$t.Principal.UserId} | ConvertTo-Json -Compress }
+  if ($t) { @{loaded=($t.State -ne 'Disabled');state=[string]$t.State;ownerSid=$ownerSid} | ConvertTo-Json -Compress }
   else { @{loaded=$false;state='Stopped';ownerSid=$c.sid} | ConvertTo-Json -Compress }
  }
  'disable' { if ($t) { Disable-ScheduledTask -TaskName $c.name | Out-Null } }
@@ -350,3 +364,5 @@ export function createWindowsServiceManager({
       }),
   }
 }
+
+export const __test = Object.freeze({ schedulerScript })

@@ -240,70 +240,11 @@ function createFakeAcpx(mode: 'success' | 'auth-failure' | 'auth-with-output' | 
   const binDirectory = join(cwd, 'node_modules', '.bin')
   const logFile = join(cwd, 'acpx.log')
   mkdirSync(binDirectory, { recursive: true })
-  writeFileSync(join(binDirectory, 'acpx'), `#!/bin/sh
-printf '%s\\n' "$*" >> "${logFile}"
-case "${mode}:$*" in
-  auth-failure:*" prompt "*)
-    printf '%s\\n' 'Authentication required. Please use /login command to sign in to your account' >&2
-    exit 0
-    ;;
-  auth-with-output:*" prompt "*)
-    printf '%s\\n' 'partial assistant reply'
-    printf '%s\\n' 'warning: session disconnected' >&2
-    printf '%s\\n' '[error] Authentication required' >&2
-    exit 0
-    ;;
-  json-auth-failure:*" prompt "*)
-    printf '%s\\n' 'partial assistant reply'
-    printf '%s\\n' '{"jsonrpc":"2.0","id":"1","error":{"message":"Authentication required"}}'
-    exit 0
-    ;;
-  json-aime-auth-failure:*" prompt "*)
-    printf '%s\\n' '{"jsonrpc":"2.0","id":"1","error":{"code":-32001,"message":"Managed user authentication is required. Run \`aime-acp auth login --site cn\`.","data":{"code":"AUTH_REQUIRED","retryable":false}}}'
-    exit 0
-    ;;
-  json-aime-sources:*" prompt "*)
-    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"aamp-aime","update":{"sessionUpdate":"agent_message_chunk","messageId":"aime-sources","content":{"type":"text","text":"AAMP_RESULT_JSON: {\\"output\\":\\"FEISHU_TASK_RESULT_JSON: {\\\\\\"schema\\\\\\":\\\\\\"feishu_task_result.v2\\\\\\",\\\\\\"status\\\\\\":\\\\\\"answered\\\\\\",\\\\\\"summary\\\\\\":\\\\\\"成都天气\\\\\\",\\\\\\"reply_written\\\\\\":false}\\"}"}}}}'
-    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"aamp-aime","update":{"sessionUpdate":"agent_message_chunk","messageId":"aime-sources","_meta":{"aime.acp.message_kind":"sources"},"content":{"type":"text","text":"Sources:\\n- [Guide](https://example.test/guide)"}}}}'
-    printf '%s\n' '{"jsonrpc":"2.0","id":"1","result":{"stopReason":"end_turn"}}'
-    exit 0
-    ;;
-  auth-discussion:*" prompt "*)
-    printf '%s\\n' 'The phrase authentication required may appear in diagnostic logs.'
-    exit 0
-    ;;
-  auth-failure:*"sessions new"*)
-    printf '%s\\n' 'Authentication required' >&2
-    exit 1
-    ;;
-  timeout:*"sessions new"*)
-    sleep 5
-    exit 0
-    ;;
-  close-retry:*"sessions close"*)
-    close_count_file="${cwd}/close-count"
-    close_count=0
-    if [ -f "$close_count_file" ]; then close_count=$(cat "$close_count_file"); fi
-    close_count=$((close_count + 1))
-    printf '%s\\n' "$close_count" > "$close_count_file"
-    if [ "$close_count" -eq 1 ]; then
-      printf '%s\\n' 'temporary cleanup failure' >&2
-      exit 1
-    fi
-    printf '%s\\n' 'probe-session-id'
-    exit 0
-    ;;
-  *"sessions new"*)
-    printf '%s\\n' 'probe-session-id'
-    exit 0
-    ;;
-  *"sessions close"*)
-    printf '%s\\n' 'probe-session-id'
-    exit 0
-    ;;
-esac
-exit 0
-`)
+  const entry = join(binDirectory, 'acpx.cjs')
+  writeFileSync(entry, `process.env.AAMP_FAKE_ACPX_MODE = ${JSON.stringify(mode)};\nprocess.env.AAMP_FAKE_ACPX_CWD = ${JSON.stringify(cwd)};\nimport(${JSON.stringify(new URL('../test/fake-acpx.mjs', import.meta.url).href)});\n`)
+  // npm-style shim exercises native resolution without requiring a POSIX shell.
+  writeFileSync(join(binDirectory, 'acpx.cmd'), '@echo off\r\n"' + process.execPath + '" "%~dp0\\acpx.cjs" %*\r\n')
+  writeFileSync(join(binDirectory, 'acpx'), '#!/usr/bin/env node\n' + readFileSync(entry, 'utf8'))
   chmodSync(join(binDirectory, 'acpx'), 0o755)
   return { cwd, logFile }
 }
@@ -363,7 +304,7 @@ function createTermResistantAcpx(): { cwd: string; statePath: string } {
   return { cwd, statePath }
 }
 
-test('stop waits for a TERM-resistant owned child to close after SIGKILL', { timeout: 10_000 }, async () => {
+test('stop waits for a TERM-resistant owned child to close after SIGKILL', { timeout: 10_000, skip: process.platform === 'win32' ? 'POSIX SIGTERM resistance; Windows ownership and termination are covered separately' : false }, async () => {
   const { cwd, statePath } = createTermResistantAcpx()
   const client = new AcpxClient(cwd)
   const execution = client.ensureSession('fake-agent --acp', 'stop-owned-child')
