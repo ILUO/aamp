@@ -262,8 +262,8 @@ assert.equal(controller.shouldUseBackgroundService('start', 'linux', false), fal
 **Files:** 新增 `.github/workflows/feishu-task-windows.yml`、`packages/aamp-feishu-task-agent/scripts/run-platform-tests.mjs`；必要时调整现有 fixture，不改 SDK workflow。
 
 - [x] runner 枚举现有 test 文件，维护唯一 POSIX-only 分类及原因；Windows 对五个 helper 等被替代行为必须有对等测试。新测试文件默认纳入，不用允许列表静默漏测。
-- [ ] runner 通过 process.execPath + 参数数组运行 node:test，继承退出码；输出 executed/excluded 清单。Windows-only 测试在 Windows 不得 skip；没有实际执行用例不能判通过。
-- [x] workflow 路径只覆盖三个包与该 workflow；沿用仓库 checkout/setup-node action 主版本，Windows Node 22/24 矩阵，默认 pwsh，另做 powershell.exe 5.1 smoke。
+- [x] runner 通过 process.execPath + 参数数组运行 node:test，继承退出码；输出 executed/excluded 清单。Windows-only 测试在 Windows 不得 skip；没有实际执行用例不能判通过。
+- [x] workflow 路径只覆盖三个包与该 workflow；沿用仓库 checkout/setup-node action 主版本，Windows Node 22/24 矩阵，Windows 默认 PowerShell 5.1，POSIX 使用 pwsh，另做打包后 PowerShell 5.1 smoke。
 - [x] 配置示意：
 
 ```yaml
@@ -273,17 +273,18 @@ strategy:
 runs-on: windows-latest
 defaults:
   run:
-    shell: pwsh
+    shell: powershell
+# Windows 示例；完整工作流还含 macOS/Ubuntu 的 pwsh。
 # 每个包单独 working-directory，分别 npm.cmd ci；
 # Agent: node scripts/run-platform-tests.mjs
 # ACP: npm.cmd test + npm.cmd exec -- tsc --noEmit
 # Feishu: node --import tsx --test "src/**/*.test.ts" + tsc
 ```
 
-- [ ] 清理测试进程 PATH 中的 Bash/MSYS/Git usr/bin 路径，保留 Node 和 Windows 系统工具；fixture 检查启动命令不得解析到 sh/bash/wsl。主机预装 Git Bash 不作为支持依据。
+- [x] 清理测试进程 PATH 中的 Bash/MSYS/Git usr/bin 路径，保留 Node 和 Windows 系统工具；fixture 检查启动命令不得解析到 sh/bash/wsl。主机预装 Git Bash 不作为支持依据。
 - [x] 为本次包补 macOS 回归与 Linux 前台兼容检查（不新增 Linux 产品能力）。旧 POSIX 脚本测试保持在相应系统执行。
 - [x] Hosted Windows CI 不代替 Windows 11 普通用户登录测试；CI 不携带真实 Feishu secret，不自动发真实任务。上传脱敏测试报告和包清单。
-- [ ] 提交：`ci(feishu-task-agent): verify native Windows runtime`。
+- [x] 已提交专用 Windows/macOS/Linux CI；最新证据见验收记录。
 
 **Done:** CI 覆盖完整业务测试与 Windows 对等行为；报告明确哪些场景仍需实机。
 
@@ -301,13 +302,14 @@ defaults:
 
 - [ ] Windows 11 普通用户，无 Bash/WSL：全新安装 → 前台授权/配对 → Codex 探针 → 后台启动。
 - [x] 专用测试 Bot 跑普通任务完整 ACK/结果/完成链路、need_help + Owner 评论继续、既有提醒/重复/子任务行为、附件输入和产物上传。各自 task ID 与真实回读见验收记录；重复任务第二轮提前 due 加速。
-- [ ] 用户会话实测：关闭终端、锁屏、注销再登录、stop/start/restart、崩溃重启耗尽。注销不承诺继续工作；不把锁屏与注销混为同一场景。
-- [ ] 异常：过期授权、网络断开、上游 CLI 缺失、策略拒绝、中文/特殊字符路径、PID 重用、多绑定及旁观 Agent；没有假 ready、密钥输出或误杀。
-- [ ] tgz 更新和卸载闭环；保留绑定、清理本产品任务，远端应用和其他产品数据不受影响。
+- [x] Win10 关闭启动终端后真实后台任务继续、stop/start/restart、controller 崩溃自动恢复与旁观进程存活；重试耗尽及等待中 stop 另有受控测试。
+- [ ] 锁屏、注销再登录及登录触发：待云控制台可恢复交互登录条件。注销不承诺继续工作，不把 SSH 登录或锁屏等同于交互登录。
+- [x] 异常的受控测试层：授权能力/网络错误、CLI 缺失、ACL/身份查询拒绝、PID 重用、多绑定隔离；中文/特殊路径、旁观进程另有 Win10 原生证据。不表示真实 token 撤销、拔网或企业策略变更已实测。
+- [x] tgz 更新和卸载闭环；保留绑定、清理本产品任务，远端应用和其他产品数据不受影响。
 - [x] 按设计验收矩阵逐项填写结果，已知非 Windows 业务缺陷独立记录；不得通过修业务缺陷使本次范围变大。
 - [x] 执行 `git diff --check` 和 `git diff --stat 7c4b7ff50b2fc766f9076dcbc7d87ce910ca8b76`，逐文件解释对应平台阻断点；检查无 SDK/服务端/旧 Task Bridge 改动。
 - [x] 发布准备仅记录：必要 Bridge patch → Controller 精确包引用 → Task Agent patch；发布身份/版本核验完成后才具备发布条件。未获发布授权不执行 npm publish。
-- [ ] 提交：`docs(feishu-task-agent): record Windows acceptance evidence`。
+- [x] 验收记录、顶部验证汇总、README 和执行计划已提交开发分支。
 
 **完成标准:** Windows 原生普通用户完整闭环 + tgz 验证 + CI/实机证据齐全 + macOS/Linux 回归。当前 macOS 上通过静态检查不等于支持完成。
 
@@ -347,3 +349,7 @@ defaults:
 已推送开发分支，Draft PR https://github.com/ILUO/aamp/pull/1，未合并或 npm 发布。`4f00ce2` 三平台 × Node 22/24 六组 CI 全绿；后续 Windows CIM 元数据修复正在复跑最新提交，不能把旧绿代替最新结果。Win10 Node 24 三包原生测试、真实重复任务两实例、中文/CRLF 附件下载核验、50 MiB 出站边界、特殊目录原生 Codex sandbox、controller 崩溃清理和同 worker 自动恢复均已取得证据。非法更新保持旧服务与包，合法更新保留 bindings 通过；更新后 Node 24 业务、卸载收尾仍在执行。锁屏与注销/重新登录待云控制台可恢复登录条件，Win11 普通用户仍为独立门禁。具体失败、修复、任务 ID、计数与 artifact 边界统一见验收记录的顶部汇总和最新补测小节，不整体勾选 Task 10。
 
 最新增量：`e989ec6` 的 CI run 34227906679 六组全绿；Windows 锁预算排除 ACL 初始化耗时，原生绑定测试 20/20。真实 Node 24 更新后后台仍有持续 CIM 缺路径，任务 `6015d748-78f3-4613-a868-339aa4c5171a` 尚未取得结果；卸载仍待收尾。
+
+最终业务增量：`32af180` 六组 CI 全绿，Win10 Node 24 实际 controller 13336 ready；专用更新后任务 `6015d748-78f3-4613-a868-339aa4c5171a` 已 ACK、结果 361、服务端 done、ACP completed。此前 CIM/锁/PATH 失败保留为历史证据，不再作为当前业务阻塞。最终卸载与登录会话门禁独立跟踪。
+
+收尾：Win10 隔离安装已完成正常 stop、计划任务移除与 npm 卸载，绑定字节保留、受管 Node 为 0、三旁观进程存活。剩余实机门禁明确为锁屏/注销重新登录（需云控制台配合）及 Win11 普通用户；受控异常测试与实际租户/网络/企业策略改动分开表述。
