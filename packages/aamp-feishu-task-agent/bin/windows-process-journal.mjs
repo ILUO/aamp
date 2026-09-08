@@ -70,7 +70,7 @@ export async function createWindowsProcessJournal(directory, controller, {
 
 export async function recoverWindowsProcessJournals(directory, {
   readIdentity = async (pid) => (await platform()).readWindowsProcessIdentity(pid),
-  stopTree = async (identity) => (await platform()).stopOwnedWindowsTree(identity),
+  stopTree = async (identity, options) => (await platform()).stopOwnedWindowsTree(identity, options),
 } = {}) {
   for (const file of await journalFiles(directory)) {
     const journal = await readJson(file)
@@ -79,7 +79,9 @@ export async function recoverWindowsProcessJournals(directory, {
     }
     const liveController = await readIdentity(journal.controller.pid)
     if (sameIdentity(liveController, journal.controller)) continue
-    for (const identity of [...journal.descendants].reverse()) await stopTree(identity)
+    for (const identity of [...journal.descendants].reverse()) {
+      await stopTree(identity, { allowExitedIdentity: true })
+    }
     await fsp.rm(`${file}.stop`, { force: true })
     await fsp.rm(file)
   }

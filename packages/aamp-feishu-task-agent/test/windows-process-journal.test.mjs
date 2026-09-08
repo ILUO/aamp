@@ -3,6 +3,7 @@ import { promises as fsp } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { stopOwnedWindowsTree } from '../bin/windows-platform.mjs'
 
 import {
   createWindowsProcessJournal,
@@ -73,3 +74,35 @@ test('identity-specific stop request is written only for an exact live controlle
   }), /identity changed/)
   await fsp.rm(root, { recursive: true, force: true })
 })
+
+for (const [name, live, error] of [
+  ['newer PID generation', { ...child, startedAt: '2026-09-07T02:00:00.000Z', ownerSid: 'S-1-5-21-other' }, undefined],
+  ['same creation time changed owner', { ...child, ownerSid: 'S-1-5-21-other' }, /identity changed/],
+  ['same creation time changed executable', { ...child, executablePath: 'C:/other.exe' }, /identity changed/],
+  ['older creation time', { ...child, startedAt: controller.startedAt }, /identity changed/],
+  ['invalid creation time', { ...child, startedAt: 'invalid' }, /identity changed/],
+  ['different PID', { ...child, pid: 999, startedAt: '2026-09-07T02:00:00.000Z' }, /identity changed/],
+  ['identity query failure', new Error('CIM access denied'), /CIM access denied/],
+]) {
+  test(`journal recovery handles ${name} without killing an unverified process`, async (t) => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-journal-generation-'))
+    t.after(() => fsp.rm(root, { recursive: true, force: true }))
+    const journal = await createWindowsProcessJournal(root, controller, {
+      ensurePrivateDirectory: async () => {}, atomicReplace: fsp.rename,
+    })
+    await journal.record([child])
+    let kills = 0
+    const recovery = recoverWindowsProcessJournals(root, {
+      readIdentity: async () => undefined,
+      stopTree: (identity, options) => stopOwnedWindowsTree(identity, {
+        ...options, platform: 'win32', getCurrentSid: async () => child.ownerSid,
+        readIdentity: async () => { if (live instanceof Error) throw live; return live },
+        runTaskkill: async () => { kills++ },
+      }),
+    })
+    if (error) await assert.rejects(recovery, error)
+    else await recovery
+    assert.equal(kills, 0)
+    assert.equal(await fsp.stat(journal.file).then(() => true, () => false), Boolean(error))
+  })
+}

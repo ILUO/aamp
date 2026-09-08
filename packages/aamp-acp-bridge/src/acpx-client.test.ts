@@ -1,3 +1,4 @@
+import { parseWindowsAgentArgv, windowsAgentAlias } from './windows-agent-config.js'
 import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -356,8 +357,8 @@ test('probeAgent creates a fresh ACP session and closes it after success', async
   })
 
   assert.deepEqual(readFileSync(logFile, 'utf8').trim().split('\n'), [
-    `--approve-all --cwd ${cwd} --agent fake-agent --acp sessions new --name aamp-readiness-probe-test`,
-    `--approve-all --cwd ${cwd} --agent fake-agent --acp sessions close aamp-readiness-probe-test`,
+    `--approve-all --cwd ${cwd} ${process.platform === 'win32' ? windowsAgentAlias(['fake-agent', '--acp']) : '--agent fake-agent --acp'} sessions new --name aamp-readiness-probe-test`,
+    `--approve-all --cwd ${cwd} ${process.platform === 'win32' ? windowsAgentAlias(['fake-agent', '--acp']) : '--agent fake-agent --acp'} sessions close aamp-readiness-probe-test`,
   ])
 })
 
@@ -492,4 +493,146 @@ test('prompt excludes only meta-marked AIME Sources while preserving the origina
     result.output,
     'Sources:\n- [Guide](https://example.test/guide)',
   ])
+})
+
+ test('Windows raw command launches acpx with registered argv alias while POSIX stays raw', async () => {
+  for (const platform of ['win32', 'linux'] as const) {
+    const { cwd, logFile } = createFakeAcpx('success')
+    const client = new AcpxClient(cwd, { platform })
+    const command = '"C:\\Program Files\\node.exe" "C:\\工具 & data\\wrapper.mjs" "C:\\config.json"'
+    await client.ensureSession(command, 'argv-integration')
+    const logged = readFileSync(logFile, 'utf8')
+    if (platform === 'win32') {
+      const argv = parseWindowsAgentArgv(command)
+      const alias = windowsAgentAlias(argv)
+      assert.ok(logged.includes(alias))
+      assert.ok(!logged.includes('--agent'))
+      const config = JSON.parse(readFileSync(join(cwd, '.acpxrc.json'), 'utf8'))
+      assert.deepEqual(config.agents[alias], { argv })
+    } else {
+      assert.ok(logged.includes('--agent ' + command))
+      assert.equal(existsSync(join(cwd, '.acpxrc.json')), false)
+    }
+  }
+})
+
+for (const tree of [false, true]) {
+  test(`native ACP CIM ${tree ? 'tree' : 'identity'} verifies exits and reuse but preserves live failures`, { skip: process.platform !== 'win32' }, async () => {
+    const { execFileSync } = await import('node:child_process')
+    const { WINDOWS_PROCESS_IDENTITY_SCRIPT, WINDOWS_PROCESS_TREE_SCRIPT } = await import('./acpx-client.js')
+    const fixture = String.raw`
+$script:reads = 0
+$script:snapshot = [pscustomobject]@{ ProcessId=10384; ParentProcessId=1; CreationDate=[datetime]::Parse('2026-09-08T01:00:00Z'); ExecutablePath='C:\node.exe' }
+function Get-CimInstance {
+  $script:reads++
+  if ($script:reads -eq 1) { return $script:snapshot }
+  if ($env:AAMP_CIM_RACE -eq 'reread-failure') { throw 'CIM reread denied' }
+  if ($env:AAMP_CIM_RACE -like '*gone') { return $null }
+  if ($env:AAMP_CIM_RACE -like '*reused') { return [pscustomobject]@{ ProcessId=10384; CreationDate=$script:snapshot.CreationDate.AddSeconds(1) } }
+  return $script:snapshot
+}
+function Invoke-CimMethod {
+  if ($env:AAMP_CIM_RACE -like 'error-*') { throw 'GetOwnerSid fixture failure' }
+  if ($env:AAMP_CIM_RACE -eq 'return-code-live') { return [pscustomobject]@{ ReturnValue=2; Sid='' } }
+  return [pscustomobject]@{ ReturnValue=0; Sid='S-1-5-21-1000' }
+}
+`
+    const script = fixture + (tree ? WINDOWS_PROCESS_TREE_SCRIPT : WINDOWS_PROCESS_IDENTITY_SCRIPT)
+    const run = (scenario: string) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+      encoding: 'utf8', windowsHide: true, timeout: 10_000,
+      env: { ...process.env, AAMP_CIM_RACE: scenario, AAMP_ACP_WINDOWS_INPUT_BASE64: Buffer.from(JSON.stringify({ pid: 10384 })).toString('base64') },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    for (const scenario of ['error-gone', 'error-reused', 'success-gone', 'success-reused']) {
+      if (tree) assert.deepEqual(JSON.parse(run(scenario)), { processes: [] })
+      else assert.throws(() => run(scenario), (error: unknown) => (error as { status: number }).status === 3)
+    }
+    const live = JSON.parse(run('success-live'))
+    assert.equal((tree ? live.processes[0] : live).pid, 10384)
+    for (const scenario of ['error-live', 'return-code-live', 'reread-failure']) assert.throws(() => run(scenario))
+  })
+}
+
+for (const fallback of [false, true]) for (const legacyText of [false, true]) {
+  test(`Windows long prompt uses ${legacyText ? 'legacy text' : 'JSON'} stdin with ${fallback ? 'npx fallback' : 'direct acpx'}`, async () => {
+    const { cwd, logFile } = createFakeAcpx('auth-discussion')
+    const fixtureEntry = join(cwd, 'node_modules', '.bin', 'acpx.cjs')
+    const attempts: string[] = []
+    const client = new AcpxClient(cwd, {
+      platform: 'win32',
+      resolveCommand: command => {
+        attempts.push(command)
+        return fallback && command === 'acpx'
+          ? { command: join(cwd, 'missing-acpx.exe'), argsPrefix: [] }
+          : { command: process.execPath, argsPrefix: [fixtureEntry] }
+      },
+    })
+    const prompt = '[{"type":"text","text":"literal, never reinterpret"}]\n' + '中文 "quotes" & %PATH% ^ (data)\n'.repeat(1200)
+    const result = legacyText
+      ? await client['promptTextMode']('fake-agent --acp', 'long-native-prompt', prompt)
+      : await client.prompt('fake-agent --acp', 'long-native-prompt', prompt)
+    assert.equal(result.output, 'The phrase authentication required may appear in diagnostic logs.')
+    assert.deepEqual(JSON.parse(readFileSync(join(cwd, 'stdin.json'), 'utf8')), [{ type: 'text', text: prompt.trim() }])
+    const args = readFileSync(logFile, 'utf8')
+    assert.match(args, /--file -/)
+    assert.ok(args.length < 1000)
+    assert.equal(args.includes('literal, never reinterpret'), false)
+    const oneAttempt = fallback ? ['acpx', 'npx'] : ['acpx']
+    assert.deepEqual(attempts, oneAttempt)
+    assert.doesNotMatch(readFileSync(join(cwd, 'stdin.json'), 'utf8'), /[^\x00-\x7f]/)
+    await client.stop()
+  })
+}
+
+test('Windows prompt rejects when the child closes stdin before accepting the payload', async () => {
+  const { cwd } = createFakeAcpx('success')
+  const entry = join(cwd, 'close-input.mjs')
+  writeFileSync(entry, 'process.stdin.destroy(); setTimeout(() => process.exit(0), 10)')
+  const client = new AcpxClient(cwd, {
+    platform: 'win32',
+    resolveCommand: () => ({ command: process.execPath, argsPrefix: [entry] }),
+  })
+  await assert.rejects(client.prompt('fake-agent --acp', 'closed-input', 'x'.repeat(2_000_000)), /EPIPE|pipe|stream|ECONNRESET|EOF/i)
+  await client.stop()
+})
+
+
+test('Windows failed stdin delivery terminates the exact child that remains running', { timeout: 30_000 }, async (t) => {
+  const { cwd } = createFakeAcpx('success')
+  const entry = join(cwd, 'hold-after-input-close.mjs')
+  const pidFile = join(cwd, 'held.pid')
+  const closeInput = process.platform === 'win32' ? '' : 'closeSync(0);'
+  writeFileSync(entry, `import { writeFileSync, closeSync } from 'node:fs'; writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); process.on('SIGTERM', () => {}); ${closeInput} setInterval(() => {}, 1000)`)
+  const client = new AcpxClient(cwd, {
+    platform: 'win32',
+    resolveCommand: () => ({ command: process.execPath, argsPrefix: [entry] }),
+  })
+  t.after(async () => { await client.stop() })
+  try {
+    const execution = client.prompt('fake-agent --acp', 'held-input', 'x'.repeat(2_000_000))
+    void execution.catch(() => {})
+    const ownedClosed = [...client['activeProcesses'].values()]
+    assert.equal(ownedClosed.length, 1, 'capture the owned close lifecycle before injecting failure')
+    if (process.platform === 'win32') {
+      const deadline = Date.now() + 10_000
+      while (!existsSync(pidFile) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      assert.ok(existsSync(pidFile), 'owned fixture must become ready within the bound')
+      const pid = Number(readFileSync(pidFile, 'utf8'))
+      const proc = [...client['activeProcesses'].keys()].find(child => child.pid === pid)
+      assert.ok(proc, 'inject failure only into the exact tracked fixture')
+      // Windows CRT fd0 closure does not close the inherited libuv pipe.
+      // The preceding test covers real pipe failure; this drives cleanup while
+      // a real verified Windows child deliberately remains alive.
+      proc.stdin.destroy(Object.assign(new Error('EPIPE: controlled fixture input failure'), { code: 'EPIPE' }))
+    }
+    await assert.rejects(execution, /EPIPE|pipe|stream|ECONNRESET|EOF/i)
+    const pid = Number(readFileSync(pidFile, 'utf8'))
+    await waitForProcessExit(pid)
+    await Promise.all(ownedClosed)
+    assert.equal(client['activeProcesses'].size, 0)
+  } finally {
+    await client.stop()
+  }
 })

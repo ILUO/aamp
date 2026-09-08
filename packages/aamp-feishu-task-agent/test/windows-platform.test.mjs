@@ -469,3 +469,68 @@ setInterval(() => {}, 1_000)
     await fsp.rm(root, { recursive: true, force: true })
   }
 })
+
+
+for (const operation of ['read-process-identity', 'list-process-tree']) {
+  test(`native ${operation} verifies disappearance and PID reuse without suppressing live CIM failures`, {skip: process.platform !== 'win32' && 'requires native PowerShell race fixture'}, async () => {
+    const {__test} = await import('../bin/windows-platform.mjs')
+    const fixture = String.raw`
+$script:reads = 0
+$script:snapshot = [pscustomobject]@{
+  ProcessId = 10384; ParentProcessId = 1
+  CreationDate = [datetime]::Parse('2026-09-08T01:00:00Z')
+  CommandLine = 'node fixture'; ExecutablePath = 'C:\fixture\node.exe'
+}
+function Get-CimInstance {
+  $script:reads++
+  if ($script:reads -eq 1) { return $script:snapshot }
+  if ($env:AAMP_CIM_RACE -eq 'reread-failure') { throw 'CIM reread denied' }
+  if ($env:AAMP_CIM_RACE -like '*gone') { return $null }
+  if ($env:AAMP_CIM_RACE -like '*reused') {
+    return [pscustomobject]@{ProcessId=10384;CreationDate=$script:snapshot.CreationDate.AddSeconds(1)}
+  }
+  return $script:snapshot
+}
+function Invoke-CimMethod {
+  if ($env:AAMP_CIM_RACE -like 'error-*' -or $env:AAMP_CIM_RACE -eq 'reread-failure') { throw 'GetOwnerSid failed: fixture ObjectNotFound or denied' }
+  if ($env:AAMP_CIM_RACE -eq 'return-code-live') { return [pscustomobject]@{ReturnValue=2;Sid=''} }
+  return [pscustomobject]@{ReturnValue=0;Sid='S-1-5-21-1000'}
+}
+`
+    const run = scenario => runWindowsPowerShell(fixture + __test.powershellScripts[operation], {pid:10384}, {environment:{...process.env,AAMP_CIM_RACE:scenario}})
+    for (const scenario of ['error-gone','error-reused','success-gone','success-reused']) {
+      const result = await run(scenario)
+      if (operation === 'read-process-identity') assert.deepEqual(result,{found:false})
+      else assert.deepEqual(result,{processes:[]})
+    }
+    const live = await run('success-live')
+    const identity = operation === 'read-process-identity' ? live : live.processes[0]
+    assert.equal(identity.pid,10384)
+    assert.equal(identity.ownerSid,'S-1-5-21-1000')
+    await assert.rejects(run('error-live'),/GetOwnerSid failed/)
+    await assert.rejects(run('return-code-live'),/unable to read process owner SID/)
+    await assert.rejects(run('reread-failure'),/CIM reread denied/)
+  })
+}
+
+
+test('invalid CIM tree diagnostics include numeric IDs and field names without credentials', async () => {
+  const root = {pid:101,startedAt:'2026-09-08T01:00:00.000Z',command:'node',executablePath:'C:\\node.exe',ownerSid:'S-1-5-21-1000'}
+  const malformed = {
+    pid:102,parentPid:101,creationDate:'2026-09-08T01:00:01.000Z',
+    commandLine:'node --secret command-secret-sentinel',executablePath:'',ownerSid:'S-1-5-21-1000',
+  }
+  const inspect = value => snapshotOwnedWindowsTree(root, {
+    platform:'win32',getCurrentSid:async()=>root.ownerSid,listIdentities:async()=>[value],
+  })
+  await assert.rejects(inspect(malformed), error => {
+    assert.equal(error.message,'CIM returned an invalid Windows process tree identity (pid=102, parentPid=101, invalidFields=executablePath)')
+    assert.doesNotMatch(error.message,/command-secret-sentinel|--secret/)
+    return true
+  })
+  await assert.rejects(inspect({...malformed,pid:'pid-secret-sentinel',parentPid:'parent-secret-sentinel',creationDate:'date-secret-sentinel',commandLine:null,executablePath:null,ownerSid:null}), error => {
+    assert.equal(error.message,'CIM returned an invalid Windows process tree identity (pid=invalid, parentPid=invalid, invalidFields=pid,parentPid,creationDate/startedAt,commandLine/command,executablePath,ownerSid)')
+    assert.doesNotMatch(error.message,/secret-sentinel/)
+    return true
+  })
+})

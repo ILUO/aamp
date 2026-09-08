@@ -5,6 +5,12 @@ const cwd = process.env.AAMP_FAKE_ACPX_CWD
 const mode = process.env.AAMP_FAKE_ACPX_MODE
 const args = process.argv.slice(2)
 appendFileSync(join(cwd, 'acpx.log'), args.join(' ') + '\n')
+if (args.includes('--file')) {
+  let input = ''
+  for await (const chunk of process.stdin) input += chunk.toString('utf8')
+  writeFileSync(join(cwd, 'stdin.json'), input)
+}
+
 if (args.includes('prompt')) {
   switch (mode) {
     case 'auth-failure':

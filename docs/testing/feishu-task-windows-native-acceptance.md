@@ -133,4 +133,47 @@ macOS 增量回归：Task Agent 440 项、436 通过、4 原生跳过；ACP 176/
 
 ### 仍待验收
 
-Windows 11 普通用户、Node 24、真正 Codex ACP session、飞书注册/OAuth/Owner 配对和完整 Task 业务矩阵、附件上传、注销登录恢复、故障重启、运行中更新卸载与 CI 矩阵。此次无真实测试 Bot/用户授权材料，未注册、发送或派发业务任务。Win10 Administrator 的原生测试不替代这些发布门禁。
+Windows 11 普通用户、Node 24、真正 Codex ACP session、飞书注册/OAuth/Owner 配对和完整 Task 业务矩阵、附件上传、注销登录恢复、故障重启、运行中更新卸载与 CI 矩阵。截至该轮测试尚无真实测试 Bot/用户授权材料，未注册、发送或派发业务任务；后续真实授权与业务测试见下节。Win10 Administrator 的原生测试不替代这些发布门禁。
+
+
+## 2026-09-08 真实授权与业务验证
+
+- Bot 注册已完成，用户在 Mac 浏览器授权，Windows SDK 轮询成功取得结果；无需浏览器回调 Windows localhost。
+- App ID：`cli_aa1511303dba5bc1`；隔离 profile：`aamp-feishu-task-cli_aa1511303dba5bc1`。
+- 用户 OAuth 已完成；CLI 1.0.94 的服务端 verify 检查返回 user available=true、status=ready、tokenStatus=valid，已授予所需 Task scopes。
+- 首次授权结束时发现 CIM GetOwnerSid 进程退出竞态，以及 Windows helper 不兼容新版 profile 对象列表。已进行限定修复：前者重查同 PID 与创建时间后才忽略退出/复用，存活进程权限错误不忽略；后者支持旧字符串及具名对象，并保留 token/scope 校验。
+- 原生专项：CIM 28/28、profile 16/16；macOS 增量全套 451 项、445 通过、6 原生跳过。随后另加入仅含 PID 与字段名的身份诊断；一次 invalid tree identity 未再次复现，保留为待跟踪项，不按通过处理。
+- 旧安装流程在返回注册结果前中止，尚未写 bindings。已按官方 CLI v1.0.94 Windows DPAPI 存储实现，仅在该 Windows 用户内恢复本 App 的单个密钥引用，并经产品既有 buildPendingBinding/upsertBindings 保存 pending 绑定；密钥未输出或传出机器，未重复创建应用。
+- 真实 Agent Bridge 与 Feishu Bridge 1/1 启动及 AAMP 配对完成。
+- 首个 Task：`9b796fdb-7212-428b-ad39-b7e1c7bd9a9d`，仅分配给上述测试 Bot；幂等键 `aamp-win-native-20260908-smoke-01`。内容为 17×23。
+- 已观察完整事件接收、AAMP dispatch、ACK、result 回写链路，但 result 为 rejected/failure。飞书虽为 done，不算成功闭环。AAMP Task ID：`feishu-task-9b796fdb-7212-428b-ad39-b7e1c7bd9a9d-eacdab79709ac050f83f8b6171f96085`。
+- 失败根因：真实 acpx 0.15.1 在 Windows 拒绝 raw --agent command string，要求配置 argv array；Windows 原生适配已在后续轮次修复，业务结果/完成规则保持原样。
+- 独立原生 Codex 0.153.4 只读计算探针最终输出 391。过程中 WebSocket 多次超时，自动切换 HTTPS 后成功，说明模型可调用但该主机网络存在明显等待。
+- 首次失败任务后已正常 stop，保留 Bot、OAuth、绑定及任务作为验收证据。
+
+### 第二轮真实任务与 Windows 长提示词问题
+
+- Windows argv 配置修复后，真实 `agent.session.ready` 成功。原生回归：Task Agent 256 项（243 通过、13 跳过）；ACP Bridge 184 项（180 通过、4 POSIX 跳过）。
+- 第二个 Task：`35b8692f-4e2d-44d1-a88e-e7bd0c2bed5f`；幂等键 `aamp-win-native-20260908-smoke-02`。事件、ACK、进度、结果回写均已发生，但仍为失败，不算业务通过。
+- 评论确认失败原因为缺少 `FEISHU_TASK_RESULT_JSON`，返回内容为系统错误乱码。Windows 无副作用复现：`node npx-cli.js -y acpx --help` 携带 20 字符参数成功；携带 12000 字符参数返回退出码 1、`The command line is too long.`。
+- 根因定位到 npx 内部 Windows 命令调用长度限制。修复限定为 Windows 使用 acpx 原生 `--file -` 从 stdin 读取提示词，保留 POSIX 调用和飞书结果判定规则。修复后成功结果见第三轮记录。
+- stdin 初版原生全套为 189 项（185 通过、4 POSIX 跳过、无失败）；后续审查补充输入管道失败仍存活子进程的清理场景，因此该数字仅作为中间证据，最终版须再次验证。
+- 第二轮停止命令正常返回 0，确认该轮 controller/bridge/acpx 进程已退出。等待达到分钟级：清理逐个 PID 做 PowerShell/CIM 验证，不将循环的 sleep 总时长等同于整体超时。
+- 下一轮启动遇到旧记录 PID 6288 已复用而拒绝 taskkill，未误杀。恢复逻辑已修复：只对证实已退出的旧身份跳过，不吞掉权限或身份查询错误。
+
+### 第三轮：普通文本任务真实闭环通过
+
+- Task GUID：`c32c432b-1907-4e44-949f-ee59abf90858`；幂等键 `aamp-win-native-20260908-smoke-03`；[飞书任务](https://applink.larkoffice.com/client/todo/detail?guid=c32c432b-1907-4e44-949f-ee59abf90858)。
+- AAMP Task ID：`feishu-task-c32c432b-1907-4e44-949f-ee59abf90858-2c91cc116c79fd43aeb3e59e76095989`；run `1788854392120-14248`。
+- 2026-09-08 08:02:24 UTC 真实 ACP session ready；08:03:55 接收任务；08:06:39 ACP completed；Feishu Bridge 随后记录 `answered` 与父任务完成。
+- 服务端回读确认评论 `7683072876475419577`：`391. Multiplying 17 by 20 and by 3 gives 340 + 51 = 391.`；任务 status=done、agent_task_status=4。此轮由内容与协议成功日志共同判定通过，不只看 done。
+- 验证范围：Mac 浏览器授权 → Windows 取得 Bot / 用户凭证 → AAMP 配对 → 原生 Codex ACP → 飞书任务事件/ACK/执行/评论结果/完成。未引入 Bash、WSL 或 Windows 远程桌面。
+- 最终产品修复限定为 Windows：CIM 退出竞态、CLI profile 对象列表兼容、acpx argv 配置、长提示词 stdin 传输及失败子进程清理、旧 journal 的已退出 PID 代次恢复。飞书业务协议与 POSIX prompt 传递保持原样。
+- Task Agent 最终原生全套：263 项，250 通过、13 平台跳过。ACP 清理测试曾因 Windows fd/pipe 差异及 PID 退出先于 close 事件产生夹具失败，已修正夹具并保留失败记录，最终重跑结果另记。
+- 最终 tgz 版本号不变、未发布；以下 SHA256 已与远端核对一致：Task Agent `1ebaa938965e5b8a6925dd1418e5f3de994add84c72e37f380cfe1dead7d18f4`；ACP Bridge `8fcf12ba78b68f11c32b08566291a4a15c9249c94b853b3723b2e617792741c3`。ACP 实机文件名带 `windows-stdin-final` 后缀以避开 npm 旧缓存。
+- 尚未验收：need_help + Owner 评论继续、提醒/重复/子任务、附件输入/上传、Windows 11 普通用户、Node 24、注销恢复/故障重启/更新卸载和远端 CI。普通任务成功不替代完整发布门禁。
+- 最终 ACP 全套：Windows 190 项（186 通过、4 POSIX 跳过、0 失败）；macOS 相同测试集合串行执行 190 项（187 通过、3 Windows 跳过、0 失败）。并行运行曾出现已有超时夹具的慢启动失败；HEAD 对照可复现 TERM 夹具超时，记录保留，未删改或跳过该 POSIX 用例。
+- 第三轮业务完成后 stop 返回 0，前台会话退出；保留已授权 Bot、用户 profile、绑定和三个测试任务供复核。
+- 最终 Task Agent macOS 串行全套：459 项，451 通过、6 Windows 跳过、2 AIME 相关测试失败（远端 helper 进程组清理夹具 5 秒超时、噪声 npm 输出分类夹具 25 秒超时）。未报告全绿；两项不属于本次 Windows 改动文件，修改前 HEAD `2236a31` 隔离对照中，进程组清理同样约 5 秒超时，噪声输出分类约 8 秒通过；后者不能据此判定为已确认的既有失败。
+- 最终 Windows 进程回查仅剩测试前已存在的 other Node PID 8548/7832/7672；本轮 controller、bridge、acpx 和 held-input 夹具均无残留。
+- 噪声输出分类补充受控对照：HEAD 临时包仅覆盖本轮三个 Task Agent Windows 产品文件后，noisy 单项约 17.7 秒通过；当前 checkout 隔离仍达 25 秒超时。证据不足以将该失败归因于 Windows 改动，也不足以宣称当前 checkout 的 macOS 全套已通过，继续保留限制。

@@ -181,7 +181,12 @@ async function profileReady(cli, profile, env) {
   const list = JSON.parse(
     (await run(cli, ['profile', 'list'], { env })).stdout || '[]',
   )
-  if (!Array.isArray(list) || !list.includes(profile)) return false
+  if (
+    !Array.isArray(list) ||
+    !list.some((entry) =>
+      typeof entry === 'string' ? entry === profile : entry?.name === profile,
+    )
+  ) return false
   const auth = authSettings(env)
   if (auth.mode === 'disabled') return true
   const excluded = new Set(splitScopes(auth.excludes))

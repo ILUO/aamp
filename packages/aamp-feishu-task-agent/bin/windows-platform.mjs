@@ -13,6 +13,34 @@ $inputJson = [System.Text.Encoding]::UTF8.GetString(
 $config = $inputJson | ConvertFrom-Json
 `
 
+// GetOwnerSid can race with process exit or PID reuse after a CIM snapshot.
+// Never attribute its result (or suppress its failure) without a fresh identity check.
+const POWERSHELL_SNAPSHOT_OWNER = String.raw`
+function Test-SnapshotProcessStillCurrent($snapshot) {
+  $current = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$snapshot.ProcessId)
+  if ($null -eq $current) { return $false }
+  if ($null -eq $snapshot.CreationDate -or $null -eq $current.CreationDate) {
+    throw 'unable to verify process creation identity'
+  }
+  return ([int]$current.ProcessId -eq [int]$snapshot.ProcessId -and
+    $current.CreationDate.ToUniversalTime().Ticks -eq $snapshot.CreationDate.ToUniversalTime().Ticks)
+}
+function Read-VerifiedSnapshotOwner($snapshot) {
+  try {
+    $owner = Invoke-CimMethod -InputObject $snapshot -MethodName GetOwnerSid
+    if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) {
+      throw ('unable to read process owner SID; return value ' + $owner.ReturnValue)
+    }
+  } catch {
+    $ownerFailure = $_
+    if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+    throw $ownerFailure
+  }
+  if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+  return $owner
+}
+`
+
 const POWERSHELL_SCRIPTS = Object.freeze({
   'current-user-sid': POWERSHELL_PREAMBLE + String.raw`
 @{ ownerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } | ConvertTo-Json -Compress
@@ -56,15 +84,16 @@ foreach ($rule in $verified.Access) {
 if (-not $hasCurrentUserFullControl) { throw 'private directory lacks current user FullControl' }
 @{ path = $config.path; ownerSid = $currentSid.Value } | ConvertTo-Json -Compress
 `,
-  'read-process-identity': POWERSHELL_PREAMBLE + String.raw`
+  'read-process-identity': POWERSHELL_PREAMBLE + POWERSHELL_SNAPSHOT_OWNER + String.raw`
 $process = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$config.pid)
 if ($null -eq $process) {
   @{ found = $false } | ConvertTo-Json -Compress
   exit 0
 }
-$owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
-if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) {
-  throw ('unable to read process owner SID; return value ' + $owner.ReturnValue)
+$owner = Read-VerifiedSnapshotOwner $process
+if ($null -eq $owner) {
+  @{ found = $false } | ConvertTo-Json -Compress
+  exit 0
 }
 @{
   found = $true
@@ -75,7 +104,7 @@ if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) {
   ownerSid = [string]$owner.Sid
 } | ConvertTo-Json -Compress
 `,
-  'list-process-tree': POWERSHELL_PREAMBLE + String.raw`
+  'list-process-tree': POWERSHELL_PREAMBLE + POWERSHELL_SNAPSHOT_OWNER + String.raw`
 $rootPid = [int]$config.pid
 $all = @(Get-CimInstance -ClassName Win32_Process)
 $selected = New-Object 'System.Collections.Generic.HashSet[int]'
@@ -91,10 +120,8 @@ do {
 $identities = @()
 foreach ($process in $all) {
   if (-not $selected.Contains([int]$process.ProcessId)) { continue }
-  $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
-  if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) {
-    throw ('unable to read process owner SID; return value ' + $owner.ReturnValue)
-  }
+  $owner = Read-VerifiedSnapshotOwner $process
+  if ($null -eq $owner) { continue }
   $identities += @{
     pid = [int]$process.ProcessId
     parentPid = [int]$process.ParentProcessId
@@ -324,19 +351,26 @@ function sameWindowsIdentity(expected, actual) {
 
 function normalizeListedIdentity(value) {
   const startedAt = new Date(value?.creationDate ?? value?.startedAt)
-  if (!Number.isSafeInteger(value?.pid) || value.pid <= 0
-    || !Number.isSafeInteger(value?.parentPid) || value.parentPid < 0
-    || !Number.isFinite(startedAt.getTime())
-    || typeof (value.commandLine ?? value.command) !== 'string'
-    || typeof value.executablePath !== 'string' || !value.executablePath
-    || typeof value.ownerSid !== 'string' || !value.ownerSid) {
-    throw new Error('CIM returned an invalid Windows process tree identity')
+  const command = value?.commandLine ?? value?.command
+  const invalidFields = []
+  if (!Number.isSafeInteger(value?.pid) || value.pid <= 0) invalidFields.push('pid')
+  if (!Number.isSafeInteger(value?.parentPid) || value.parentPid < 0) invalidFields.push('parentPid')
+  if (!Number.isFinite(startedAt.getTime())) invalidFields.push('creationDate/startedAt')
+  if (typeof command !== 'string') invalidFields.push('commandLine/command')
+  if (typeof value?.executablePath !== 'string' || !value.executablePath) invalidFields.push('executablePath')
+  if (typeof value?.ownerSid !== 'string' || !value.ownerSid) invalidFields.push('ownerSid')
+  if (invalidFields.length) {
+    // CIM command/path fields can contain credentials. Emit only numeric IDs and
+    // fixed field names; malformed ID values must not be interpolated either.
+    const pid = Number.isSafeInteger(value?.pid) ? value.pid : 'invalid'
+    const parentPid = Number.isSafeInteger(value?.parentPid) ? value.parentPid : 'invalid'
+    throw new Error(`CIM returned an invalid Windows process tree identity (pid=${pid}, parentPid=${parentPid}, invalidFields=${invalidFields.join(',')})`)
   }
   return {
     pid: value.pid,
     parentPid: value.parentPid,
     startedAt: startedAt.toISOString(),
-    command: value.commandLine ?? value.command,
+    command,
     executablePath: value.executablePath,
     ownerSid: value.ownerSid,
   }
@@ -400,6 +434,7 @@ export async function stopOwnedWindowsTree(identity, {
   getCurrentSid = getCurrentWindowsSid,
   readIdentity = readWindowsProcessIdentity,
   runTaskkill = defaultTaskkill,
+  allowExitedIdentity = false,
 } = {}) {
   if (platform !== 'win32') throw new Error('Windows process tree cleanup requires Windows')
   if (!identity || !Number.isSafeInteger(identity.pid) || identity.pid <= 0
@@ -415,6 +450,12 @@ export async function stopOwnedWindowsTree(identity, {
   const current = await readIdentity(identity.pid)
   if (!current) return
   if (!sameWindowsIdentity(identity, current)) {
+    // Recovery journals retain exited descendants. A newer creation time for
+    // the same PID proves that generation has ended; never signal its successor.
+    // Other mismatches and failed identity queries remain hard errors.
+    if (allowExitedIdentity && current.pid === identity.pid
+      && Number.isFinite(Date.parse(current.startedAt))
+      && Date.parse(current.startedAt) > Date.parse(identity.startedAt)) return
     throw new Error(`process ${identity.pid} identity changed; refusing taskkill`)
   }
   await runTaskkill(['/PID', String(identity.pid), '/T', '/F'])
@@ -424,4 +465,4 @@ export async function stopOwnedWindowsTree(identity, {
   }
 }
 
-export const __test = Object.freeze({ runFixedPowerShell })
+export const __test = Object.freeze({ runFixedPowerShell, powershellScripts: POWERSHELL_SCRIPTS })

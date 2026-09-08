@@ -150,3 +150,53 @@ test('registration prints original authorization URL and expiry when browser ope
   assert.equal(result.app_id,'cli')
   assert.deepEqual(logs,['请打开授权链接完成飞书 Bot 授权（180 秒内有效）：https://example.test/authorize?code=test'])
 })
+
+test('profile readiness accepts named CLI entries and legacy strings while retaining scope checks', async (t) => {
+  const { rmSync } = await import('node:fs')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-profile-list-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const cli = path.join(root, 'lark-cli.mjs')
+  const calls = path.join(root, 'calls.jsonl')
+  writeFileSync(cli, `
+import { appendFileSync } from 'node:fs'
+const args = process.argv.slice(2)
+appendFileSync(process.env.PROFILE_FIXTURE_CALLS, JSON.stringify(args) + '\\n')
+if (args[0] === '--version') console.log('lark-cli version 1.0.64')
+else if (args.join(' ') === 'profile list') console.log(process.env.PROFILE_FIXTURE_LIST)
+else if (args.includes('status')) console.log(process.env.PROFILE_FIXTURE_STATUS)
+else { console.error('unexpected mutating command'); process.exitCode = 1 }
+`)
+  const profile = 'aamp-feishu-task-cli_test'
+  const current = { name: profile, appId: 'cli_test', brand: 'feishu', active: true, effective: true, effectiveSource: 'config', user: 'user', tokenStatus: 'valid' }
+  const valid = { identities: { user: { available: true, tokenStatus: 'valid', scope: 'required.scope' } } }
+  for (const [name, list, status, ready] of [
+    ['named current entry', [current], valid, true],
+    ['legacy string entry', [profile], valid, true],
+    ['missing named profile', [{ ...current, name: 'other' }], valid, false],
+    ['malformed entries', [null, 3, {}, { name: 3 }], valid, false],
+    ['non-array response', { profiles: [current] }, valid, false],
+    ['missing scope', [current], { identities: { user: { ...valid.identities.user, scope: 'other.scope' } } }, false],
+    ['unavailable identity', [current], { identities: { user: { ...valid.identities.user, available: false } } }, false],
+    ['expired token', [current], { identities: { user: { ...valid.identities.user, tokenStatus: 'expired' } } }, false],
+  ]) {
+    await t.test(name, async () => {
+      const result = await runWindowsHelper('__probe-profile', {
+        agent_type: 'codex', bot: { app_id: 'cli_test', lark_cli_profile: profile },
+      }, {
+        AAMP_LARK_CLI_BIN: cli,
+        AAMP_LARK_CLI_CONFIG_DIR: path.join(root, 'config'),
+        AAMP_FEISHU_AUTH_STATE_DIR: path.join(root, 'auth'),
+        FEISHU_USER_AUTH_MODE: 'required',
+        FEISHU_USER_AUTH_REQUIRED_SCOPES: 'required.scope',
+        FEISHU_USER_AUTH_OPTIONAL_SCOPES: '',
+        FEISHU_USER_AUTH_EXCLUDES: '',
+        PROFILE_FIXTURE_CALLS: calls,
+        PROFILE_FIXTURE_LIST: JSON.stringify(list),
+        PROFILE_FIXTURE_STATUS: JSON.stringify(status),
+      })
+      assert.equal(result.ready, ready)
+    })
+  }
+  const invoked = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse)
+  assert.equal(invoked.some(args => args.includes('add') || args.includes('login')), false)
+})

@@ -1,3 +1,4 @@
+import { ensureWindowsAgentConfig, parseWindowsAgentArgv, windowsAgentAlias } from './windows-agent-config.js'
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
@@ -12,13 +13,40 @@ export interface WindowsProcessIdentity {
   ownerSid: string
 }
 
-const WINDOWS_PROCESS_IDENTITY_SCRIPT = String.raw`
+const WINDOWS_SNAPSHOT_OWNER = String.raw`
+function Test-SnapshotProcessStillCurrent($snapshot) {
+  $current = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$snapshot.ProcessId)
+  if ($null -eq $current) { return $false }
+  if ($null -eq $snapshot.CreationDate -or $null -eq $current.CreationDate) {
+    throw 'unable to verify process creation identity'
+  }
+  return ([int]$current.ProcessId -eq [int]$snapshot.ProcessId -and
+    $current.CreationDate.ToUniversalTime().Ticks -eq $snapshot.CreationDate.ToUniversalTime().Ticks)
+}
+function Read-VerifiedSnapshotOwner($snapshot) {
+  try {
+    $owner = Invoke-CimMethod -InputObject $snapshot -MethodName GetOwnerSid
+    if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) {
+      throw ('unable to read process owner SID; return value ' + $owner.ReturnValue)
+    }
+  } catch {
+    $ownerFailure = $_
+    if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+    throw $ownerFailure
+  }
+  if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+  return $owner
+}
+`
+
+export const WINDOWS_PROCESS_IDENTITY_SCRIPT = WINDOWS_SNAPSHOT_OWNER + String.raw`
 $ErrorActionPreference = 'Stop'
 $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AAMP_ACP_WINDOWS_INPUT_BASE64)) | ConvertFrom-Json
 $processId = [uint32]$config.pid
 $process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId"
 if ($null -eq $process) { exit 3 }
-$owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
+$owner = Read-VerifiedSnapshotOwner $process
+if ($null -eq $owner) { exit 3 }
 [pscustomobject]@{
   pid = [uint32]$process.ProcessId
   creationDate = $process.CreationDate.ToString('o')
@@ -27,7 +55,7 @@ $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
 } | ConvertTo-Json -Compress
 `
 
-const WINDOWS_PROCESS_TREE_SCRIPT = String.raw`
+export const WINDOWS_PROCESS_TREE_SCRIPT = WINDOWS_SNAPSHOT_OWNER + String.raw`
 $ErrorActionPreference = 'Stop'
 $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AAMP_ACP_WINDOWS_INPUT_BASE64)) | ConvertFrom-Json
 $rootPid = [uint32]$config.pid
@@ -49,8 +77,8 @@ do {
 $identities = @()
 foreach ($process in $all) {
   if (-not $selected.Contains([uint32]$process.ProcessId)) { continue }
-  $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
-  if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) { throw 'owner SID unavailable' }
+  $owner = Read-VerifiedSnapshotOwner $process
+  if ($null -eq $owner) { continue }
   $identities += [pscustomobject]@{
     pid = [uint32]$process.ProcessId
     parentPid = [uint32]$process.ParentProcessId
@@ -260,6 +288,7 @@ export interface AcpEvent {
 }
 
 export interface AcpxClientRuntime {
+  platform?: NodeJS.Platform
   resolveCommand?: typeof resolveNativeCommand
 }
 
@@ -613,6 +642,14 @@ function throwIfAuthenticationFailure(...values: unknown[]): void {
  * Wrapper around acpx CLI.
  * Invokes acpx as a subprocess and parses NDJSON output.
  */
+function windowsPromptInput(text: string): string {
+  // acpx --file accepts ACP blocks. Wrap text so a prompt beginning with '['
+  // cannot become structured input; match its existing argv whitespace trim.
+  // ASCII JSON also survives upstream Buffer-to-string chunk decoding intact.
+  return JSON.stringify([{ type: 'text', text: text.trim() }])
+    .replace(/[\u007f-\uffff]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+}
+
 export class AcpxClient {
   private cwd: string
   private activeProcesses = new Map<ChildProcessWithoutNullStreams, Promise<void>>()
@@ -620,10 +657,12 @@ export class AcpxClient {
   private windowsProcessIdentities = new WeakMap<ChildProcessWithoutNullStreams, WindowsProcessIdentity>()
   private exitedProcesses = new WeakSet<ChildProcessWithoutNullStreams>()
   private windowsProcessTrees = new WeakMap<ChildProcessWithoutNullStreams, WindowsOwnedProcessTree>()
+  private platform: NodeJS.Platform
   private resolveCommand: typeof resolveNativeCommand
 
   constructor(cwd?: string, runtime: AcpxClientRuntime = {}) {
     this.cwd = cwd ?? process.cwd()
+    this.platform = runtime.platform ?? process.platform
     this.resolveCommand = runtime.resolveCommand ?? resolveNativeCommand
   }
 
@@ -631,8 +670,13 @@ export class AcpxClient {
     return /\s/.test(agent.trim())
   }
 
-  private buildAcpxArgs(agent: string, args: string[], globalArgs: string[] = []): string[] {
+  private buildAcpxArgs(agent: string, args: string[], globalArgs: string[] = [], prepare = true): string[] {
     if (this.isRawAgentCommand(agent)) {
+      if (this.platform === 'win32') {
+        const argv = parseWindowsAgentArgv(agent)
+        const alias = prepare ? ensureWindowsAgentConfig(this.cwd, argv) : windowsAgentAlias(argv)
+        return ['--approve-all', '--cwd', this.cwd, ...globalArgs, alias, ...args]
+      }
       return ['--approve-all', '--cwd', this.cwd, ...globalArgs, '--agent', agent, ...args]
     }
     return ['--approve-all', '--cwd', this.cwd, ...globalArgs, agent, ...args]
@@ -645,7 +689,7 @@ export class AcpxClient {
   }
 
   private formatFailedCommand(agent: string, args: string[], globalArgs: string[] = []): string {
-    return ['acpx', ...this.buildAcpxArgs(agent, args, globalArgs)]
+    return ['acpx', ...this.buildAcpxArgs(agent, args, globalArgs, false)]
       .map((arg) => this.formatArgForLog(arg))
       .join(' ')
   }
@@ -731,6 +775,7 @@ export class AcpxClient {
       onClose: (code: number | null) => void
       onError: (err: Error) => void
     },
+    input?: string,
   ): AcpxProcessControl {
     let startedFallback = false
     let settled = false
@@ -760,6 +805,23 @@ export class AcpxClient {
         this.activeProcesses.delete(proc)
         this.windowsProcessTrees.get(proc)?.terminateRetained()
         resolveClosed()
+      }
+      if (input !== undefined) {
+        // Wait for a real spawn so ENOENT can select npx before any stdin write.
+        // The same payload is supplied afresh to each fallback child.
+        proc.stdin.on('error', (error: NodeJS.ErrnoException) => {
+          if (settled) return
+          settled = true
+          // Failed delivery must not leave this exact owned child running.
+          this.terminateProcessTree(proc, 'SIGTERM')
+          const forcedKillTimer = setTimeout(() => {
+            if (ownedProcesses.has(proc)) this.terminateProcessTree(proc, 'SIGKILL')
+          }, 1_000)
+          forcedKillTimer.unref()
+          forcedKillTimers.set(proc, forcedKillTimer)
+          handlers.onError(error)
+        })
+        proc.once('spawn', () => { proc.stdin.end(input, 'utf8') })
       }
       proc.stdout.on('data', (chunk: Buffer) => handlers.onStdout?.(chunk))
       proc.stderr.on('data', (chunk: Buffer) => handlers.onStderr?.(chunk))
@@ -1040,7 +1102,7 @@ export class AcpxClient {
       const acpxArgs = this.buildAcpxArgs(agent, [
         'prompt',
         '-s', sessionName,
-        text,
+        ...(this.platform === 'win32' ? ['--file', '-'] : [text]),
       ], ['--format', 'json', '--json-strict'])
 
       let stdoutBuffer = ''
@@ -1203,7 +1265,7 @@ export class AcpxClient {
         onError: (err) => {
           reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}. Is Node/npm available?`))
         },
-      })
+      }, this.platform === 'win32' ? windowsPromptInput(text) : undefined)
     })
   }
 
@@ -1212,7 +1274,7 @@ export class AcpxClient {
 
     return await new Promise<AcpResult>((resolve, reject) => {
       // Old acpx builds may not support JSON output yet.
-      const acpxArgs = this.buildAcpxArgs(agent, ['prompt', '-s', sessionName, text])
+      const acpxArgs = this.buildAcpxArgs(agent, ['prompt', '-s', sessionName, ...(this.platform === 'win32' ? ['--file', '-'] : [text])])
 
       let stdout = ''
       let stderr = ''
@@ -1249,7 +1311,7 @@ export class AcpxClient {
         onError: (err) => {
           reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}. Is Node/npm available?`))
         },
-      })
+      }, this.platform === 'win32' ? windowsPromptInput(text) : undefined)
     })
   }
 

@@ -325,3 +325,7 @@ defaults:
 ### 2026-09-08 原生实机增量
 
 用户确认后，在 Windows 10 22H2 Administrator SSH 环境完成三包原生测试、真实 npm tgz 安装入口、ACL/CIM/进程树及受控 Task Scheduler 启停验证。修复 npm eval、环境大小写、账户 SID 归一化、私密 ACL 与 Windows 原子替换；业务协议不变。完整证据及 package integrity 见 `docs/testing/feishu-task-windows-native-acceptance.md`。Task 10 的 Windows 11 普通用户、真实业务闭环与登录/故障恢复门禁继续保留未完成。
+
+### 2026-09-08 真实业务验收增量
+
+在授权的 Windows 10 22H2 主机上完成 Bot/用户 OAuth、真实 Codex ACP 与普通文本任务闭环；成功任务为 `c32c432b-1907-4e44-949f-ee59abf90858`（17×23=391，飞书评论及 answered 日志交叉确认）。实测发现并限定修复 Windows CLI profile 格式、CIM 竞态、acpx argv/长提示词 stdin、输入失败清理和旧进程 journal 恢复。最终 ACP 原生 186 通过/4平台跳过，Task Agent 原生250通过/13平台跳过。细节与包哈希见验收记录。Task 10 保留未完成：Owner 补充、附件及扩展业务矩阵、Windows 11 普通用户等门禁未因普通任务成功而勾选。
