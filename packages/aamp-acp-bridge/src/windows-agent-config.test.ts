@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { ensureWindowsAgentConfig, parseWindowsAgentArgv, windowsAgentAlias } from './windows-agent-config.js'
+import { ensureWindowsAgentConfig, parseWindowsAgentArgv, windowsAgentAlias, WINDOWS_CONFIG_ACL_COMPARISON_SCRIPT } from './windows-agent-config.js'
 function fixture(t: { after: (fn: () => void) => void }): string {
   const cwd = mkdtempSync(join(tmpdir(), 'aamp-windows-config-'))
   t.after(() => rmSync(cwd, { recursive: true, force: true }))
@@ -71,4 +71,25 @@ $sidType=[Security.Principal.SecurityIdentifier]
   assert.equal(readAcl(target).sddl, firstAcl.sddl)
   assert.equal(readAcl(cwd).sddl, parentAcl.sddl)
   assert.equal(JSON.parse(readFileSync(target, 'utf8')).auth.credential, 'PRIVATE_SENTINEL')
+})
+
+
+test('native ACL comparison tolerates only DACL auto-inherited bookkeeping', {skip:process.platform !== 'win32'}, async () => {
+  const {execFileSync}=await import('node:child_process')
+  const script=WINDOWS_CONFIG_ACL_COMPARISON_SCRIPT + String.raw`
+$ErrorActionPreference='Stop'
+$expected=Get-ComparableConfigSddl 'O:SYG:BAD:P(A;;FA;;;SY)'
+if ($expected -ne (Get-ComparableConfigSddl 'O:SYG:BAD:PAI(A;;FA;;;SY)')) { throw 'AI normalization failed' }
+foreach ($different in @(
+  'O:SYG:BAD:AI(A;;FA;;;SY)',
+  'O:BAG:BAD:P(A;;FA;;;SY)',
+  'O:SYG:SYD:P(A;;FA;;;SY)',
+  'O:SYG:BAD:P(A;;FR;;;SY)',
+  'O:SYG:BAD:P(D;;FA;;;SY)',
+  'O:SYG:BAD:P(A;;FA;;;SY)(A;;FR;;;WD)'
+)) { if ($expected -eq (Get-ComparableConfigSddl $different)) { throw 'Effective ACL difference was ignored' } }
+Write-Output 'ACL_COMPARISON_OK'
+`
+  const result=execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{encoding:'utf8',timeout:15000})
+  assert.match(result,/ACL_COMPARISON_OK/)
 })

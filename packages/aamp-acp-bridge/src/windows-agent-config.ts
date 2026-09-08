@@ -42,8 +42,19 @@ export function windowsAgentAlias(argv: string[]): string {
 }
 
 
-export const WINDOWS_CONFIG_ACL_SCRIPT = String.raw`
+export const WINDOWS_CONFIG_ACL_COMPARISON_SCRIPT = String.raw`
+function Get-ComparableConfigSddl([string]$sddl) {
+  $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+  # Windows may set this bookkeeping flag during Set-Acl. Preserve every ACE,
+  # owner/group and protection flag; normalize only DACL auto-inherited status.
+  $mask = -bnot [int][Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited
+  $descriptor.SetFlags([Security.AccessControl.ControlFlags]([int]$descriptor.ControlFlags -band $mask))
+  return $descriptor.GetSddlForm([Security.AccessControl.AccessControlSections]'Access, Owner, Group')
+}
+`
+export const WINDOWS_CONFIG_ACL_SCRIPT = WINDOWS_CONFIG_ACL_COMPARISON_SCRIPT + String.raw`
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AAMP_ACPX_CONFIG_ACL)) | ConvertFrom-Json
 if ($config.source) {
   $acl = Get-Acl -LiteralPath $config.source
@@ -62,7 +73,7 @@ if ($config.source) {
 Set-Acl -LiteralPath $config.target -AclObject $acl
 $verified = Get-Acl -LiteralPath $config.target
 $sections = [Security.AccessControl.AccessControlSections]'Access, Owner, Group'
-if ($verified.GetSecurityDescriptorSddlForm($sections) -ne $acl.GetSecurityDescriptorSddlForm($sections)) {
+if ((Get-ComparableConfigSddl $verified.GetSecurityDescriptorSddlForm($sections)) -ne (Get-ComparableConfigSddl $acl.GetSecurityDescriptorSddlForm($sections))) {
   throw ('Windows ACP config temporary file ACL could not be preserved; expected='+$acl.GetSecurityDescriptorSddlForm($sections)+'; actual='+$verified.GetSecurityDescriptorSddlForm($sections))
 }
 `
