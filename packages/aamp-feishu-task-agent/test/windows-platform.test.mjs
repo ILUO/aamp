@@ -549,13 +549,15 @@ function Get-CimInstance {
     if ($env:AAMP_CIM_METADATA -eq 'gone') { return $null }
     if ($env:AAMP_CIM_METADATA -eq 'reused') { $created = $created.AddSeconds(1) }
     if ($env:AAMP_CIM_METADATA -eq 'failure') { throw 'metadata read denied' }
-    if ($env:AAMP_CIM_METADATA -ne 'missing') { $executable = 'C:\fixture\node.exe' }
+    if ($env:AAMP_CIM_METADATA -ne 'missing' -and ($env:AAMP_CIM_METADATA -ne 'delayed' -or $script:reads -ge 5)) { $executable = 'C:\fixture\node.exe' }
   }
   return [pscustomobject]@{ProcessId=10384;ParentProcessId=1;CreationDate=$created;CommandLine='node fixture';ExecutablePath=$executable}
 }
 function Invoke-CimMethod { return [pscustomobject]@{ReturnValue=0;Sid='S-1-5-21-1000'} }
 `
     const run = scenario => runWindowsPowerShell(fixture + __test.powershellScripts[operation], {pid:10384}, {environment:{...process.env,AAMP_CIM_METADATA:scenario}})
+    const delayed = await run('delayed')
+    assert.equal((operation === 'read-process-identity' ? delayed : delayed.processes[0]).executablePath, String.raw`C:\fixture\node.exe`)
     const result = await run('restored')
     const identity = operation === 'read-process-identity' ? result : result.processes[0]
     assert.equal(identity.executablePath, String.raw`C:\fixture\node.exe`)

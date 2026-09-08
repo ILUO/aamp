@@ -42,7 +42,10 @@ function Read-VerifiedSnapshotOwner($snapshot) {
 function Read-VerifiedSnapshot($snapshot) {
   $owner = Read-VerifiedSnapshotOwner $snapshot
   if ($null -eq $owner) { return $null }
-  if ([string]::IsNullOrWhiteSpace($snapshot.ExecutablePath)) {
+  # CIM may retain incomplete metadata briefly while a process starts or exits.
+  # Retry only this missing field, and recheck identity on every bounded attempt.
+  for ($attempt = 0; [string]::IsNullOrWhiteSpace($snapshot.ExecutablePath) -and $attempt -lt 5; $attempt++) {
+    if ($attempt -gt 0) { Start-Sleep -Milliseconds 100 }
     $current = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$snapshot.ProcessId)
     if ($null -eq $current) { return $null }
     if ($null -eq $current.CreationDate -or $null -eq $snapshot.CreationDate) {
@@ -50,10 +53,10 @@ function Read-VerifiedSnapshot($snapshot) {
     }
     if ([int]$current.ProcessId -ne [int]$snapshot.ProcessId -or
       $current.CreationDate.ToUniversalTime().Ticks -ne $snapshot.CreationDate.ToUniversalTime().Ticks) { return $null }
-    if ([string]::IsNullOrWhiteSpace($current.ExecutablePath)) {
-      throw 'unable to read process executable path for a verified live process'
-    }
     $snapshot = $current
+  }
+  if ([string]::IsNullOrWhiteSpace($snapshot.ExecutablePath)) {
+    throw 'unable to read process executable path for a verified live process'
   }
   return @{ process = $snapshot; owner = $owner }
 }
