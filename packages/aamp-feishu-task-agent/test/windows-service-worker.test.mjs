@@ -17,3 +17,40 @@ test('worker respects a stop request before loading platform primitives or spawn
  await fs.writeFile(selectionFile,JSON.stringify({generation:'g1'}));await fs.writeFile(stopFile,JSON.stringify({generation:'g1'}));
  assert.equal(await worker.runWindowsServiceWorker({version:1,generation:'g1',paths:{selectionFile,stopFile}}),0);
 });
+
+test('native worker cleans journaled descendants before returning a controller failure', {skip:process.platform!=='win32' && 'requires native Windows process identities',timeout:60000}, async t=>{
+ const {pathToFileURL}=await import('node:url');
+ const platform=await import('../bin/windows-platform.mjs');
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-worker-crash-'));
+ const selectionFile=path.join(root,'selection.json'),stopFile=path.join(root,'stop.json');
+ const childFile=path.join(root,'child.json'),controllerPath=path.join(root,'controller.mjs');
+ const {spawn}=await import('node:child_process');
+ const retained=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});
+ const retainedIdentity=await platform.readWindowsProcessIdentity(retained.pid);
+ t.after(()=>platform.stopOwnedWindowsTree(retainedIdentity,{allowExitedIdentity:true}));
+ const journalModule=pathToFileURL(path.resolve(import.meta.dirname,'../bin/windows-process-journal.mjs')).href;
+ const platformModule=pathToFileURL(path.resolve(import.meta.dirname,'../bin/windows-platform.mjs')).href;
+ t.after(async()=>{const identity=await fs.readFile(childFile,'utf8').then(JSON.parse).catch(()=>undefined);if(identity)await platform.stopOwnedWindowsTree(identity,{allowExitedIdentity:true});await fs.rm(root,{recursive:true,force:true});});
+ await fs.writeFile(selectionFile,JSON.stringify({generation:'crash-test'}));
+ await fs.writeFile(controllerPath,`
+ import {spawn} from 'node:child_process';
+ import fs from 'node:fs/promises';
+ import {createWindowsProcessJournal} from ${JSON.stringify(journalModule)};
+ import {readWindowsProcessIdentity} from ${JSON.stringify(platformModule)};
+ const self=await readWindowsProcessIdentity(process.pid);
+ const journal=await createWindowsProcessJournal(${JSON.stringify(path.join(root,'windows-process-journals-v1'))},self);
+ // A journaled survivor is independent of this fixture controller's console lifetime.
+ const identity=${JSON.stringify(retainedIdentity)};
+ await journal.record([identity]);
+ await fs.writeFile(${JSON.stringify(childFile)},JSON.stringify({...identity,controllerPid:process.pid}));
+ setInterval(()=>{},1000);
+ `);
+ const pending=worker.runWindowsServiceWorker({version:1,generation:'crash-test',controllerPath,
+ env:{AAMP_TASK_RUNTIME_HOME:root},paths:{serviceHome:root,selectionFile,stopFile,logFile:path.join(root,'service.log'),ownerFile:path.join(root,'owner.json')}});
+ const deadline=Date.now()+20000;
+ while(!await fs.access(childFile).then(()=>true,()=>false)){if(Date.now()>deadline)throw Error('fixture startup timed out');await new Promise(r=>setTimeout(r,100));}
+ const identity=JSON.parse(await fs.readFile(childFile,'utf8'));
+ process.kill(identity.controllerPid,'SIGKILL');
+ assert.notEqual(await pending,0);
+ assert.equal(await platform.readWindowsProcessIdentity(identity.pid),undefined,'orphan descendant must be gone before scheduler observes the worker failure');
+});

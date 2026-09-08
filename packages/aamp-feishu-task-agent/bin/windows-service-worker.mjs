@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
+import {recoverWindowsProcessJournals} from './windows-process-journal.mjs';
 
 export async function runWindowsServiceWorker(config) {
   const selected=JSON.parse(await fs.readFile(config.paths.selectionFile,'utf8'));
@@ -25,13 +26,21 @@ export async function runWindowsServiceWorker(config) {
     // Attach rejection handling before awaiting CIM so immediate spawn failure cannot escape.
     closed.catch(()=>{});
     controllerIdentity=child.pid ? await readWindowsProcessIdentity(child.pid) : undefined;
-    if(!controllerIdentity) {return await closed;}
+    const finishController=async()=>{
+      const code=await closed;
+      const stop=await fs.readFile(config.paths.stopFile,'utf8').then(JSON.parse).catch(()=>undefined);
+      if(stop?.generation===config.generation) return 0;
+      // A failed controller can leave a Bridge alive. Clean verified journal entries
+      // before returning failure so Task Scheduler can finish and restart the task.
+      const runtimeHome=config.env?.AAMP_TASK_RUNTIME_HOME || path.dirname(config.paths.serviceHome);
+      await recoverWindowsProcessJournals(path.join(runtimeHome,'windows-process-journals-v1'));
+      return code;
+    };
+    if(!controllerIdentity) {return await finishController();}
     const temporary=`${config.paths.ownerFile}.${process.pid}.tmp`;
     await fs.writeFile(temporary,JSON.stringify({generation:config.generation,worker:self,controller:controllerIdentity})+'\n',{mode:0o600});
     await atomicReplaceWindows(temporary,config.paths.ownerFile);
-    const code=await closed;
-    const stop=await fs.readFile(config.paths.stopFile,'utf8').then(JSON.parse).catch(()=>undefined);
-    return stop?.generation===config.generation ? 0 : code;
+    return await finishController();
   } catch(error) {
     if(controllerIdentity) await stopOwnedWindowsTree(controllerIdentity).catch(()=>{});
     throw error;
