@@ -1,0 +1,2 @@
+# Preserve the actual npm-generated Windows shim fixture.
+test/fixtures/npm-cmd-shim.cmd -text whitespace=cr-at-eol

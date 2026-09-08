@@ -89,8 +89,15 @@ function collectOutput(child) {
   return async () => ({ ...await waitForExit(child), stdout, stderr })
 }
 
+async function npmRun(args, options = {}) {
+  if (process.platform !== 'win32') return execFileAsync('npm', args, options)
+  const { resolveNativeCommand } = await import('../bin/windows-platform.mjs')
+  const npm = await resolveNativeCommand('npm', options.env || process.env)
+  return execFileAsync(npm.command, [...npm.argsPrefix, ...args], options)
+}
+
 async function npmMaterialize(packageSpec, executable, cacheDir, environment = process.env) {
-  const { stdout } = await execFileAsync('npm', [
+  const { stdout } = await npmRun([
     'exec', '--yes', '--offline', '--cache', cacheDir,
     '--package', packageSpec, '--',
     process.execPath, ...npmExecutableResolverArgs(executable),
@@ -435,7 +442,7 @@ test('real npm shim keeps requested-bin precedence, shell semantics, and package
       'requested.sh': '#!/bin/sh -e\ncase "$-" in *e*) ;; *) exit 9;; esac\nprintf "%s\\n" requested-shell\nfixture-helper\n',
       'helper.sh': '#!/bin/sh\nprintf "%s\\n" package-local-helper\n',
     })
-    const packed = JSON.parse((await execFileAsync('npm', [
+    const packed = JSON.parse((await npmRun([
       'pack', '--json', '--pack-destination', root, requestedRoot,
     ], { timeout: 10_000 })).stdout)
     const packageSpec = path.join(root, packed[0].filename)
@@ -511,7 +518,7 @@ process.stdout.write(JSON.stringify({
 `,
     })
 
-    const baselineResult = await execFileAsync('npm', [
+    const baselineResult = await npmRun([
       'exec', '--yes', '--offline', '--cache', cacheDir,
       '--package', packageRoot, '--', 'fixture-context-bridge',
     ], { env: safeEnvironment, timeout: 15_000 })
@@ -681,4 +688,25 @@ test('controller resolver resists a package-local node bin and managed cleanup r
     else process.env.AAMP_TASK_NPM_CACHE_DIR = previousCache
     await fsp.rm(root, { recursive: true, force: true })
   }
+})
+
+
+test('native Windows npm package shim preserves argv stdin and exit code', {skip: process.platform !== 'win32' && 'requires native Windows cmd.exe'}, async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-windows-argv-'))
+  try {
+    const pkg = path.join(root, '中文 package')
+    await fsp.mkdir(pkg, {recursive:true})
+    await fsp.writeFile(path.join(pkg,'package.json'), JSON.stringify({name:'aamp-windows-argv-fixture',version:'1.0.0',type:'module',bin:{'argv-fixture':'argv.mjs'}}))
+    await fsp.copyFile(new URL('./fixtures/windows-argv.mjs',import.meta.url),path.join(pkg,'argv.mjs'))
+    const packed = JSON.parse((await npmRun(['pack','--json','--pack-destination',root,pkg],{timeout:30000})).stdout)
+    const packageSpec=path.join(root,packed[0].filename)
+    const launcher=createPackageExecutableLauncher({materialize:(spec,bin)=>npmMaterialize(spec,bin,path.join(root,'cache'))})
+    const args=['中文 空格','a&b','(item)','x%PATH%','a!b',"a'b",'a"b','C:\\space dir\\']
+    const child=await launcher.launch({packageSpec,executable:'argv-fixture',args,spawnOptions:{stdio:['pipe','pipe','pipe']}})
+    const output=collectOutput(child)
+    child.stdin.end('中文\r\nsecond line')
+    const result=await output()
+    assert.equal(result.code,7,result.stderr)
+    assert.deepEqual(JSON.parse(result.stdout),{args,input:'中文\r\nsecond line'})
+  } finally {await fsp.rm(root,{recursive:true,force:true})}
 })

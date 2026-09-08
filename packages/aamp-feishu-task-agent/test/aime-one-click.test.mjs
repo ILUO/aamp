@@ -1417,7 +1417,8 @@ test('remote managed startup sanitizes real child output and uses location-aware
       [mixed.host, mixed],
     ]))
     console.log = originalConsoleLog
-    await until(() => remote.process?.events.some((event) => event.type === 'bridge.running'), 'remote bridge did not become ready')
+    await until(() => [remote, local, mixed].every(group => group.process?.events.some(event => event.type === 'bridge.running')), 'all fixture bridges did not become ready')
+    await until(() => { try { return readFileSync(localLog, 'utf8').includes('local-compatible output /tmp/local-compatible') } catch { return false } }, 'local fixture output was not flushed')
     await module.cleanupAll()
 
     const surfaces = {
@@ -1575,7 +1576,8 @@ test('remote managed output is a strict event projection on every controller sur
     )
     assert.equal(record.events.some((event) => event.type === 'unknown.remote.event'), false)
     assert.deepEqual(emittedEvents, record.events)
-  assert.ok(readFileSync(logFile, 'utf8').includes('arbitrary-prose-value-sentinel'))
+    await until(() => { try { return readFileSync(logFile, 'utf8').includes('arbitrary-prose-value-sentinel') } catch { return false } }, 'remote projection fixture log was not flushed')
+    assert.ok(readFileSync(logFile, 'utf8').includes('arbitrary-prose-value-sentinel'))
 
     const surfaces = {
       log: readFileSync(logFile, 'utf8'),

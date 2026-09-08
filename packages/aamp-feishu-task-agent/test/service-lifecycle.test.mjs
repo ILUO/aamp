@@ -815,7 +815,7 @@ test('controller command routing isolates service controls from runtime acquisit
   ])
 })
 
-test('controller status command reads the launchd service without acquiring a runtime lease', () => {
+test('controller status command reads the launchd service without acquiring a runtime lease', {skip: process.platform !== 'darwin' && 'macOS launchd integration; Windows backend has separate tests'}, () => {
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-controller-status-'))
   const fakeLaunchctl = path.join(root, 'launchctl')
   const serviceHome = path.join(root, '.aamp', 'feishu-task-agent', 'service-v1')
@@ -858,3 +858,10 @@ exit 97
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /后台运行.*PID 4242/)
 })
+
+test('Windows background mode is selected only for interactive install/start', () => {
+  assert.equal(controller.shouldUseBackgroundService('start', 'win32', false), true);
+  assert.equal(controller.shouldUseBackgroundService('install', 'win32', false), true);
+  assert.equal(controller.shouldUseBackgroundService('start', 'win32', true), false);
+  assert.equal(controller.shouldUseBackgroundService('__service-run', 'win32', false), false);
+});

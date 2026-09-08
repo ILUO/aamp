@@ -59,10 +59,14 @@ CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SECONDS="${CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SEC
 CODEX_CHATGPT_APP_CLI="/Applications/ChatGPT.app/Contents/Resources/codex"
 CODEX_APP_CLI="/Applications/Codex.app/Contents/Resources/codex"
 CODEX_AUTO_UPDATE="${CODEX_AUTO_UPDATE:-true}"
+# BEGIN GENERATED TASK AGENT DEFAULTS
 CODEX_NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex}"
+CODEX_ACP_PKG="${CODEX_ACP_PKG:-@agentclientprotocol/codex-acp@1.0.2}"
+LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
+LARK_CLI_MIN_VERSION="${LARK_CLI_MIN_VERSION:-1.0.64}"
+# END GENERATED TASK AGENT DEFAULTS
 CODEX_UPDATE_CACHE_FILE="${CODEX_UPDATE_CACHE_FILE:-$HOME/.aamp/feishu-task-agent/codex-update-cache.json}"
 CODEX_UPDATE_CACHE_TTL_SECONDS="${CODEX_UPDATE_CACHE_TTL_SECONDS:-86400}"
-CODEX_ACP_PKG="${CODEX_ACP_PKG:-@agentclientprotocol/codex-acp@1.0.2}"
 AAMP_TRAE_CLI_BIN="${AAMP_TRAE_CLI_BIN:-}"
 AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS="${AAMP_TRAE_LOGIN_STATUS_TIMEOUT_SECONDS:-10}"
 AAMP_TRAECODE_CLI_BIN="${AAMP_TRAECODE_CLI_BIN:-}"
@@ -72,8 +76,6 @@ AAMP_TRAECODE_UPDATE_TTY="${AAMP_TRAECODE_UPDATE_TTY:-/dev/tty}"
 TRAEX_INSTALLER_URL="${TRAEX_INSTALLER_URL:-https://code.byted.org/api/tos-proxy/download/traex_install.sh}"
 WORKBUDDY_APP_CLI="/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
 WORKBUDDY_AI_APP_CLI="/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
-LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
-LARK_CLI_MIN_VERSION="${LARK_CLI_MIN_VERSION:-1.0.64}"
 AAMP_FEISHU_APP_SCOPES_TENANT_OVERRIDE="${FEISHU_APP_SCOPES_TENANT-}"
 AAMP_FEISHU_APP_SCOPES_USER_OVERRIDE="${FEISHU_APP_SCOPES_USER-}"
 AAMP_FEISHU_USER_AUTH_REQUIRED_SCOPES_OVERRIDE="${FEISHU_USER_AUTH_REQUIRED_SCOPES-}"
@@ -106,11 +108,13 @@ unset AAMP_TASK_PACKAGE_OVERRIDES_RESOLVED
 unset ACP_BRIDGE_PKG AAMP_TASK_ACP_BRIDGE_PKG
 unset FEISHU_BRIDGE_PKG AAMP_TASK_FEISHU_BRIDGE_PKG
 unset AIME_ACP_PKG AIME_ACP_REGISTRY AAMP_TASK_AIME_ACP_PKG
+# BEGIN GENERATED TASK AGENT BRIDGE DEFAULTS
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@luckyterry/aamp-acp-bridge@0.1.29-dev.0}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@iluolyx/aamp-feishu-bridge@0.1.52-dev.5}"
 AIME_ACP_PKG="${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.1-dev.1}"
+# END GENERATED TASK AGENT BRIDGE DEFAULTS
 AIME_ACP_REGISTRY="${AIME_ACP_REGISTRY:-https://bnpm.byted.org}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@iluolyx/aamp-feishu-bridge@0.1.52-dev.5}"
 AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="$ACP_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
@@ -2254,9 +2258,11 @@ ensure_lark_cli_min_version() {
 }
 
 feishu_scope_manifest_json() {
+# BEGIN GENERATED TASK AGENT SCOPE MANIFEST
   cat <<'JSON'
 {"version":2,"app":{"tenant":["im:message","im:message:send_as_bot","im:message:readonly","im:resource","cardkit:card:write","task:task","task:comment","task:task:readonly","task:comment:readonly","task:attachment:read","task:attachment:write","task:comment:read","task:comment:write","task:task:read","task:task:write","task:tasklist:read","task:tasklist:write","task:custom_field:read","task:custom_field:write","task:section:read","task:section:write"],"user":["im:message","im:message:readonly","im:resource","cardkit:card:write","task:task","task:comment","task:task:readonly","task:comment:readonly","task:attachment:read","task:attachment:write","task:comment:read","task:comment:write","task:task:read","task:task:write","task:tasklist:read","task:tasklist:write","task:custom_field:read","task:custom_field:write","task:section:read","task:section:write"]},"userAuth":{"core":[],"optional":["task:task","task:comment","task:task:readonly","task:comment:readonly","task:attachment:read","task:attachment:write","task:comment:read","task:comment:write","task:task:read","task:task:write","task:tasklist:read","task:tasklist:write","task:custom_field:read","task:custom_field:write","task:section:read","task:section:write"]}}
 JSON
+# END GENERATED TASK AGENT SCOPE MANIFEST
 }
 
 initialize_feishu_scope_manifest() {
@@ -2854,124 +2860,63 @@ register_feishu_app() {
   agent_detail "preparing Feishu app registration helper"
   npm_install_register_helper "$workdir"
 
+  # BEGIN GENERATED FEISHU REGISTER HELPER
   cat >"$register_script" <<'NODE'
-import * as lark from '@larksuiteoapi/node-sdk';
-import { execFile } from 'node:child_process';
-import { createRequire } from 'node:module';
-import { writeSync } from 'node:fs';
+import { execFile } from 'node:child_process'
+import { writeFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const require = createRequire(import.meta.url);
-const sdkPackage = require('@larksuiteoapi/node-sdk/package.json');
+const splitList = value => Array.isArray(value) ? value : String(value || '').split(',').map(item => item.trim()).filter(Boolean)
 
-function splitList(value) {
-  return String(value || '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-const tenantScopes = splitList(process.env.FEISHU_APP_SCOPES_TENANT);
-const userScopes = splitList(process.env.FEISHU_APP_SCOPES_USER);
-const tenantEvents = splitList(process.env.FEISHU_APP_EVENTS_TENANT);
-const userEvents = splitList(process.env.FEISHU_APP_EVENTS_USER);
-const appName = process.env.FEISHU_APP_PRESET_NAME || '飞书 CLI';
-let detectedTenantBrand = 'feishu';
-
-function userLog(message) {
-  writeSync(5, `${message}\n`);
-}
-
-console.log(`[aamp-one-click] registerApp sdk=${sdkPackage.version}`);
-console.log(`[aamp-one-click] registerApp appPreset.name=${appName}`);
-console.log(`[aamp-one-click] registerApp addons.counts tenantScopes=${tenantScopes.length} userScopes=${userScopes.length} tenantEvents=${tenantEvents.length} userEvents=${userEvents.length}`);
-
-const addons = {
-  scopes: {
-    tenant: tenantScopes,
-    user: userScopes,
-  },
-  events: {
-    items: {
-      tenant: tenantEvents,
-      user: userEvents,
+export async function registerFeishuApp({ sdk, appName = '飞书 CLI', tenantScopes = [], userScopes = [], tenantEvents = [], userEvents = [], openUrl, log = console.log }) {
+  let detectedTenantBrand = 'feishu'
+  const addons = { scopes: { tenant: splitList(tenantScopes), user: splitList(userScopes) }, events: { items: { tenant: splitList(tenantEvents), user: splitList(userEvents) } } }
+  const result = await sdk.registerApp({
+    source: 'aamp-feishu-task-agent', appPreset: { name: appName, desc: 'AAMP Feishu bridge bot' }, addons,
+    onQRCodeReady(info) {
+      log(`请打开授权链接完成飞书 Bot 授权（${info.expireIn} 秒内有效）：${info.url}`)
+      if (openUrl) {
+        try { Promise.resolve(openUrl(info.url, info.expireIn)).catch(() => {}) } catch {}
+      }
     },
-  },
-};
-console.log(`[aamp-one-click] registerApp addons.json=${JSON.stringify(addons)}`);
-
-const result = await lark.registerApp({
-  source: 'aamp-feishu-task-agent',
-  appPreset: {
-    name: appName,
-    desc: 'AAMP Feishu bridge bot',
-  },
-  addons,
-  onQRCodeReady(info) {
-    const url = new URL(info.url);
-    console.log(`[aamp-one-click] registerApp url.has_addons=${url.searchParams.has('addons') ? 'yes' : 'no'}`);
-    console.log(`[aamp-one-click] registerApp url.has_name=${url.searchParams.has('name') ? 'yes' : 'no'}`);
-    if (process.platform === 'darwin') {
-      execFile('open', [info.url], (error) => {
-        if (error) {
-          userLog('[aamp-one-click] 未能自动打开浏览器，请打开以下链接完成飞书 Bot 授权：');
-          userLog(info.url);
-          userLog(`[aamp-one-click] 授权链接将在 ${info.expireIn} 秒后过期`);
-          return;
-        }
-        userLog(`[aamp-one-click] 已打开浏览器，请完成飞书 Bot 授权（链接 ${info.expireIn} 秒内有效）`);
-      });
-    } else {
-      userLog('[aamp-one-click] 请打开以下链接完成飞书 Bot 授权：');
-      userLog(info.url);
-      userLog(`[aamp-one-click] 授权链接将在 ${info.expireIn} 秒后过期`);
-    }
-  },
-  onStatusChange(info) {
-    if (info.status === 'polling') return;
-    if (info.status === 'domain_switched') detectedTenantBrand = 'lark';
-    console.log(`[aamp-one-click] registerApp status: ${info.status}`);
-  },
-});
-
-const reportedTenantBrand = result?.user_info?.tenant_brand;
-const tenantBrand = reportedTenantBrand === undefined || reportedTenantBrand === null || reportedTenantBrand === ''
-  ? detectedTenantBrand
-  : reportedTenantBrand;
-const tenantBrandIsSupported = tenantBrand === 'feishu' || tenantBrand === 'lark';
-const openApiDomain = tenantBrand === 'lark' ? lark.Domain.Lark : lark.Domain.Feishu;
-
-async function fetchRegisteredAppName(appId, appSecret, domain) {
+    onStatusChange(info) { if (info.status === 'domain_switched') detectedTenantBrand = 'lark' },
+  })
+  const reported = result?.user_info?.tenant_brand
+  const tenantBrand = reported === undefined || reported === null || reported === '' ? detectedTenantBrand : reported
+  const tenantBrandIsSupported = ['feishu', 'lark'].includes(tenantBrand)
+  let registeredName = ''
   try {
-    const client = new lark.Client({
-      appId,
-      appSecret,
-      domain,
-    });
-    const response = await client.application.application.get({
-      path: { app_id: appId },
-      params: { lang: 'zh_cn', user_id_type: 'open_id' },
-    });
-    const app = response?.data?.app;
-    return app?.app_name || app?.i18n?.find?.((item) => item?.i18n_key === 'zh_cn')?.name || '';
-  } catch (error) {
-    console.log(`[aamp-one-click] failed to fetch registered app name; using preset name: ${error instanceof Error ? error.message : String(error)}`);
-    return '';
-  }
+    if (!tenantBrandIsSupported) throw new Error(`unsupported tenant brand: ${tenantBrand}`)
+    const client = new sdk.Client({ appId: result.client_id, appSecret: result.client_secret, domain: tenantBrand === 'lark' ? sdk.Domain.Lark : sdk.Domain.Feishu })
+    const response = await client.application.application.get({ path: { app_id: result.client_id }, params: { lang: 'zh_cn', user_id_type: 'open_id' } })
+    const app = response?.data?.app
+    registeredName = app?.app_name || app?.i18n?.find?.(item => item?.i18n_key === 'zh_cn')?.name || ''
+  } catch (error) { log(`failed to fetch registered app name; using preset name: ${error instanceof Error ? error.message : String(error)}`) }
+  return { app_id: result.client_id, app_secret: result.client_secret, app_name: registeredName || appName, tenant_brand: tenantBrand }
 }
 
-const registeredAppName = tenantBrandIsSupported
-  ? await fetchRegisteredAppName(result.client_id, result.client_secret, openApiDomain)
-  : '';
-const resultPayload = {
-  app_id: result.client_id,
-  app_secret: result.client_secret,
-  app_name: registeredAppName || appName,
-  tenant_brand: tenantBrand,
-};
-await import('node:fs/promises').then(({ writeFile }) => writeFile(process.env.AAMP_REGISTER_APP_RESULT_FILE, JSON.stringify(resultPayload)));
-console.log(`[aamp-one-click] Feishu app registration completed: ${result.client_id}`);
-console.log(`[aamp-one-click] Feishu app name: ${resultPayload.app_name}`);
+export function defaultOpenUrl(url) {
+  if (process.platform === 'darwin') execFile('open', [url], () => {})
+  else if (process.platform === 'win32') execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Process -FilePath $env:AAMP_AUTH_URL'], { env: { ...process.env, AAMP_AUTH_URL: url } }, () => {})
+}
+
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(path.resolve(process.argv[1]))) {
+  const sdk = await import('@larksuiteoapi/node-sdk')
+  const result = await registerFeishuApp({
+    sdk,
+    appName: process.env.FEISHU_APP_PRESET_NAME,
+    tenantScopes: process.env.FEISHU_APP_SCOPES_TENANT,
+    userScopes: process.env.FEISHU_APP_SCOPES_USER,
+    tenantEvents: process.env.FEISHU_APP_EVENTS_TENANT,
+    userEvents: process.env.FEISHU_APP_EVENTS_USER,
+    openUrl: defaultOpenUrl,
+  })
+  await writeFile(process.env.AAMP_REGISTER_APP_RESULT_FILE, JSON.stringify(result))
+}
 NODE
+  # END GENERATED FEISHU REGISTER HELPER
 
   agent_log "正在授权飞书 Bot..."
   set +e
