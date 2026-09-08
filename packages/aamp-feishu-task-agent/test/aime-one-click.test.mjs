@@ -941,6 +941,7 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
   mkdirSync(feishuDir)
   writeExecutable(helper, [
     'set -euo pipefail',
+    'cat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null',
     'AAMP_TASK_INTERNAL="${AAMP_TASK_INTERNAL:-false}"',
     packageOverrideInitialization(source),
     'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',

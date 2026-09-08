@@ -63,7 +63,7 @@ Set-Acl -LiteralPath $config.target -AclObject $acl
 $verified = Get-Acl -LiteralPath $config.target
 $sections = [Security.AccessControl.AccessControlSections]'Access, Owner, Group'
 if ($verified.GetSecurityDescriptorSddlForm($sections) -ne $acl.GetSecurityDescriptorSddlForm($sections)) {
-  throw 'Windows ACP config temporary file ACL could not be preserved'
+  throw ('Windows ACP config temporary file ACL could not be preserved; expected='+$acl.GetSecurityDescriptorSddlForm($sections)+'; actual='+$verified.GetSecurityDescriptorSddlForm($sections))
 }
 `
 
