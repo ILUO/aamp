@@ -73,3 +73,12 @@ test('worker does not restart after stop is requested during recovery delay',asy
  const result=await worker.runWindowsServiceWorker({version:1,generation:'retry',paths:{selectionFile,stopFile,logFile:path.join(root,'log')}},{runOnce:async()=>{attempts++;return 23;},wait:async()=>fs.writeFile(stopFile,JSON.stringify({generation:'retry'})),restartDelayMs:1});
  assert.equal(result,0);assert.equal(attempts,1);
 });
+
+test('worker exhausts three retries and returns the last failure without an endless loop',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-worker-retry-limit-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const selectionFile=path.join(root,'selection.json'),stopFile=path.join(root,'stop.json');
+ await fs.writeFile(selectionFile,JSON.stringify({generation:'retry'}));
+ let attempts=0;
+ const code=await worker.runWindowsServiceWorker({version:1,generation:'retry',paths:{selectionFile,stopFile,logFile:path.join(root,'log')}},{runOnce:async()=>{attempts++;return 23;},restartDelayMs:0});
+ assert.equal(code,23);assert.equal(attempts,4);
+});
