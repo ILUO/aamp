@@ -1,34 +1,37 @@
 # 飞书任务 Windows 原生开发与验收记录
 
-日期：2026-09-07 至 2026-09-08。状态：Windows 10 Administrator 原生自动化、计划任务受控生命周期已通过；Windows 11 普通用户与真实飞书业务闭环仍待验收。
+日期：2026-09-07 至 2026-09-08。状态：Windows 10 Administrator 已取得原生自动化、受控生命周期及真实飞书任务闭环证据，附件闭环在已登录用户的交互会话后台模式通过；Windows 11 普通用户等剩余矩阵仍待验收。
 
-用户先要求“先开发”，随后提供 Windows SSH 测试机，并明确确认上传三个消费包源码、测试与开发 tgz。以下新增原生证据；普通用户及真实业务闭环仍是发布门禁。
+用户先要求“先开发”，随后提供 Windows SSH 测试机，并明确确认上传三个消费包源码、测试与开发 tgz，后续授权真实 Bot 与任务业务补测。下表汇总最新证据；未完成的验收项仍是发布门禁。
 
 ## 源码与环境
 
 - 仓库：ILUO/aamp；分支：`feat/feishu-task-windows-native`。
 - 固定基线：`7c4b7ff50b2fc766f9076dcbc7d87ce910ca8b76`，来自 `fix/feishu-auth-scope-negotiation`。
-- 开发与当前测试主机：macOS 26.5.2 arm64、Node v22.22.2；Windows 11 build、PowerShell 和 Windows Codex 版本尚无实测记录。
+- 开发主机：macOS 26.5.2 arm64、Node v22.22.2。实测主机：Windows 10 企业版 22H2 / 10.0.19045 x64、Administrator、PowerShell 5.1.19041.6456、Node 22.22.2、Codex 0.153.4；存在活动 console 登录，无 RDP。Windows 11 尚无实测记录。
 - Windows 目标：Windows 11 x64 普通用户、PowerShell 5.1、Node 22/24。
-- 未注册真实 Bot、未派发真实任务、未向远程推送或 npm 发布。
+- 已注册专用新 Bot、完成用户 OAuth 与真实任务补测；未向远程推送或 npm 发布。
 
 ## 验证记录
 
-下表区分当前已取得的证据与仍未执行的验收；文末保留首次本地交付历史。
+下表为截至 2026-09-08 附件最终复验后的最新汇总。Windows 通过项均限定为上述 Windows 10 Administrator 环境，不代表 Windows 11、普通用户或 Node 24 已通过。下方按时间保留历史失败及当时的待验收状态，以本节和最新复验结论为准。
 
 | 验证层 | 当前状态 | 说明 |
 |---|---|---|
-| macOS 三包回归与类型检查 | 通过 | Task Agent 436 通过 / 4 原生跳过；ACP 176 通过；Feishu 106 通过；两 Bridge tsc 通过 |
-| 实际 npm pack / 本地安装 | macOS 通过 | 三包实际 tgz 安装到全新临时 prefix，安装后帮助入口和必需运行文件检查通过 |
+| macOS 三包回归与类型检查 | 部分通过 | 最新已记录 Task Agent 459 项：451 通过、6 跳过、2 AIME 失败；ACP 197 项：194 通过、3 跳过；Feishu 112 项：108 通过、4 跳过。两 Bridge 类型检查已有通过记录，不将三包整体报告为全绿 |
+| Windows 原生包测试 | Windows 10 通过 | Task Agent 263 项：250 通过、13 跳过；ACP 197 项：193 通过、4 跳过；最新 Feishu 112/112。各包分轮执行，详见下方记录 |
+| 实际 npm pack / 本地安装 | macOS / Windows 10 通过 | 三包实际 tgz 安装到全新临时 prefix，安装后帮助入口及运行文件检查通过；后续修复包本地与 Windows 哈希回读一致 |
 | Windows / macOS / Linux × Node 22/24 CI | 未执行 | 已新增工作流；尚未推送或触发 |
 | Windows npm shim / argv / stdin / exit | Windows 10 通过 | 真实 npm shim，中文、空格、shell 特殊字符、CRLF stdin、退出码 7 |
-| Windows ACL / CIM / 进程树隔离 | Windows 10 通过 | 原生 ACL 回读、CIM 身份、父子孙清理及旁观进程存活 |
-| Windows Codex ACP session | 未执行 | 必须覆盖标准 npm 安装与特殊字符目录 |
-| Feishu 注册、授权、配对及完整 Task 结果 | 未执行 | 需要专用测试 Bot 和 Windows 主机 |
-| need_help / Owner 继续 / 提醒 / 重复 / 子任务 | 未执行 | 保持既有业务行为，记录各自 Task ID |
-| 附件输入及 Windows 本地产物上传 | 未执行 | 中文路径、CRLF、现有大小限制 |
-| 关闭终端、登录、stop/start/restart、故障重启 | 部分通过 | 实际 Task Scheduler 启动、幂等启动、重启、停止通过；注销、登录触发、故障重启与普通用户未验证 |
-| 运行包更新、卸载与旁观进程存活 | 未执行 | 只管理本产品任务及已验证身份 |
+| Windows ACL / CIM / 进程树隔离 | Windows 10 通过 | 原生 ACL 回读、CIM 身份、父子孙清理及旁观进程存活；异步周期采样性能已补测 |
+| Windows Codex ACP session | 部分通过 | 真实计算及交互会话后台读写文件通过；SSH Session0 runner pipe-in 超时仍可复现。标准 npm 安装与特殊字符目录完整矩阵未验收 |
+| Feishu 注册、授权、配对及完整 Task 结果 | Windows 10 通过（修复后） | 新 Bot 注册、用户 OAuth、自动绑定成功；初次任务被 EPERM 中断，修复后 Owner 评论重试得到 527 并回读 done/4。不是原包干净安装全程无故障 |
+| need_help / Owner 继续 | Windows 10 通过 | 跨重启补充参数后得到 493，服务端 done/4；Task ID 见“原Bot扩展场景恢复” |
+| 单次提醒 / 重复任务 | 部分通过 | 单次 task_reminder_fire 实际触发并回写 133、done/4；重复任务未验证 |
+| 父子任务 | Windows 10 通过 | 结果 48；父子均 done/4，日志 completed parent=1 children=1 |
+| 附件输入及 Windows 本地产物上传 | 核心闭环 Windows 10 通过；边界待验 | 交互会话后台实际读 CSV、求和生成 result.csv、上传并从服务端下载核验 WIN10-ROUNDTRIP-9821 / 49，日志 succeeded、任务 done/4。中文路径、CRLF 附件及大小边界仍待验，不能用 shim 测试替代；详见“附件最终闭环通过（交互会话后台模式）” |
+| 关闭终端、登录、stop/start/restart、故障重启 | 部分通过 | 受控 Task Scheduler 生命周期及真实业务 restart/stop 通过，停止后无本轮 Node 残留；关闭终端、注销、登录触发、故障重启与普通用户完整矩阵未验证 |
+| 运行包更新、卸载与旁观进程存活 | 未执行完整验收 | 已做测试修复包替换及受控旁观进程存活检查；运行中更新、卸载完整流程未验证 |
 
 ## 原生验收录入模板
 
