@@ -177,3 +177,61 @@ Windows 11 普通用户、Node 24、真正 Codex ACP session、飞书注册/OAut
 - 最终 Task Agent macOS 串行全套：459 项，451 通过、6 Windows 跳过、2 AIME 相关测试失败（远端 helper 进程组清理夹具 5 秒超时、噪声 npm 输出分类夹具 25 秒超时）。未报告全绿；两项不属于本次 Windows 改动文件，修改前 HEAD `2236a31` 隔离对照中，进程组清理同样约 5 秒超时，噪声输出分类约 8 秒通过；后者不能据此判定为已确认的既有失败。
 - 最终 Windows 进程回查仅剩测试前已存在的 other Node PID 8548/7832/7672；本轮 controller、bridge、acpx 和 held-input 夹具均无残留。
 - 噪声输出分类补充受控对照：HEAD 临时包仅覆盖本轮三个 Task Agent Windows 产品文件后，noisy 单项约 17.7 秒通过；当前 checkout 隔离仍达 25 秒超时。证据不足以将该失败归因于 Windows 改动，也不足以宣称当前 checkout 的 macOS 全套已通过，继续保留限制。
+
+## 2026-09-08 Win10 业务与生命周期补测（进行中）
+
+继续使用提交 `598acc0` 的已验证包、原隔离 Bot 和 Win10 Administrator，未引入新的业务代码。
+
+| 场景 | Task GUID | 当前证据 |
+|---|---|---|
+| need_help / Owner 继续 | `1c859119-6e94-4499-bde2-a4200a13860c` | 日志 `help-needed` 和 blocked；Owner 已评论补充29，预期17×29=493，结果待回读 |
+| 附件输入/CSV交付 | `4216434f-75ea-4fc2-ab68-5c98f888623f` | 85字节合成input.csv上传成功；附件GUID `c73bad00-f1c4-4e7a-8e07-44a403e98bab`；内容17/23/9、唯一标记，预期总和49 |
+| 单次提醒 | `f8452498-b5ac-4b09-bee5-b98eeeaba10b` | due=1788856916000ms，截止时提醒，预期19×7=133；观察创建时延迟执行与提醒事件 |
+
+附件任务先创建、上传、再分配Bot。实际 `task_assignees_update` 被既有allowlist忽略，已通过Owner评论触发；不将单独负责人变更视为已验证执行入口，未扩大修改事件语义。
+
+补测中断记录：run `1788856157522-9888` 在 08:38:24 UTC 出现 `windows-process-journal: Windows process timed out after 30000ms`，Controller 按保护策略停止全部 Bridge。Owner 继续评论已经 ACK，附件任务 dispatch attachments=1，但尚未得到终态，不能判通过；提醒和父子任务需要恢复运行后重新触发。
+
+原生诊断：同一主机 readIdentity 约0.9秒；空闲根进程树快照1.68秒，8个子进程2.72秒。ACP 每500ms同步执行快照时，两个空闲受管进程令100ms心跳最大间隔从125ms增至3551ms（10秒仅7次心跳）。这证明周期同步采样会显著阻塞事件循环；尚不能仅凭此把单次30秒CIM超时完全归因于它。修复限定为Windows异步、有界周期查询，保留身份验证及cleanup生命周期。
+
+干净安装第一次尝试使用 `fresh-install-598acc0`：用户确认注册页面复用了旧Bot，故不算新注册通过；已正常stop，未撤销旧应用。按用户要求在新的空目录 `fresh-install-598acc0-r2` 重新发起注册，必须核对新App ID不同于旧 `cli_aa1511303dba5bc1`。
+
+
+### 新 Bot 干净安装与新增 Windows 阻塞
+
+- R2 空状态目录安装创建了新 App `cli_aa15713357f89bc4`（不同于旧 Bot），绑定 `0ed2b29e-a310-475f-b006-ce1b433d634a`。Bot 注册和用户 OAuth 分别完成，安装流程自行保存绑定并启动 1/1，无需手动恢复密钥。
+- 新 Bot 冒烟任务 `5328fd0a-9ef7-4428-81d3-8e95c9420759`，17×31，预期527；服务端回读仅有 ACK `7683087206512069577`，不能认定业务通过。
+- run `1788857506724-12068` 于09:04:34 UTC因 `writeJsonAtomic` 替换 IM state.json 返回 `EPERM`，Feishu Bridge退出1。ACP于09:04:58完成，但结果未回写。该轮仍使用 stdin-final ACP包；与异步采样修复的验证分开记录。仅凭错误码不能确定文件被哪个进程占用。
+
+### Windows 异步进程采样验证
+
+- ACP周期采样改为有界异步、single-flight，停止/取消等待在途采样结束后清理；保持PID代次和所有者校验。初始身份校验与最终清理仍包含有界同步操作，不宣称完全无阻塞。
+- macOS ACP串行：197项，194通过、3Windows跳过、0失败。Windows ACP全套：197项，193通过、4POSIX跳过、0失败，约62秒。
+- 同一Win10主机100ms心跳基线最大115ms；两个监控含启动身份校验最大1889ms、10秒93次；稳定阶段最大126ms、10秒93次。此前同步周期采样为最大3551ms、10秒7次。这支持周期阻塞已改善，不证明所有CIM超时已消失。
+- 新ACP测试包文件名 `zengxingyuan-aamp-acp-bridge-0.1.29-dev.0-windows-async.tgz`；SHA256 `fc7817da4e5081d7a700dc0304ea47f17d0821bd70d9f5cc67da5e1a8459d068`，本地与Windows回读一致；尚待真实业务复验。
+
+- IM持久化限定修复：将config.ts遗漏的直接rename接入包内既有renameAtomic，与Task路径共用。Windows临时EPERM/EACCES/EBUSY最多5次重试，总等待3.1秒；不unlink目标，失败保留原始错误，POSIX不重试。不能把重试等同于已证实占用来源或彻底解决所有EPERM。
+- Feishu Bridge本地src测试108/108、build退出0；Windows原子替换专项9/9，含暂时/永久拒绝时旧JSON完整性。修复包 `zengxingyuan-aamp-feishu-bridge-0.1.52-dev.5-windows-im-rename.tgz` SHA256 `766652be1075a98a0cf16ded59c45683b5242eed4153b150ba9bf32d62953b2d`，本地与远端一致。
+
+### 新Bot恢复后的真实闭环通过
+
+- run `1788859026150-8992` 使用异步ACP与IM rename修复包，复用新Bot授权启动1/1。Owner继续评论 `7683091901909765058` 触发原任务；AAMP Task ID `feishu-task-5328fd0a-9ef7-4428-81d3-8e95c9420759-fbe716c1ebc30e8019905a01904613b2`。
+- 最终评论 `7683092546850966490`：`17 × 31 = 527. Calculate 17 × 30 + 17 = 510 + 17 = 527.`。服务端回读 status=done、agent_task_status=4、completed_at=1788859383000，日志answered、completed parent=1 children=0，errors.jsonl为空。
+- 结论：新Bot注册/用户OAuth/自动绑定成功；初次业务被EPERM中断，修复包恢复后由Owner评论触发的真实结果闭环通过。不将其改写为原598acc0包干净安装全程无故障，也不声称验证了结果自动重放。运行中仍有AAMP连接超时及流事件fetch失败，但本次最终回写成功。产品修复本地提交 `0a70b18`，未推送或发布。
+
+- 新Bot本轮正常stop返回0，前台会话确认停止并退出；保留授权与绑定。
+
+### 原Bot扩展场景恢复
+
+- run `1788859546112-9380`，两个Windows修复包，1/1绑定恢复。Owner/附件/父子继续评论分别为 `7683093937623485414` / `7683093939989040080` / `7683093942392622032`，均ACK且ACP于09:28:34 UTC收到。
+- 单次提醒重新设为due `1788860078000`，原截止时提醒保留。CLI +update的毫秒值入口返回1470400，改用文档支持的ISO日期成功；未改产品或CLI，尚待提醒触发验证。
+
+- Owner继续通过：`1c859119-6e94-4499-bde2-a4200a13860c`，结果评论 `7683094672184478985` 为17×29=493，服务端done/agent_task_status=4；与此前need_help评论共同覆盖请求补充→Owner继续→完成（跨重启）。
+- 父子通过：父 `ae73f174-a946-40b9-8098-c5b6630e6f4a`、子 `5ca6ce48-9d75-4d50-bb47-bc76b60af54e` 均done/agent_task_status=4，父评论 `7683094730036481246` 为6×8=48，日志answered及completed parent=1 children=1。
+- 附件失败：结果评论 `7683095099516964040` 报告文件读取执行前连接runner pipe-in超时15000ms、替代Node runtime退出，未验证marker/total，未创建artifact。Feishu日志dispatch attachments=1、attachment_notes=0，终态result closed status=failure；虽然done不能算通过。错误来源目前为Agent结果报告，未独立定位Windows runner的系统根因，未绕过沙箱或改动权限策略。
+- 新截止时间后已观察单次 `task_reminder_fire`、dispatch及ACK，事件 `a587731c241acac81022446764dba21f`；等待最终133回写。
+
+- 单次提醒闭环通过：最终评论 `7683096245686029249` 为19×7=133，服务端done/agent_task_status=4；ACP于09:37:32 UTC completed，触发来源确认为task_reminder_fire，没有用Owner评论替代。
+- 本轮明确未完成：附件输入到原生产物上传的完整闭环（runner执行失败）；重复任务、普通用户Win11、Node24、注销/故障恢复、运行中更新卸载和远端CI。当前成功场景不能替代这些门禁。
+
+- 原Bot扩展补测结束正常stop返回0、前台SSH退出。停止完成后CIM回查仅有测试前既存Node PID8548/7832/7672，无本轮Node残留。保留两套Bot授权/绑定及任务证据。
