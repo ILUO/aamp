@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { renameAtomic } from './rename-atomic.js'
 
 for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
@@ -42,5 +45,37 @@ for (const [platform, code] of [['darwin', 'EPERM'], ['linux', 'EACCES'], ['win3
       delay: async () => { assert.fail('unexpected retry') },
     }), (actual) => actual === error)
     assert.equal(attempts, 1)
+  })
+}
+
+for (const permanent of [false, true]) {
+  test(`Windows state replacement keeps existing JSON intact during ${permanent ? 'permanent' : 'transient'} denial`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'aamp-rename-state-'))
+    const destination = join(directory, 'state.json')
+    const source = join(directory, '.state.json.tmp')
+    const oldState = JSON.stringify({ version: 1, tasks: { previous: {} } })
+    const newState = JSON.stringify({ version: 1, tasks: { completed: {} } })
+    const denied = Object.assign(new Error('file is occupied'), { code: 'EPERM' })
+    try {
+      await writeFile(destination, oldState)
+      await writeFile(source, newState)
+      let attempts = 0
+      const replacement = renameAtomic(source, destination, {
+        platform: 'win32',
+        rename: async (from, to) => {
+          assert.equal(await readFile(destination, 'utf8'), oldState)
+          assert.equal(await readFile(source, 'utf8'), newState)
+          if (++attempts === 1 || permanent) throw denied
+          await rename(from, to)
+        },
+        delay: async () => {},
+      })
+      if (permanent) await assert.rejects(replacement, error => error === denied)
+      else await replacement
+      assert.equal(await readFile(destination, 'utf8'), permanent ? oldState : newState)
+      assert.equal(attempts, permanent ? 6 : 2)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 }

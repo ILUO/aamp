@@ -1,5 +1,8 @@
 import { parseWindowsAgentArgv, windowsAgentAlias } from './windows-agent-config.js'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -10,6 +13,7 @@ import {
   buildAcpxEnvironment,
   selectFinalAssistantOutput,
   selectOwnedWindowsTree,
+  snapshotOwnedWindowsTree,
   terminateWindowsProcessTree,
   WindowsOwnedProcessTree,
   type WindowsProcessIdentity,
@@ -41,7 +45,7 @@ test('terminateWindowsProcessTree kills only an unchanged owned process identity
   assert.deepEqual(calls, [{
     command: 'taskkill.exe',
     args: ['/pid', '4312', '/t', '/f'],
-    options: { stdio: 'ignore', windowsHide: true },
+    options: { stdio: 'ignore', windowsHide: true, timeout: 5_000 },
   }])
 })
 
@@ -91,7 +95,7 @@ test('exec reports synchronous native resolver failures after trying npx fallbac
   assert.deepEqual(attempted, ['acpx', 'npx'])
 })
 
-test('WindowsOwnedProcessTree cleans a retained orphan without touching reused or unrelated pids', () => {
+test('WindowsOwnedProcessTree cleans a retained orphan without touching reused or unrelated pids', async () => {
   const root: WindowsProcessIdentity = {
     pid: 100,
     creationDate: 'root-created',
@@ -132,24 +136,26 @@ test('WindowsOwnedProcessTree cleans a retained orphan without touching reused o
       killed.push(identity.pid)
       return 'termination-requested'
     },
-    setIntervalFn: (callback: () => void) => {
+    setTimeoutFn: (callback: () => void) => {
       intervalCallback = callback
       return { unref() {} } as NodeJS.Timeout
     },
-    clearIntervalFn: () => { cleared = true },
+    clearTimeoutFn: () => { cleared = true },
   })
 
   tree.start()
+  await tree.refresh()
   intervalCallback?.()
+  await tree.refresh()
   tree.stopPolling()
-  tree.terminateRetained()
+  await tree.terminateRetained()
 
   assert.equal(cleared, true)
   assert.deepEqual(killed, [101])
   assert.equal(live.has(unrelated.pid), true)
 })
 
-test('WindowsOwnedProcessTree ignores a failed or root-mismatched snapshot', () => {
+test('WindowsOwnedProcessTree ignores a failed or root-mismatched snapshot', async () => {
   const root: WindowsProcessIdentity = {
     pid: 200,
     creationDate: 'root-created',
@@ -169,14 +175,14 @@ test('WindowsOwnedProcessTree ignores a failed or root-mismatched snapshot', () 
   const tree = new WindowsOwnedProcessTree(root, {
     snapshot: () => snapshots.shift()?.() ?? [],
     terminate: (identity) => { killed.push(identity.pid); return 'termination-requested' },
-    setIntervalFn: (() => ({ unref() {} })) as never,
-    clearIntervalFn: () => {},
+    setTimeoutFn: (() => ({ unref() {} })) as never,
+    clearTimeoutFn: () => {},
   })
 
-  tree.refresh()
-  tree.refresh()
-  tree.terminateRetained()
-  assert.deepEqual(killed, [])
+  await tree.refresh()
+  await tree.refresh()
+  await tree.terminateRetained()
+  assert.deepEqual(killed, [root.pid])
 })
 
 test('selectOwnedWindowsTree rejects a child older than its parent after PID reuse', () => {
@@ -207,7 +213,7 @@ test('selectOwnedWindowsTree rejects a child older than its parent after PID reu
   assert.deepEqual(selected.map((identity) => identity.pid), [300, 302])
 })
 
-test('WindowsOwnedProcessTree retains unconfirmed termination for a later retry', () => {
+test('WindowsOwnedProcessTree retains unconfirmed termination for a later retry', async () => {
   const root: WindowsProcessIdentity = {
     pid: 400,
     creationDate: 'root-created',
@@ -223,16 +229,173 @@ test('WindowsOwnedProcessTree retains unconfirmed termination for a later retry'
       attempts.push(identity.pid)
       return identity.pid === child.pid ? childOutcome : 'gone'
     },
-    setIntervalFn: (() => ({ unref() {} })) as never,
-    clearIntervalFn: () => {},
+    setTimeoutFn: (() => ({ unref() {} })) as never,
+    clearTimeoutFn: () => {},
   })
 
-  tree.refresh()
-  tree.terminateRetained()
+  await tree.refresh()
+  await tree.terminateRetained()
   childOutcome = 'gone'
-  tree.terminateRetained()
+  await tree.terminateRetained()
 
   assert.deepEqual(attempts, [401, 400, 401])
+})
+
+const samplingRoot: WindowsProcessIdentity = {
+  pid: 500, creationDate: '2026-09-07T10:00:00.000Z',
+  executablePath: 'C:\\node.exe', ownerSid: 'S-1-5-21-owner',
+}
+
+test('WindowsOwnedProcessTree coalesces slow snapshots without blocking the event loop', async () => {
+  let finish!: (identities: WindowsProcessIdentity[]) => void
+  let calls = 0
+  const timers: Array<{ callback: () => void; delay: number }> = []
+  const tree = new WindowsOwnedProcessTree(samplingRoot, {
+    snapshot: () => { calls++; return new Promise(resolve => { finish = resolve }) },
+    setTimeoutFn: (callback, delay) => {
+      timers.push({ callback, delay })
+      return { unref() {} } as NodeJS.Timeout
+    },
+    clearTimeoutFn: () => {},
+  })
+  tree.start()
+  const first = tree.refresh()
+  assert.equal(tree.refresh(), first)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls, 1)
+  assert.equal(timers.length, 0)
+  finish([samplingRoot])
+  await first
+  assert.equal(timers.length, 1)
+  assert.equal(timers[0].delay, 500)
+  timers[0].callback()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls, 2)
+  tree.stopPolling()
+  finish([samplingRoot])
+  await tree.refresh()
+  assert.equal(timers.length, 1)
+})
+
+test('WindowsOwnedProcessTree drains an in-flight snapshot before cleanup and never resumes polling', async () => {
+  let finish!: (identities: WindowsProcessIdentity[]) => void
+  const child = { ...samplingRoot, pid: 501 }
+  const killed: number[] = []
+  let scheduled = 0
+  const tree = new WindowsOwnedProcessTree(samplingRoot, {
+    snapshot: () => new Promise(resolve => { finish = resolve }),
+    terminate: identity => { killed.push(identity.pid); return 'gone' },
+    setTimeoutFn: () => { scheduled++; return { unref() {} } as NodeJS.Timeout },
+  })
+  tree.start()
+  await new Promise(resolve => setImmediate(resolve))
+  const cleanup = tree.terminateRetained()
+  assert.equal(tree.terminateRetained(), cleanup)
+  tree.start()
+  assert.deepEqual(killed, [])
+  finish([samplingRoot, child])
+  await cleanup
+  assert.deepEqual(killed, [501, 500])
+  assert.equal(scheduled, 0)
+})
+
+test('WindowsOwnedProcessTree retains verified identities when a later async snapshot times out', async () => {
+  const child = { ...samplingRoot, pid: 501 }
+  let attempts = 0
+  const killed: number[] = []
+  const tree = new WindowsOwnedProcessTree(samplingRoot, {
+    snapshot: async () => {
+      if (attempts++ === 0) return [samplingRoot, child]
+      throw Object.assign(new Error('CIM timed out'), { killed: true })
+    },
+    terminate: identity => { killed.push(identity.pid); return 'gone' },
+  })
+  await tree.refresh()
+  await tree.refresh()
+  await tree.terminateRetained()
+  assert.deepEqual(killed, [501, 500])
+})
+
+test('snapshotOwnedWindowsTree bounds async CIM execution and rejects timeout output', async () => {
+  const identities = await snapshotOwnedWindowsTree(samplingRoot, (async (command: string, args: string[], options: { timeout: number; maxBuffer: number }) => {
+    assert.equal(command, 'powershell.exe')
+    assert.equal(options.timeout, 10_000)
+    assert.equal(options.maxBuffer, 1024 * 1024)
+    throw Object.assign(new Error('timeout'), { killed: true, stdout: JSON.stringify({ processes: [samplingRoot] }) })
+  }) as never)
+  assert.deepEqual(identities, [])
+})
+
+test('AcpxClient resolves child close only after the pending Windows ownership sample drains', async () => {
+  let finish!: (identities: WindowsProcessIdentity[]) => void
+  const killed: number[] = []
+  const tree = new WindowsOwnedProcessTree(samplingRoot, {
+    snapshot: () => new Promise(resolve => { finish = resolve }),
+    terminate: identity => { killed.push(identity.pid); return 'gone' },
+  })
+  tree.start()
+  await new Promise(resolve => setImmediate(resolve))
+  const proc = Object.assign(new EventEmitter(), {
+    pid: samplingRoot.pid, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+  }) as unknown as ChildProcessWithoutNullStreams
+  const client = new AcpxClient(process.cwd())
+  client['spawnAcpx'] = () => proc
+  client['windowsProcessTrees'].set(proc, tree)
+  let completed = false
+  client['runAcpx']([], { onClose: () => { completed = true }, onError: error => { throw error } })
+  let closed = false
+  const closing = client['activeProcesses'].get(proc)!.then(() => { closed = true })
+  proc.emit('close', 0)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(completed, false)
+  assert.equal(closed, false)
+  assert.equal(client['activeProcesses'].size, 1)
+  finish([samplingRoot, { ...samplingRoot, pid: 501 }])
+  await closing
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(completed, true)
+  assert.equal(client['activeProcesses'].size, 0)
+  assert.deepEqual(killed, [501, 500])
+})
+
+test('AcpxClient stops all Windows samplers before awaiting an in-flight cleanup', async () => {
+  const client = new AcpxClient(process.cwd())
+  const proc1 = { pid: 501 } as ChildProcessWithoutNullStreams
+  const proc2 = { pid: 502 } as ChildProcessWithoutNullStreams
+  client['activeProcesses'].set(proc1, new Promise(() => {}))
+  client['activeProcesses'].set(proc2, new Promise(() => {}))
+  const requested: number[] = []
+  const finishes: Array<() => void> = []
+  client['terminateProcessTree'] = proc => {
+    requested.push(proc.pid!)
+    return new Promise(resolve => { finishes.push(() => { client['activeProcesses'].delete(proc); resolve() }) })
+  }
+  const stopping = client.stop()
+  assert.deepEqual(requested, [501, 502])
+  assert.equal(client.stop(), stopping)
+  finishes.forEach(finish => finish())
+  await stopping
+})
+
+test('AcpxClient cancellation waits for pending Windows cleanup before its close deadline', async () => {
+  let finish!: () => void
+  const draining = new Promise<void>(resolve => { finish = resolve })
+  const proc = Object.assign(new EventEmitter(), {
+    pid: 503, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+  }) as unknown as ChildProcessWithoutNullStreams
+  const client = new AcpxClient(process.cwd())
+  client['spawnAcpx'] = () => proc
+  client['terminateProcessTree'] = () => draining
+  const execution = client['runAcpx']([], { onClose: () => {}, onError: error => { throw error } })
+  let cancelled = false
+  const cancelling = execution.cancel().then(() => { cancelled = true })
+  // Exceed the old 2s close race while the bounded CIM cleanup is pending.
+  await new Promise(resolve => setTimeout(resolve, 2_100))
+  assert.equal(cancelled, false)
+  finish()
+  proc.emit('close', 0)
+  await cancelling
+  assert.equal(cancelled, true)
 })
 
 function createFakeAcpx(mode: 'success' | 'auth-failure' | 'auth-with-output' | 'json-auth-failure' | 'json-aime-auth-failure' | 'json-aime-sources' | 'auth-discussion' | 'timeout' | 'close-retry'): { cwd: string; logFile: string } {

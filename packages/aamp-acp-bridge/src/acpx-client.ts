@@ -1,5 +1,6 @@
+import { promisify } from 'node:util'
 import { ensureWindowsAgentConfig, parseWindowsAgentArgv, windowsAgentAlias } from './windows-agent-config.js'
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFile, execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -90,6 +91,10 @@ foreach ($process in $all) {
 [pscustomobject]@{ processes = $identities } | ConvertTo-Json -Compress -Depth 3
 `
 
+const execFileAsync = promisify(execFile)
+const WINDOWS_CIM_TIMEOUT_MS = 10_000
+const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000
+
 const WINDOWS_PROCESS_INPUT_KEY = 'AAMP_ACP_WINDOWS_INPUT_BASE64'
 
 function windowsProcessEnvironment(pid: number): NodeJS.ProcessEnv {
@@ -108,7 +113,7 @@ function inspectWindowsProcessIdentity(pid: number): WindowsIdentityRead {
   try {
     const value = JSON.parse(execFileSync('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_IDENTITY_SCRIPT,
-    ], { encoding: 'utf8', windowsHide: true, env: windowsProcessEnvironment(pid) })) as Partial<WindowsProcessIdentity>
+    ], { encoding: 'utf8', windowsHide: true, timeout: WINDOWS_CIM_TIMEOUT_MS, maxBuffer: 1024 * 1024, env: windowsProcessEnvironment(pid) })) as Partial<WindowsProcessIdentity>
     if (value.pid !== pid || !value.creationDate || !value.executablePath || !value.ownerSid) return { status: 'unknown' }
     return { status: 'found', identity: value as WindowsProcessIdentity }
   } catch (error) {
@@ -121,11 +126,12 @@ export function readWindowsProcessIdentity(pid: number): WindowsProcessIdentity 
   return result.status === 'found' ? result.identity : undefined
 }
 
-export function snapshotOwnedWindowsTree(root: WindowsProcessIdentity): WindowsProcessIdentity[] {
+export async function snapshotOwnedWindowsTree(root: WindowsProcessIdentity, execute = execFileAsync): Promise<WindowsProcessIdentity[]> {
   try {
-    const value = JSON.parse(execFileSync('powershell.exe', [
+    const { stdout } = await execute('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_TREE_SCRIPT,
-    ], { encoding: 'utf8', windowsHide: true, env: windowsProcessEnvironment(root.pid) })) as { processes?: unknown }
+    ], { encoding: 'utf8', windowsHide: true, timeout: WINDOWS_CIM_TIMEOUT_MS, maxBuffer: 1024 * 1024, env: windowsProcessEnvironment(root.pid) })
+    const value = JSON.parse(stdout) as { processes?: unknown }
     if (!Array.isArray(value.processes)) return []
     const identities = value.processes.filter((candidate): candidate is WindowsProcessIdentity => {
       if (!candidate || typeof candidate !== 'object') return false
@@ -175,63 +181,86 @@ function sameWindowsProcessIdentity(a: WindowsProcessIdentity, b: WindowsProcess
 }
 
 interface WindowsOwnedProcessTreeOptions {
-  snapshot?: (root: WindowsProcessIdentity) => WindowsProcessIdentity[]
+  snapshot?: (root: WindowsProcessIdentity) => WindowsProcessIdentity[] | Promise<WindowsProcessIdentity[]>
   terminate?: (identity: WindowsProcessIdentity) => WindowsTerminationOutcome
-  setIntervalFn?: (callback: () => void, intervalMs: number) => NodeJS.Timeout
-  clearIntervalFn?: (timer: NodeJS.Timeout) => void
+  setTimeoutFn?: (callback: () => void, intervalMs: number) => NodeJS.Timeout
+  clearTimeoutFn?: (timer: NodeJS.Timeout) => void
   intervalMs?: number
 }
 
 export class WindowsOwnedProcessTree {
   private retained = new Map<number, WindowsProcessIdentity>()
   private timer: NodeJS.Timeout | undefined
-  private readonly snapshot: (root: WindowsProcessIdentity) => WindowsProcessIdentity[]
-  private readonly terminate: (identity: WindowsProcessIdentity) => WindowsTerminationOutcome
-  private readonly setIntervalFn: (callback: () => void, intervalMs: number) => NodeJS.Timeout
-  private readonly clearIntervalFn: (timer: NodeJS.Timeout) => void
+  private sampling: Promise<void> | undefined
+  private cleanup: Promise<void> | undefined
+  private polling = false
+  private readonly snapshot: NonNullable<WindowsOwnedProcessTreeOptions['snapshot']>
+  private readonly terminate: NonNullable<WindowsOwnedProcessTreeOptions['terminate']>
+  private readonly setTimeoutFn: NonNullable<WindowsOwnedProcessTreeOptions['setTimeoutFn']>
+  private readonly clearTimeoutFn: NonNullable<WindowsOwnedProcessTreeOptions['clearTimeoutFn']>
   private readonly intervalMs: number
 
-  constructor(
-    private readonly root: WindowsProcessIdentity,
-    options: WindowsOwnedProcessTreeOptions = {},
-  ) {
+  constructor(private readonly root: WindowsProcessIdentity, options: WindowsOwnedProcessTreeOptions = {}) {
+    this.retained.set(root.pid, root)
     this.snapshot = options.snapshot ?? snapshotOwnedWindowsTree
     this.terminate = options.terminate ?? ((identity) => terminateWindowsProcessTree(identity))
-    this.setIntervalFn = options.setIntervalFn ?? ((callback, intervalMs) => setInterval(callback, intervalMs))
-    this.clearIntervalFn = options.clearIntervalFn ?? ((timer) => clearInterval(timer))
+    this.setTimeoutFn = options.setTimeoutFn ?? ((callback, delay) => setTimeout(callback, delay))
+    this.clearTimeoutFn = options.clearTimeoutFn ?? ((timer) => clearTimeout(timer))
     this.intervalMs = options.intervalMs ?? 500
   }
 
   start(): void {
-    if (this.timer) return
-    this.refresh()
-    this.timer = this.setIntervalFn(() => this.refresh(), this.intervalMs)
-    this.timer.unref?.()
+    if (this.polling || this.cleanup) return
+    this.polling = true
+    void this.refresh()
   }
 
-  refresh(): void {
-    let identities: WindowsProcessIdentity[]
-    try { identities = this.snapshot(this.root) } catch { return }
-    const observedRoot = identities.find((identity) => identity.pid === this.root.pid)
-    if (!observedRoot || !sameWindowsProcessIdentity(this.root, observedRoot)) return
-    for (const identity of identities.slice(0, 256)) {
-      if (identity.ownerSid === this.root.ownerSid) this.retained.set(identity.pid, identity)
-    }
+  refresh(): Promise<void> {
+    if (this.sampling) return this.sampling
+    if (this.cleanup) return Promise.resolve()
+    if (this.timer) this.clearTimeoutFn(this.timer)
+    this.timer = undefined
+    this.sampling = Promise.resolve().then(() => this.snapshot(this.root)).then(identities => {
+      const observedRoot = identities.find(identity => identity.pid === this.root.pid)
+      if (!observedRoot || !sameWindowsProcessIdentity(this.root, observedRoot)) return
+      for (const identity of identities.slice(0, 256)) {
+        if (identity.ownerSid === this.root.ownerSid) this.retained.set(identity.pid, identity)
+      }
+    }).catch(() => {
+      // Unavailable/failed sampling cannot revoke previously verified ownership.
+    }).finally(() => {
+      this.sampling = undefined
+      if (this.polling) {
+        this.timer = this.setTimeoutFn(() => {
+          this.timer = undefined
+          if (this.polling) void this.refresh()
+        }, this.intervalMs)
+        this.timer.unref?.()
+      }
+    })
+    return this.sampling
   }
 
   stopPolling(): void {
-    if (!this.timer) return
-    this.clearIntervalFn(this.timer)
+    this.polling = false
+    if (this.timer) this.clearTimeoutFn(this.timer)
     this.timer = undefined
   }
 
-  terminateRetained(): void {
+  terminateRetained(): Promise<void> {
     this.stopPolling()
-    const identities = [...this.retained.values()].sort((a, b) => b.pid - a.pid)
-    for (const identity of identities) {
-      const outcome = this.terminate(identity)
-      if (outcome === 'gone' || outcome === 'identity-changed') this.retained.delete(identity.pid)
-    }
+    if (this.cleanup) return this.cleanup
+    // A sample already in flight may contain verified descendants. Drain it
+    // before cleanup, and never schedule another sample after stopping.
+    this.cleanup = Promise.resolve(this.sampling).then(() => {
+      const identities = [...this.retained.values()].sort((a, b) => b.pid - a.pid)
+      for (const identity of identities) {
+        let outcome: WindowsTerminationOutcome = 'unconfirmed'
+        try { outcome = this.terminate(identity) } catch { /* retain unconfirmed identity */ }
+        if (outcome === 'gone' || outcome === 'identity-changed') this.retained.delete(identity.pid)
+      }
+    }).finally(() => { this.cleanup = undefined })
+    return this.cleanup
   }
 }
 
@@ -248,7 +277,7 @@ export function terminateWindowsProcessTree(
   if (!sameWindowsProcessIdentity(expected, before.identity)) return 'identity-changed'
   try {
     taskkill('taskkill.exe', ['/pid', String(expected.pid), '/t', '/f'], {
-      stdio: 'ignore', windowsHide: true,
+      stdio: 'ignore', windowsHide: true, timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
     })
   } catch {
     return 'unconfirmed'
@@ -780,6 +809,7 @@ export class AcpxClient {
     let startedFallback = false
     let settled = false
     let cancelled = false
+    let cancellationCleanup: Promise<void> | undefined
     const ownedProcesses = new Set<ChildProcessWithoutNullStreams>()
     const forcedKillTimers = new Map<ChildProcessWithoutNullStreams, NodeJS.Timeout>()
     let resolveExited: (() => void) | undefined
@@ -795,16 +825,24 @@ export class AcpxClient {
       let processErrored = false
       ownedProcesses.add(proc)
       this.activeProcesses.set(proc, closed)
+      let closeCleanup: Promise<void> | undefined
       const forgetProcess = () => {
-        if (closeObserved) return
+        if (closeObserved) return closeCleanup
         closeObserved = true
         const forcedKillTimer = forcedKillTimers.get(proc)
         if (forcedKillTimer) clearTimeout(forcedKillTimer)
         forcedKillTimers.delete(proc)
-        ownedProcesses.delete(proc)
-        this.activeProcesses.delete(proc)
-        this.windowsProcessTrees.get(proc)?.terminateRetained()
-        resolveClosed()
+        const release = () => {
+          ownedProcesses.delete(proc)
+          this.activeProcesses.delete(proc)
+          resolveClosed()
+        }
+        const tree = this.windowsProcessTrees.get(proc)
+        if (tree) {
+          closeCleanup = tree.terminateRetained().then(release)
+          return closeCleanup
+        }
+        release()
       }
       if (input !== undefined) {
         // Wait for a real spawn so ENOENT can select npx before any stdin write.
@@ -826,18 +864,16 @@ export class AcpxClient {
       proc.stdout.on('data', (chunk: Buffer) => handlers.onStdout?.(chunk))
       proc.stderr.on('data', (chunk: Buffer) => handlers.onStderr?.(chunk))
       proc.on('close', (code) => {
-        forgetProcess()
-        if (processErrored) {
+        const complete = () => {
+          if (!processErrored && !settled) {
+            settled = true
+            handlers.onClose(code)
+          }
           resolveExitedIfComplete()
-          return
         }
-        if (settled) {
-          resolveExitedIfComplete()
-          return
-        }
-        settled = true
-        handlers.onClose(code)
-        resolveExitedIfComplete()
+        const cleanup = forgetProcess()
+        if (cleanup) void cleanup.then(complete)
+        else complete()
       })
       proc.on('error', (err) => {
         processErrored = true
@@ -879,16 +915,20 @@ export class AcpxClient {
       cancel: async () => {
         if (!cancelled) {
           cancelled = true
+          const pendingCleanups: Promise<void>[] = []
           for (const proc of [...ownedProcesses]) {
-            this.terminateProcessTree(proc, 'SIGTERM')
+            const cleanup = this.terminateProcessTree(proc, 'SIGTERM')
+            if (cleanup) pendingCleanups.push(cleanup)
             const forcedKillTimer = setTimeout(() => {
               if (ownedProcesses.has(proc)) this.terminateProcessTree(proc, 'SIGKILL')
             }, 1_000)
             forcedKillTimer.unref()
             forcedKillTimers.set(proc, forcedKillTimer)
           }
+          if (pendingCleanups.length) cancellationCleanup = Promise.all(pendingCleanups).then(() => {})
         }
 
+        if (cancellationCleanup) await cancellationCleanup
         resolveExitedIfComplete()
         await Promise.race([
           exited,
@@ -909,14 +949,20 @@ export class AcpxClient {
   }
 
   private async stopActiveProcesses(): Promise<void> {
+    const pendingTerminations: Promise<void>[] = []
     for (const proc of this.activeProcesses.keys()) {
-      this.terminateProcessTree(proc, 'SIGTERM')
+      const cleanup = this.terminateProcessTree(proc, 'SIGTERM')
+      if (cleanup) pendingTerminations.push(cleanup)
     }
+    if (pendingTerminations.length) await Promise.all(pendingTerminations)
     if (await this.waitForActiveProcessesToClose(1_000)) return
 
+    const pendingKills: Promise<void>[] = []
     for (const proc of this.activeProcesses.keys()) {
-      this.terminateProcessTree(proc, 'SIGKILL')
+      const cleanup = this.terminateProcessTree(proc, 'SIGKILL')
+      if (cleanup) pendingKills.push(cleanup)
     }
+    if (pendingKills.length) await Promise.all(pendingKills)
     if (!(await this.waitForActiveProcessesToClose(1_000))) {
       throw new Error('acpx child process did not close after SIGKILL')
     }
@@ -946,7 +992,7 @@ export class AcpxClient {
   private terminateProcessTree(
     proc: ChildProcessWithoutNullStreams,
     signal: NodeJS.Signals = 'SIGTERM',
-  ): void {
+  ): void | Promise<void> {
     const pid = proc.pid
     if (!pid) return
 
@@ -962,8 +1008,7 @@ export class AcpxClient {
     if (process.platform === 'win32') {
       const tree = this.windowsProcessTrees.get(proc)
       if (tree) {
-        tree.terminateRetained()
-        return
+        return tree.terminateRetained()
       }
       if (this.exitedProcesses.has(proc)) return
       const identity = this.windowsProcessIdentities.get(proc)
