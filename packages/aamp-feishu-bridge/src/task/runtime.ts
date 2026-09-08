@@ -703,7 +703,8 @@ function parseResultOutput(value: unknown, index: number): FeishuTaskResultOutpu
     return validationError ?? { kind, url }
   }
   if (kind === 'file_delivery') {
-    const filePath = getString(output.path)
+    // JSON already decoded the path; Windows separators such as \n and \r are not display-text escapes.
+    const filePath = process.platform === 'win32' ? getRawString(output.path) : getString(output.path)
     if (filePath && !path.isAbsolute(filePath)) {
       return `outputs[${index}].path 必须是绝对路径。`
     }
