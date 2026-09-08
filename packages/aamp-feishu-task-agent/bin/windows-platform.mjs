@@ -39,6 +39,24 @@ function Read-VerifiedSnapshotOwner($snapshot) {
   if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
   return $owner
 }
+function Read-VerifiedSnapshot($snapshot) {
+  $owner = Read-VerifiedSnapshotOwner $snapshot
+  if ($null -eq $owner) { return $null }
+  if ([string]::IsNullOrWhiteSpace($snapshot.ExecutablePath)) {
+    $current = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$snapshot.ProcessId)
+    if ($null -eq $current) { return $null }
+    if ($null -eq $current.CreationDate -or $null -eq $snapshot.CreationDate) {
+      throw 'unable to verify process creation identity'
+    }
+    if ([int]$current.ProcessId -ne [int]$snapshot.ProcessId -or
+      $current.CreationDate.ToUniversalTime().Ticks -ne $snapshot.CreationDate.ToUniversalTime().Ticks) { return $null }
+    if ([string]::IsNullOrWhiteSpace($current.ExecutablePath)) {
+      throw 'unable to read process executable path for a verified live process'
+    }
+    $snapshot = $current
+  }
+  return @{ process = $snapshot; owner = $owner }
+}
 `
 
 const POWERSHELL_SCRIPTS = Object.freeze({
@@ -90,11 +108,13 @@ if ($null -eq $process) {
   @{ found = $false } | ConvertTo-Json -Compress
   exit 0
 }
-$owner = Read-VerifiedSnapshotOwner $process
-if ($null -eq $owner) {
+$verified = Read-VerifiedSnapshot $process
+if ($null -eq $verified) {
   @{ found = $false } | ConvertTo-Json -Compress
   exit 0
 }
+$process = $verified.process
+$owner = $verified.owner
 @{
   found = $true
   pid = [int]$process.ProcessId
@@ -120,8 +140,10 @@ do {
 $identities = @()
 foreach ($process in $all) {
   if (-not $selected.Contains([int]$process.ProcessId)) { continue }
-  $owner = Read-VerifiedSnapshotOwner $process
-  if ($null -eq $owner) { continue }
+  $verified = Read-VerifiedSnapshot $process
+  if ($null -eq $verified) { continue }
+  $process = $verified.process
+  $owner = $verified.owner
   $identities += @{
     pid = [int]$process.ProcessId
     parentPid = [int]$process.ParentProcessId

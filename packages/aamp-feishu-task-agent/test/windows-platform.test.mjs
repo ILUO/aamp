@@ -534,3 +534,35 @@ test('invalid CIM tree diagnostics include numeric IDs and field names without c
     return true
   })
 })
+
+for (const operation of ['read-process-identity', 'list-process-tree']) {
+  test(`native ${operation} refreshes incomplete metadata only for the same process`, {skip: process.platform !== 'win32' && 'requires native PowerShell race fixture'}, async () => {
+    const {__test} = await import('../bin/windows-platform.mjs')
+    const fixture = String.raw`
+$script:reads = 0
+$script:created = [datetime]::Parse('2026-09-08T01:00:00Z')
+function Get-CimInstance {
+  $script:reads++
+  $created = $script:created
+  $executable = ''
+  if ($script:reads -gt 1) {
+    if ($env:AAMP_CIM_METADATA -eq 'gone') { return $null }
+    if ($env:AAMP_CIM_METADATA -eq 'reused') { $created = $created.AddSeconds(1) }
+    if ($env:AAMP_CIM_METADATA -eq 'failure') { throw 'metadata read denied' }
+    if ($env:AAMP_CIM_METADATA -ne 'missing') { $executable = 'C:\fixture\node.exe' }
+  }
+  return [pscustomobject]@{ProcessId=10384;ParentProcessId=1;CreationDate=$created;CommandLine='node fixture';ExecutablePath=$executable}
+}
+function Invoke-CimMethod { return [pscustomobject]@{ReturnValue=0;Sid='S-1-5-21-1000'} }
+`
+    const run = scenario => runWindowsPowerShell(fixture + __test.powershellScripts[operation], {pid:10384}, {environment:{...process.env,AAMP_CIM_METADATA:scenario}})
+    const result = await run('restored')
+    const identity = operation === 'read-process-identity' ? result : result.processes[0]
+    assert.equal(identity.executablePath, String.raw`C:\fixture\node.exe`)
+    for (const scenario of ['gone','reused']) {
+      assert.deepEqual(await run(scenario), operation === 'read-process-identity' ? {found:false} : {processes:[]})
+    }
+    await assert.rejects(run('failure'), /metadata read denied/)
+    await assert.rejects(run('missing'), /unable to read process executable path/)
+  })
+}
