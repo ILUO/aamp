@@ -300,7 +300,7 @@ defaults:
 ```
 
 - [ ] Windows 11 普通用户，无 Bash/WSL：全新安装 → 前台授权/配对 → Codex 探针 → 后台启动。
-- [ ] 专用测试 Bot 跑普通任务完整 ACK/结果/完成链路、need_help + Owner 评论继续、既有提醒/重复/子任务行为、附件输入和产物上传。保留各自 task ID，不发给真实业务用户。
+- [x] 专用测试 Bot 跑普通任务完整 ACK/结果/完成链路、need_help + Owner 评论继续、既有提醒/重复/子任务行为、附件输入和产物上传。各自 task ID 与真实回读见验收记录；重复任务第二轮提前 due 加速。
 - [ ] 用户会话实测：关闭终端、锁屏、注销再登录、stop/start/restart、崩溃重启耗尽。注销不承诺继续工作；不把锁屏与注销混为同一场景。
 - [ ] 异常：过期授权、网络断开、上游 CLI 缺失、策略拒绝、中文/特殊字符路径、PID 重用、多绑定及旁观 Agent；没有假 ready、密钥输出或误杀。
 - [ ] tgz 更新和卸载闭环；保留绑定、清理本产品任务，远端应用和其他产品数据不受影响。
@@ -341,3 +341,9 @@ defaults:
 已用独立Codex sandbox探针定位SSH Session0的runner失败，同用户Interactive/Limited Session1成功；同profile的DPAPI凭证也只有Session1可用。沿用现有后台restart模式，实际CSV读取/求和/写入成功。随后真实上传发现Windows路径被展示文本转义规则损坏，已仅修复win32 file_delivery.path，原生4项红绿验证及全套112/112通过。完整附件交付仍以验收记录的最终服务端回读为准，不提前勾选Task10。
 
 附件最终已通过：交互会话后台模式下实际生成并上传result.csv，服务端重新下载确认WIN10-ROUNDTRIP-9821/49，任务done，交付日志succeeded；Windows路径修复提交51950e5。SSH Session0限制和启动口径已写入包README。该结果解除附件专项阻塞，Task10整体仍受Windows11及其他未执行矩阵约束。
+
+## 2026-09-08 非 Win11 补测进展
+
+已推送开发分支，Draft PR https://github.com/ILUO/aamp/pull/1，未合并或 npm 发布。`4f00ce2` 三平台 × Node 22/24 六组 CI 全绿；后续 Windows CIM 元数据修复正在复跑最新提交，不能把旧绿代替最新结果。Win10 Node 24 三包原生测试、真实重复任务两实例、中文/CRLF 附件下载核验、50 MiB 出站边界、特殊目录原生 Codex sandbox、controller 崩溃清理和同 worker 自动恢复均已取得证据。非法更新保持旧服务与包，合法更新保留 bindings 通过；更新后 Node 24 业务、卸载收尾仍在执行。锁屏与注销/重新登录待云控制台可恢复登录条件，Win11 普通用户仍为独立门禁。具体失败、修复、任务 ID、计数与 artifact 边界统一见验收记录的顶部汇总和最新补测小节，不整体勾选 Task 10。
+
+最新增量：`e989ec6` 的 CI run 34227906679 六组全绿；Windows 锁预算排除 ACL 初始化耗时，原生绑定测试 20/20。真实 Node 24 更新后后台仍有持续 CIM 缺路径，任务 `6015d748-78f3-4613-a868-339aa4c5171a` 尚未取得结果；卸载仍待收尾。

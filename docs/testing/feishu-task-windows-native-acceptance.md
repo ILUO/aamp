@@ -10,28 +10,26 @@
 - 固定基线：`7c4b7ff50b2fc766f9076dcbc7d87ce910ca8b76`，来自 `fix/feishu-auth-scope-negotiation`。
 - 开发主机：macOS 26.5.2 arm64、Node v22.22.2。实测主机：Windows 10 企业版 22H2 / 10.0.19045 x64、Administrator、PowerShell 5.1.19041.6456、Node 22.22.2、Codex 0.153.4；存在活动 console 登录，无 RDP。Windows 11 尚无实测记录。
 - Windows 目标：Windows 11 x64 普通用户、PowerShell 5.1、Node 22/24。
-- 已注册专用新 Bot、完成用户 OAuth 与真实任务补测；未向远程推送或 npm 发布。
+- 已注册专用新 Bot、完成用户 OAuth 与真实任务补测；已推送开发分支并创建 Draft PR https://github.com/ILUO/aamp/pull/1，未合并或 npm 发布。
 
 ## 验证记录
 
-下表为截至 2026-09-08 附件最终复验后的最新汇总。Windows 通过项均限定为上述 Windows 10 Administrator 环境，不代表 Windows 11、普通用户或 Node 24 已通过。下方按时间保留历史失败及当时的待验收状态，以本节和最新复验结论为准。
+下表汇总 2026-09-08 最新补测。真实桌面证据来自 Windows 10 Enterprise 22H2 Administrator；CI 的 Windows runner 是 Windows Server 2025，不是 Windows 11。Node 24 已完成三包原生测试，但更新后真实后台业务仍在复验。历史失败保留在下方，不将已被后续证据覆盖的旧状态作为当前结论。
 
 | 验证层 | 当前状态 | 说明 |
 |---|---|---|
-| macOS 三包回归与类型检查 | 部分通过 | 最新已记录 Task Agent 459 项：451 通过、6 跳过、2 AIME 失败；ACP 197 项：194 通过、3 跳过；Feishu 112 项：108 通过、4 跳过。两 Bridge 类型检查已有通过记录，不将三包整体报告为全绿 |
-| Windows 原生包测试 | Windows 10 通过 | Task Agent 263 项：250 通过、13 跳过；ACP 197 项：193 通过、4 跳过；最新 Feishu 112/112。各包分轮执行，详见下方记录 |
-| 实际 npm pack / 本地安装 | macOS / Windows 10 通过 | 三包实际 tgz 安装到全新临时 prefix，安装后帮助入口及运行文件检查通过；后续修复包本地与 Windows 哈希回读一致 |
-| Windows / macOS / Linux × Node 22/24 CI | 未执行 | 已新增工作流；尚未推送或触发 |
-| Windows npm shim / argv / stdin / exit | Windows 10 通过 | 真实 npm shim，中文、空格、shell 特殊字符、CRLF stdin、退出码 7 |
-| Windows ACL / CIM / 进程树隔离 | Windows 10 通过 | 原生 ACL 回读、CIM 身份、父子孙清理及旁观进程存活；异步周期采样性能已补测 |
-| Windows Codex ACP session | 部分通过 | 真实计算及交互会话后台读写文件通过；SSH Session0 runner pipe-in 超时仍可复现。标准 npm 安装与特殊字符目录完整矩阵未验收 |
-| Feishu 注册、授权、配对及完整 Task 结果 | Windows 10 通过（修复后） | 新 Bot 注册、用户 OAuth、自动绑定成功；初次任务被 EPERM 中断，修复后 Owner 评论重试得到 527 并回读 done/4。不是原包干净安装全程无故障 |
-| need_help / Owner 继续 | Windows 10 通过 | 跨重启补充参数后得到 493，服务端 done/4；Task ID 见“原Bot扩展场景恢复” |
-| 单次提醒 / 重复任务 | 部分通过 | 单次 task_reminder_fire 实际触发并回写 133、done/4；重复任务未验证 |
-| 父子任务 | Windows 10 通过 | 结果 48；父子均 done/4，日志 completed parent=1 children=1 |
-| 附件输入及 Windows 本地产物上传 | 核心闭环 Windows 10 通过；边界待验 | 交互会话后台实际读 CSV、求和生成 result.csv、上传并从服务端下载核验 WIN10-ROUNDTRIP-9821 / 49，日志 succeeded、任务 done/4。中文路径、CRLF 附件及大小边界仍待验，不能用 shim 测试替代；详见“附件最终闭环通过（交互会话后台模式）” |
-| 关闭终端、登录、stop/start/restart、故障重启 | 部分通过 | 受控 Task Scheduler 生命周期及真实业务 restart/stop 通过，停止后无本轮 Node 残留；关闭终端、注销、登录触发、故障重启与普通用户完整矩阵未验证 |
-| 运行包更新、卸载与旁观进程存活 | 未执行完整验收 | 已做测试修复包替换及受控旁观进程存活检查；运行中更新、卸载完整流程未验证 |
+| 三平台 × Node 22/24 CI | 最新产品代码六组通过 | `e989ec6` 的 run 34227906679 全部通过，含三包测试、类型检查、pack 与安装入口；此前 Windows 配置锁超时已有原生红绿复现并修复 |
+| Win10 Node 22/24 原生包测试 | 通过 | Node 24.20.0：Task Agent 250 通过/13 跳过，ACP 193/4，Feishu 112/0；新增进程元数据完整文件 31/31、文件大小边界 3/3 等另轮验证，见下方 |
+| 实际 npm pack / 全新 prefix 安装 | 通过 | 三包实际 tgz；新 Bot 注册、用户 OAuth、自动绑定与真实任务恢复均有证据；不把修复后恢复称为初版安装全程无故障 |
+| npm shim / argv / stdin / exit | 通过 | 原生 npm shim，中文、空格、特殊字符、CRLF 与退出码；包含标准安装 Codex/acpx |
+| ACL / CIM / 进程树隔离 | 通过；新增启动竞态复验中 | 原生身份与 ACL 回读、父子孙清理、旁观者存活；CIM 首次空路径现改为同 PID/创建时间重新查询，仍不允许操作未知身份 |
+| Codex ACP 与特殊目录 | 核心闭环通过 | 交互 Session 1 实际计算、读写及上传通过；特殊目录标准安装及原生 Codex sandbox 命令通过。SSH Session 0 runner pipe-in 超时边界保留；不据此声称 headless 可用 |
+| 注册 / 用户授权 / 普通任务 / need_help | 通过 | 新 Bot 普通计算 527、Owner 补充 493，服务端 done/4 与日志交叉核验 |
+| 单次提醒 / 重复任务 / 父子任务 | 通过 | 单次 133，父子 48；真实每日重复任务连续两实例均得到 91，第二实例提前 due 加速验证，不是等待完整 24 小时 |
+| 附件输入及 Windows 产物上传 | 核心与中文/CRLF 边界通过 | 中文输入、中文空格输出路径，上传后服务端下载校验 marker/49/CRLF。50 MiB 前一字节、等于上限、超一字节以真实 NTFS 文件＋受控上传接口验证，不冒充三次真实大文件云上传 |
+| stop/start/restart / 崩溃恢复 | 已验部分通过 | 实际 controller 强退后同 worker 自动恢复，新 controller ready；测试覆盖三次重试耗尽及等待期间 stop。关闭终端后交互后台业务继续；锁屏、注销/重新登录仍待可恢复交互登录条件 |
+| 运行中 update / 卸载 | 更新校验通过；闭环收尾中 | 非法包在 stop 前拒绝，运行 controller 与包不变；合法包安装、绑定字节保留通过。更新后 Node 24 业务与最终卸载尚未完成 |
+| Windows 11 普通用户 | 未验证 | 独立验收门禁，不能用 Win10 管理员或 Windows Server CI 替代 |
 
 ## 原生验收录入模板
 
@@ -266,3 +264,67 @@ Windows 11 普通用户、Node 24、真正 Codex ACP session、飞书注册/OAut
 - 本地代码提交 `51950e5`，未推送/发布。两项一次性会话诊断任务已移除；完整Windows11/注销恢复等矩阵仍未完成。
 
 - 本轮正常stop返回0；随后仅剩既存Node PID8548/7832/7672，产品计划任务Disabled，两项一次性诊断任务均不存在。授权、绑定与测试产物保留。
+
+## 2026-09-08 非 Win11 补测与远端 CI
+
+用户授权将除 Win11 外的验收继续推进并推送开发分支。接受新增协作者邀请后，HTTPS 推送成功，Draft PR 为 https://github.com/ILUO/aamp/pull/1；没有合并、发布 npm 或修改上游协议/scopes。
+
+### 原生环境及 CI
+
+Win10 新增官方 Node v24.20.0 x64，zip SHA256 `6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba`。Node 24 原生三包日志 `node24-task-agent.log`、`node24-acp.log`、`node24-feishu.log` 分别为 250 通过/13 跳过、193/4、112/0，均 fail=0。后续新增测试单独补测，不把早先计数标成最新全量。
+
+CI https://github.com/ILUO/aamp/actions/runs/34223830533（`4f00ce2`）六组全部通过，每组 fail=0：
+
+| 平台（各含 Node 22、24） | Task Agent 通过/跳过 | ACP 通过/跳过 | Feishu 通过/跳过 |
+|---|---|---|---|
+| Windows Server 2025 / PowerShell 5.1 | 253/13 | 194/4 | 115/0 |
+| macOS | 455/7 | 194/4 | 108/7 |
+| Ubuntu | 453/9 | 194/4 | 108/7 |
+
+CI 发现并修正的测试环境问题：打包 Bash fixture 固定 LF；POSIX 假 AIME 消费 FD4 输入避免提前退出；Windows 使用 PowerShell 5.1，避免 PS7 父进程模块路径污染；Windows ACL 比较只忽略系统写回的 `DiscretionaryAclAutoInherited` bookkeeping 位，保留 owner/group/ACE/保护位完整比较与负例。没有改变 POSIX 业务语义。
+
+最新 `902b856` 增加重试耗尽测试后，run 34224980298 的 Windows Node 22 有一项配置锁超时；新增测试本身通过。`0917e60` 修复实机发现的 CIM 元数据竞态，完整矩阵复跑中。
+
+### 真实重复任务两轮
+
+首实例 `7344ff4a-7b34-4a1b-9538-5ef0882027bb` 使用 `FREQ=DAILY;INTERVAL=1` 和到期提醒，真实提醒触发，ACK `7683122693738073017`，结果评论 `7683123385169103840` 为 91，服务端 done/4。
+
+服务端生成次实例 `a0c25ff3-4b7b-497c-9fe4-6258a3ea9248`。将该实例 due 提前以加速验证，再由真实提醒触发，ACK `7683125069731630020`，结果 `7683125763029093623` 为 91，服务端 done/4。第三实例 `366808a5-2930-47f0-a26e-1c59afc706d0` 已执行清除 repeat_rule 并完成，清理命令退出 0，日志 `remaining-acceptance/recurring-cleanup.log`。没有声称跨完整 24 小时稳定性。
+
+### 中文、空格、CRLF 与附件大小
+
+任务 `02a9ae6a-da3e-4301-a48b-21f38243cdb7`：输入 `输入 数据 CRLF.csv`（98 字节，附件 `818bf073-6124-445f-9826-323896caff3b`），Owner 评论 `7683120648364838187`，ACK `7683120708850928590`。实际 Codex 生成 `验收 产物/结果 report.csv`，交付附件 `4152fd94-8159-44b4-9b23-1d1e82c3ae0e` 为 43 字节。服务端下载的精确文本为 `marker,amount\r\nWIN10-BOUNDARY-20260908,49\r\n`，任务 done/4。运行 `1788865689373-13240` 于 11:21:15.963 UTC 完成。
+
+出站附件限制以真实 NTFS 文件测试 52,428,799、52,428,800、52,428,801 字节：前两者调用上传，超限者在上传前拒绝。Node 24 3/3，`delivery-size-boundary.log`。上传接口受控，不等同真实云 API 的 50 MiB 压测。
+
+标准 npm 安装目录 `验收 & paths (24)` 中，原生 JS 入口解析后 Codex/acpx 版本与 Task Agent help 均退出 0；交互 Session 1 中标准 Codex sandbox 输出 `AAMP_SPECIAL_DIRECTORY_RUNNER_OK`，退出 0，未弱化 sandbox。直接从 PowerShell 调用该含 `&` prefix 的 npm `.cmd` 会被 cmd 解析失败；产品的 native JS 入口路径已通过，不能扩大为任意直接 batch 调用均通过。
+
+### controller 故障清理与自动恢复
+
+实测 Task Scheduler 的 RestartOnFailure 未在此环境为 controller 非零退出重新拉起。首次还发现记录过的 Feishu 子进程遗留，已增加 worker 退出前 journal 身份验证清理，再由 worker 内部执行最多三次、间隔 60 秒的 controller 恢复；等待可被 stop 或 generation 变化中止。
+
+最终真实故障注入：2026-09-08T12:04:28.764Z 强退本轮 controller 16196；worker 13160 保持，新 controller 4896 于 12:06:18.4424193Z ready，同 generation `8d94e3ff-06db-47f1-9bd5-18cd14f803fa`，约 109.678 秒。原 controller 消失，旁观 Node 8548/7832/7672 均存活，无手动 restart。证据 `remaining-acceptance/supervised-recovery-result.json`。原生测试另覆盖 journal 留存身份的存活进程清理、等待中 stop 与重试三次后返回失败。
+
+### 运行中更新及待收尾项
+
+仅在 127.0.0.1 临时 registry 提供本地打包测试版本，结束即关闭，未向外发布。非法包缺少 Windows helper，product update 退出 1，原包字节不变、controller 4896 仍活且身份不变。合法包 product update 退出 0，安装版本 `0.1.1-dev.6.acceptance.1`，bindings 文件字节完全一致。证据 `remaining-acceptance/update-verification.log`。
+
+更新后切换 Node 24 真实启动时，部分短生命周期 powershell/conhost 的初始 CIM 快照有空 ExecutablePath，故安全拒绝并耗尽恢复。`0917e60` 仅在确认同 PID、创建时间后刷新缺失元数据；退出/PID 重用返回不存在，读取拒绝或仍缺路径仍失败关闭。新增测试修复前 0/2、修复后完整 Windows 文件 31/31。真实启动与最终卸载正在复验，不提前标通过。
+
+已测 artifact：Task Agent supervisor 包 SHA256 `f990a4bbd53625663815810c49a3a6b8b4d44c45fae386974199efcd2bb26dee`；ACP ACL 包 `fff6cf06b70db6507cf4b9678da88c0887be8e9ef4e78620f0b5d86ff59461d6`；Feishu path 包 `b85c5a932e3ee688bd0dd776e729886283a874fb2a42089ed63f34c6e6bddb80`。CIM 修复包为后续新 artifact，不能沿用 supervisor 哈希。
+
+锁屏与注销/重新登录仍需要用户确认能通过云控制台恢复交互登录；SSH 不能替代该登录条件，未冒险注销。Win11 普通用户独立保留待验收。
+
+### 最新产品提交 CI 与锁计时复验
+
+`e989ec6` 的 https://github.com/ILUO/aamp/actions/runs/34227906679 六组全部成功，fail=0。每个 Node 22/24 Windows runner 的 Task Agent 257 通过/13 跳过，ACP 194/4，Feishu 115/0；macOS 分别 456/10、194/4、108/7；Ubuntu 分别 454/12、194/4、108/7。
+
+Windows 目录 ACL 初始化原来占用了锁等待预算；实机约 3 秒初始化即使无竞争也误报占用。现仅 Windows 在 ACL 成功后开始锁等待计时。原生回归修复前失败，修复后完整绑定文件 20/20；macOS 19 通过/1 Windows 跳过。另对 CIM 缺字段最多复查五次、间隔 100ms，每次校验 PID/创建时间；原生进程测试 31/31。不过真实 Node 24 后台仍捕获持续缺路径，进一步诊断中，不能据 CI 全绿宣布实机通过。
+
+最终待复验 Task Agent tgz SHA256 `a0eab2efab82714877666d7f3e414ef9c19e66ccc0c14bb9a291828c7e97c4a4`。Node 24 测试 PATH 补回了原 Node 22 prefix 中既有 Codex 的入口（Node 24 优先），修正的是隔离测试环境，不是新增产品兼容逻辑。专用后续任务 `6015d748-78f3-4613-a868-339aa4c5171a` 已创建分配，结果尚未验证。
+
+### 原生句柄补查与最终复验进行中
+
+仅 CIM 有界复查后仍缺路径时，`32af180` 打开原生进程句柄，校验其创建时间（原生 FILETIME 100ns，CIM 微秒，截去不足一微秒部分），读取句柄对应的 MainModule 路径，再复核 CIM 身份。已退出、PID 重用返回不存在；权限拒绝和存活但路径仍缺失继续报错。原生完整测试 31/31，临时回退旧模块时新补查用例 0/2，恢复修复模块。没有按进程名字放行或删除身份检查。
+
+`e989ec6` 在纠正测试 PATH 后曾由 worker 重试恢复到 ready（PID 8500），但还没有任务结果，不能算 Node 24 业务完成。最终包 SHA256 `ad065a2240b7d423944df5720631ec009ac9532f6d6b19f768fe1bb0da94338b` 已安装，`32af180` CI run 34229593027 和真实闭环继续复验。SDK 已确认重复任务第三实例 `366808a5-2930-47f0-a26e-1c59afc706d0` 为 done、repeat_rule 为空，清理完成。

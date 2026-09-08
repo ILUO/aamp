@@ -50,6 +50,10 @@ permissions. Closing the terminal is supported by this design; running after
 logout is outside its scope. A scheduler state alone does not count as ready:
 the Controller also verifies the selected binding generation and live process
 identities. `stop` disables login activation until the next explicit `start`.
+On unexpected Controller exit, the Windows worker cleans its recorded process
+identities and retries at most three times, with 60 seconds between attempts.
+A stop request or changed generation interrupts the retry wait. After retries
+are exhausted, inspect `logs` and explicitly restart after resolving the cause.
 Enterprise policies can prevent PowerShell or task registration; use explicit
 foreground mode after addressing the reported prerequisites.
 
