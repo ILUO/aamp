@@ -46,11 +46,30 @@ test('native worker cleans journaled descendants before returning a controller f
  setInterval(()=>{},1000);
  `);
  const pending=worker.runWindowsServiceWorker({version:1,generation:'crash-test',controllerPath,
- env:{AAMP_TASK_RUNTIME_HOME:root},paths:{serviceHome:root,selectionFile,stopFile,logFile:path.join(root,'service.log'),ownerFile:path.join(root,'owner.json')}});
+ env:{AAMP_TASK_RUNTIME_HOME:root},paths:{serviceHome:root,selectionFile,stopFile,logFile:path.join(root,'service.log'),ownerFile:path.join(root,'owner.json')}},{maxRestarts:0});
  const deadline=Date.now()+20000;
  while(!await fs.access(childFile).then(()=>true,()=>false)){if(Date.now()>deadline)throw Error('fixture startup timed out');await new Promise(r=>setTimeout(r,100));}
  const identity=JSON.parse(await fs.readFile(childFile,'utf8'));
  process.kill(identity.controllerPid,'SIGKILL');
  assert.notEqual(await pending,0);
  assert.equal(await platform.readWindowsProcessIdentity(identity.pid),undefined,'orphan descendant must be gone before scheduler observes the worker failure');
+});
+
+test('worker retries a failed controller and keeps the same selection',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-worker-retry-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const selectionFile=path.join(root,'selection.json'),stopFile=path.join(root,'stop.json');
+ await fs.writeFile(selectionFile,JSON.stringify({generation:'retry'}));
+ const config={version:1,generation:'retry',paths:{selectionFile,stopFile,logFile:path.join(root,'log')}};
+ let attempts=0;
+ const result=await worker.runWindowsServiceWorker(config,{runOnce:async received=>{assert.equal(received,config);return ++attempts===1?23:0;},wait:async()=>{},restartDelayMs:0});
+ assert.equal(result,0);assert.equal(attempts,2);
+});
+
+test('worker does not restart after stop is requested during recovery delay',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-worker-retry-stop-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const selectionFile=path.join(root,'selection.json'),stopFile=path.join(root,'stop.json');
+ await fs.writeFile(selectionFile,JSON.stringify({generation:'retry'}));
+ let attempts=0;
+ const result=await worker.runWindowsServiceWorker({version:1,generation:'retry',paths:{selectionFile,stopFile,logFile:path.join(root,'log')}},{runOnce:async()=>{attempts++;return 23;},wait:async()=>fs.writeFile(stopFile,JSON.stringify({generation:'retry'})),restartDelayMs:1});
+ assert.equal(result,0);assert.equal(attempts,1);
 });

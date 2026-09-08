@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {recoverWindowsProcessJournals} from './windows-process-journal.mjs';
 
-export async function runWindowsServiceWorker(config) {
+async function runWindowsServiceWorkerOnce(config) {
   const selected=JSON.parse(await fs.readFile(config.paths.selectionFile,'utf8'));
   if(config.version!==1 || !config.generation || selected.generation!==config.generation) throw new Error('Windows service generation changed');
   const stopRequested=async()=>{try{return JSON.parse(await fs.readFile(config.paths.stopFile,'utf8')).generation===config.generation;}catch(e){if(e.code==='ENOENT')return false;throw e;}};
@@ -45,6 +45,32 @@ export async function runWindowsServiceWorker(config) {
     if(controllerIdentity) await stopOwnedWindowsTree(controllerIdentity).catch(()=>{});
     throw error;
   } finally {await log.close();}
+}
+// Task Scheduler can report a nonzero action result without restarting an
+// on-demand interactive task. Keep controller recovery inside the owned worker.
+export async function runWindowsServiceWorker(config, {
+  runOnce=runWindowsServiceWorkerOnce,
+  wait=ms=>new Promise(resolve=>setTimeout(resolve,ms)),
+  maxRestarts=3,
+  restartDelayMs=60000,
+}={}) {
+  const cancelled=async()=>{
+    const selected=JSON.parse(await fs.readFile(config.paths.selectionFile,'utf8'));
+    if(selected.generation!==config.generation) throw new Error('Windows service generation changed');
+    const stop=await fs.readFile(config.paths.stopFile,'utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return undefined;throw error;});
+    return stop?.generation===config.generation;
+  };
+  for(let attempt=0;;attempt++) {
+    if(await cancelled()) return 0;
+    const code=await runOnce(config);
+    if(code===0 || attempt>=maxRestarts) return code;
+    await fs.appendFile(config.paths.logFile,`[windows-service] controller exited ${code}; retry ${attempt+1}/${maxRestarts} after ${restartDelayMs}ms\n`);
+    for(let elapsed=0;elapsed<restartDelayMs;) {
+      if(await cancelled()) return 0;
+      const duration=Math.min(200,restartDelayMs-elapsed);
+      await wait(duration);elapsed+=duration;
+    }
+  }
 }
 if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   try {
