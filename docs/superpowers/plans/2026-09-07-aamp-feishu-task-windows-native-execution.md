@@ -335,3 +335,9 @@ defaults:
 新建独立Bot并完成用户OAuth，空状态安装自动保存绑定及启动成功；新任务因Windows IM状态原子替换EPERM中断，尚不判业务通过。已复用现有Windows renameAtomic补接遗漏路径，并将ACP周期CIM采样改为有界异步single-flight。ACP原生197项（193通过、4平台跳过），IM原子替换专项原生9/9；本地Feishu Bridge108/108。具体失败链、性能对照及包哈希见验收记录。真实恢复、其余业务、生命周期和Win11门禁仍保持未完成。
 
 修复包恢复后，新Bot普通计算527、Owner补充继续493、父子计算48及单次提醒133均已由飞书服务端结果/状态和Bridge日志交叉确认。附件场景返回runner pipe-in超时，未生成产物，仍为失败。Task 10不整体勾选，Win11及生命周期矩阵仍待验收。代码本地提交0a70b18，未推送/发布。
+
+### 2026-09-08 附件阻塞定位增量
+
+已用独立Codex sandbox探针定位SSH Session0的runner失败，同用户Interactive/Limited Session1成功；同profile的DPAPI凭证也只有Session1可用。沿用现有后台restart模式，实际CSV读取/求和/写入成功。随后真实上传发现Windows路径被展示文本转义规则损坏，已仅修复win32 file_delivery.path，原生4项红绿验证及全套112/112通过。完整附件交付仍以验收记录的最终服务端回读为准，不提前勾选Task10。
+
+附件最终已通过：交互会话后台模式下实际生成并上传result.csv，服务端重新下载确认WIN10-ROUNDTRIP-9821/49，任务done，交付日志succeeded；Windows路径修复提交51950e5。SSH Session0限制和启动口径已写入包README。该结果解除附件专项阻塞，Task10整体仍受Windows11及其他未执行矩阵约束。

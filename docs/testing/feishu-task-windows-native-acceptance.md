@@ -235,3 +235,31 @@ Windows 11 普通用户、Node 24、真正 Codex ACP session、飞书注册/OAut
 - 本轮明确未完成：附件输入到原生产物上传的完整闭环（runner执行失败）；重复任务、普通用户Win11、Node24、注销/故障恢复、运行中更新卸载和远端CI。当前成功场景不能替代这些门禁。
 
 - 原Bot扩展补测结束正常stop返回0、前台SSH退出。停止完成后CIM回查仅有测试前既存Node PID8548/7832/7672，无本轮Node残留。保留两套Bot授权/绑定及任务证据。
+
+## 2026-09-08 附件runner阻塞定位
+
+- 原始Codex会话 `01a0802a-f612-72f0-ae3a-da3661e1cc30` 对应本附件任务。09:30:57 UTC首个Get-Content（读skill/CSV）在进程创建阶段报runner pipe-in连接15000ms超时；09:32:00仅读CSV且login=false仍复现。会话为workspace-write、network_access=false、on-request；未通过降低沙箱复测。SSH直接读取合成CSV正常。
+- sandbox日志显示setup refresh errors=[]、command-runner复制/选择成功，错误出现在执行进程管道连接阶段。不能把setup成功等同于runner可用。
+- 独立于AAMP的最小探针：同一Codex0.153.4执行 `codex sandbox -P :workspace --include-managed-config -C <test_root> -- powershell.exe -NoProfile -Command 'Write-Output AAMP_RUNNER_PROBE'`。SSH Session0失败（同样15000ms pipe-in超时）；一次性同用户Interactive/Limited计划任务位于Session1，输出标记并exit0。机器已有Administrator活动console登录；本对照未依赖RDP、未关闭沙箱、未修改用户Codex配置。
+- 当前证据将阻塞定位为SSH Session0启动原生Codex runner的会话上下文问题；内核/runner更深层原因未定位。上游同类公开报告 https://github.com/openai/codex/issues/30839 截至检索仍Open，只作旁证，不代替本机对照。
+- 产品已有后台模式使用Interactive/Limited Task Scheduler，可复用该执行路径；正在对同一附件任务重开并复测完整产物。独立诊断任务AAMP-Runner-Probe-20260908已移除，日志保留。
+
+- 授权对照补充：相同隔离profile在SSH Session0返回bot not_configured/user missing；同用户Session1调用auth status --verify返回bot/user available=true、verified=true、tokenStatus=valid，Task scopes齐全。凭证未丢失，无需重新授权。lark-cli源码的Windows backend使用HKCU+DPAPI，读取失败对外返回missing；本机证据确认会话相关可用性差异，尚未独立输出具体DPAPI错误码。
+- `start` 从SSH仍在前台预检授权，故在移交后台前被上述凭证读取阻断（0/1）；使用既有绑定的产品 `restart` 路径让worker在交互会话完成准备，无须手动导出凭证或改沙箱配置。完整业务结果待回读。
+
+### 后台执行成功后暴露的Windows文件路径损坏
+
+- run `1788861690737-14264`，后台worker PID14264经回查为Session1，ready=1/1；Owner重试评论 `7683103363885485282`，AAMP Task ID后缀 `c7872db28601ded0af0a200ea08f9a31`。新Codex会话 `01a0807a-daf4-7622-ba77-cb4b525d2c58` 于10:07:33 UTC实际Get-Content成功，10:08:31实际Import-Csv→求和→写result.csv→回读验证，exit0，内容marker,total及WIN10-ROUNDTRIP-9821,49。确认runner执行阻塞在交互会话消失。
+- 随后交付仍失败，评论 `7683104669452471272`：路径被损坏后stat ENOENT。根因在task/runtime.ts的parseResultOutput使用展示文本getString读取file_delivery.path，二次把Windows路径中的反斜杠n/r转换成换行，导致node_modules/report/result.csv等路径段损坏。
+- 限定修复：仅win32的file_delivery.path改用已有getRawString，保留JSON已解码路径；POSIX和展示文本换行处理不变。新增盘符/UNC各直接和外层AAMP JSON共4个原生回归，修改前4/4断言失败（路径换行），修改后4/4通过。Windows全套112/112；macOS108通过、4原生专项跳过；npm pack/build退出0。
+- 修复包 `zengxingyuan-aamp-feishu-bridge-0.1.52-dev.5-windows-path.tgz` SHA256 `b85c5a932e3ee688bd0dd776e729886283a874fb2a42089ed63f34c6e6bddb80`，尚待最终实际上传复验。
+
+### 附件最终闭环通过（交互会话后台模式）
+
+- run `1788862696265-15364`，PID15364，修复包哈希与本地一致。原任务 `4216434f-75ea-4fc2-ab68-5c98f888623f` 重开，Owner评论 `7683107506259758063`；AAMP Task ID `feishu-task-4216434f-75ea-4fc2-ab68-5c98f888623f-38c28e12f936c77d99b9f1f9b569a47c`。
+- 最终日志file_delivery=1、result closed status=succeeded、completed parent=1 children=0；服务端回读done/agent_task_status=4，交付附件 `e866b836-1172-4e05-a7d7-533d0a426840`，result.csv，37字节，resource.type=task_delivery。
+- 通过服务端attachment.list/get取得临时URL，仅在Windows内下载回读，内容严格为 `marker,total\nWIN10-ROUNDTRIP-9821,49\n`。下载链接及凭证未输出；验证副本保留在隔离测试fixtures/verified-result.csv。
+- 本次验证覆盖附件上传→AAMP派发→原生Codex实际读取/求和/生成→Bridge上传→服务端下载核验→任务完成。没有用预生成文件代替Agent产物，没有关闭沙箱；SSH Session0 foreground依然不作为可执行附件的已验收入口。
+- 本地代码提交 `51950e5`，未推送/发布。两项一次性会话诊断任务已移除；完整Windows11/注销恢复等矩阵仍未完成。
+
+- 本轮正常stop返回0；随后仅剩既存Node PID8548/7832/7672，产品计划任务Disabled，两项一次性诊断任务均不存在。授权、绑定与测试产物保留。

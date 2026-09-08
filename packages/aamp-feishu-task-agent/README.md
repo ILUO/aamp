@@ -7,7 +7,7 @@ user-owned Feishu Bots and running the corresponding Task bridges.
 
 The Windows implementation is under development on
 `feat/feishu-task-windows-native`. It has **not passed Windows 11 desktop or
-real Feishu Task acceptance**, and the existing registry `@dev` release is
+the full Feishu Task acceptance matrix**, and the existing registry `@dev` release is
 not evidence of Windows support. See the
 [acceptance record](../../docs/testing/feishu-task-windows-native-acceptance.md).
 
@@ -52,6 +52,23 @@ the Controller also verifies the selected binding generation and live process
 identities. `stop` disables login activation until the next explicit `start`.
 Enterprise policies can prevent PowerShell or task registration; use explicit
 foreground mode after addressing the reported prerequisites.
+
+Windows OpenSSH foreground sessions need separate validation. On the tested
+Win10 host with Codex 0.153.4, Session 0 failed even a standalone sandbox
+command with `timed out after 15000ms connecting runner pipe-in`; the same
+sandbox in the user's active Session 1 succeeded. The CLI's DPAPI-backed
+credentials were also readable in Session 1 while SSH reported them missing.
+Do not treat a successful model-only calculation as proof of file execution,
+or immediately reauthorize when only the SSH session cannot read credentials.
+
+With an existing authorized binding and the same user already logged in,
+`feishu-task-agent.cmd restart` starts the existing interactive background
+worker, including its credential checks, in that user's session. Preserve the
+same state/runtime directory and any development package overrides. `start`
+can still run credential preparation in the calling SSH session before handing
+off; `start --foreground` stays in that session. This does not provide execution
+after logout or make a headless Session 0 equivalent to a desktop login. See the
+acceptance record for the observed boundaries and business results.
 
 Windows runtime state is under the existing product runtime directory in
 `windows-service-v1`; its log is `service.log`. Private state uses Windows ACLs.
