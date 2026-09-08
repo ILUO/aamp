@@ -549,13 +549,30 @@ function Get-CimInstance {
     if ($env:AAMP_CIM_METADATA -eq 'gone') { return $null }
     if ($env:AAMP_CIM_METADATA -eq 'reused') { $created = $created.AddSeconds(1) }
     if ($env:AAMP_CIM_METADATA -eq 'failure') { throw 'metadata read denied' }
-    if ($env:AAMP_CIM_METADATA -ne 'missing' -and ($env:AAMP_CIM_METADATA -ne 'delayed' -or $script:reads -ge 5)) { $executable = 'C:\fixture\node.exe' }
+    if ($env:AAMP_CIM_METADATA -ne 'missing' -and $env:AAMP_CIM_METADATA -notlike 'native-*' -and ($env:AAMP_CIM_METADATA -ne 'delayed' -or $script:reads -ge 5)) { $executable = 'C:\fixture\node.exe' }
   }
   return [pscustomobject]@{ProcessId=10384;ParentProcessId=1;CreationDate=$created;CommandLine='node fixture';ExecutablePath=$executable}
 }
 function Invoke-CimMethod { return [pscustomobject]@{ReturnValue=0;Sid='S-1-5-21-1000'} }
+function Get-FixtureNativeProcess {
+  param($id)
+  if ($env:AAMP_CIM_METADATA -eq 'native-gone') { throw [System.ArgumentException]::new('gone') }
+  if ($env:AAMP_CIM_METADATA -eq 'native-denied') { throw [System.UnauthorizedAccessException]::new('native handle denied') }
+  $created = $script:created.AddTicks(4)
+  if ($env:AAMP_CIM_METADATA -eq 'native-reused') { $created = $created.AddSeconds(1) }
+  $image = if ($env:AAMP_CIM_METADATA -eq 'missing') { '' } else { 'C:\fixture\node.exe' }
+  $native = [pscustomobject]@{Handle=1;HasExited=($env:AAMP_CIM_METADATA -eq 'native-exited');StartTime=$created;MainModule=[pscustomobject]@{FileName=$image}}
+  $native | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+  return $native
+}
 `
-    const run = scenario => runWindowsPowerShell(fixture + __test.powershellScripts[operation], {pid:10384}, {environment:{...process.env,AAMP_CIM_METADATA:scenario}})
+    const run = scenario => runWindowsPowerShell(fixture + __test.powershellScripts[operation].replace('[System.Diagnostics.Process]::GetProcessById([int]$snapshot.ProcessId)', '(Get-FixtureNativeProcess ([int]$snapshot.ProcessId))'), {pid:10384}, {environment:{...process.env,AAMP_CIM_METADATA:scenario}})
+    const native = await run('native-restored')
+    assert.equal((operation === 'read-process-identity' ? native : native.processes[0]).executablePath, String.raw`C:\fixture\node.exe`)
+    for (const scenario of ['native-gone','native-reused','native-exited']) {
+      assert.deepEqual(await run(scenario), operation === 'read-process-identity' ? {found:false} : {processes:[]})
+    }
+    await assert.rejects(run('native-denied'), /native handle denied/)
     const delayed = await run('delayed')
     assert.equal((operation === 'read-process-identity' ? delayed : delayed.processes[0]).executablePath, String.raw`C:\fixture\node.exe`)
     const result = await run('restored')

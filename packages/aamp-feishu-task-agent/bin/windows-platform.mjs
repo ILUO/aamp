@@ -55,10 +55,26 @@ function Read-VerifiedSnapshot($snapshot) {
       $current.CreationDate.ToUniversalTime().Ticks -ne $snapshot.CreationDate.ToUniversalTime().Ticks) { return $null }
     $snapshot = $current
   }
-  if ([string]::IsNullOrWhiteSpace($snapshot.ExecutablePath)) {
-    throw 'unable to read process executable path for a verified live process'
+  $executablePath = [string]$snapshot.ExecutablePath
+  if ([string]::IsNullOrWhiteSpace($executablePath)) {
+    $native = $null
+    try {
+      try { $native = [System.Diagnostics.Process]::GetProcessById([int]$snapshot.ProcessId) }
+      catch [System.ArgumentException] { return $null }
+      # Pin a native handle while comparing creation identity and reading its image.
+      $null = $native.Handle
+      if ($native.HasExited) { return $null }
+      $nativeTicks = $native.StartTime.ToUniversalTime().Ticks
+      # CIM timestamps have microsecond precision; native FILETIME has 100ns precision.
+      if (($nativeTicks - ($nativeTicks % 10)) -ne $snapshot.CreationDate.ToUniversalTime().Ticks) { return $null }
+      $executablePath = [string]$native.MainModule.FileName
+      if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+      if ([string]::IsNullOrWhiteSpace($executablePath)) {
+        throw 'unable to read process executable path for a verified live process'
+      }
+    } finally { if ($null -ne $native) { $native.Dispose() } }
   }
-  return @{ process = $snapshot; owner = $owner }
+  return @{ process = $snapshot; owner = $owner; executablePath = $executablePath }
 }
 `
 
@@ -123,7 +139,7 @@ $owner = $verified.owner
   pid = [int]$process.ProcessId
   creationDate = $process.CreationDate.ToString('o')
   commandLine = [string]$process.CommandLine
-  executablePath = [string]$process.ExecutablePath
+  executablePath = [string]$verified.executablePath
   ownerSid = [string]$owner.Sid
 } | ConvertTo-Json -Compress
 `,
@@ -152,7 +168,7 @@ foreach ($process in $all) {
     parentPid = [int]$process.ParentProcessId
     creationDate = $process.CreationDate.ToString('o')
     commandLine = [string]$process.CommandLine
-    executablePath = [string]$process.ExecutablePath
+    executablePath = [string]$verified.executablePath
     ownerSid = [string]$owner.Sid
   }
 }
