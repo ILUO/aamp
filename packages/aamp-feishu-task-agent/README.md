@@ -89,7 +89,12 @@ $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $taskName = "AAMP-FeishuTask-$sid"
 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($task) {
-  if ($task.Principal.UserId -ne $sid) { throw 'Task owner mismatch' }
+  $owner = $task.Principal.UserId
+  $ownerSid = if ($owner -match '^S-1-') { $owner } else {
+    (New-Object System.Security.Principal.NTAccount($owner)).Translate(
+      [System.Security.Principal.SecurityIdentifier]).Value
+  }
+  if ($ownerSid -ne $sid) { throw 'Task owner mismatch' }
   Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 npm.cmd uninstall --global @larktask/aamp-feishu-task-agent
