@@ -652,8 +652,10 @@ function pidAlive(pid) {
 }
 
 async function acquireDirectoryLock(lockDir, label, timeoutMs = 10_000) {
-  const started = Date.now();
+  let started = Date.now();
   await ensurePrivateDir(path.dirname(lockDir));
+  // Windows ACL initialization is prerequisite work, not lock contention.
+  if (process.platform === 'win32') started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
       await fsp.mkdir(lockDir, { mode: 0o700 });
@@ -4079,6 +4081,7 @@ if (isMainModule) {
 }
 
 export {
+  acquireDirectoryLock,
   buildPendingBinding,
   activateAddedBindings,
   createDraft,

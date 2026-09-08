@@ -506,3 +506,11 @@ test('saved binding output does not use the ready-state green icon', () => {
   assert.match(source, /console\.log\(`已保存：\$\{bindingLabel\(binding\)\}`\)/)
   assert.doesNotMatch(source, /🟢 已保存：/)
 })
+
+
+test('native Windows lock wait budget starts after private directory ACL setup', {skip: process.platform !== 'win32'}, async () => {
+  const lock = path.join(stateHome, 'acl-budget.lock')
+  const release = await controller.acquireDirectoryLock(lock, 'ACL budget fixture', 100)
+  assert.equal(JSON.parse(readFileSync(path.join(lock, 'owner.json'), 'utf8')).pid, process.pid)
+  await release()
+})
