@@ -363,3 +363,7 @@ Windows 目录 ACL 初始化原来占用了锁等待预算；实机约 3 秒初�
 - 实际打包检查确认长命令入口、Windows 多 Agent/更新模块与注册 helper 均包含在 tgz。TaskAgent SHA256：`9540d83453a2f510d09b789cde46255bf69c28c2ef33cf2371bf8cd6dd478776`；ACP SHA256：`be3deaf59a46914d9f9d10763c5b372722363472ad52450f4aa08b4c7deb1703`。
 - 本轮未替换旧 Win10 业务安装，未重新授权/创建 Bot、派发真实飞书任务或进行 npm 发布。更新成功/失败后的服务恢复为受控测试；最终 npm 部分安装失败仍可能无法恢复旧文件，程序会报告恢复失败，不承诺事务回滚。
 - Win11 接手方应拉取本开发分支最新提交，使用新包扫描并手选 Coco，验证真实 ACP、飞书授权及任务/附件闭环，再更新本文。原有“仅剩 Win11”结论仅限旧版本，不能覆盖本轮行为修正的实机业务边界。
+
+### 远端提交与 CI 回读
+
+代码修复提交 `43f8deabcfc6118ddb1a0118c00adba085e1b82c` 已推送至原开发分支。对应 [CI 34332705482](https://github.com/ILUO/aamp/actions/runs/34332705482) 六组全部 success：macOS、Ubuntu、Windows × Node22/24，包含三包测试/类型及实际打包。Windows CI 为 Server runner，不替代 Win11 普通用户与 Coco 真实业务。随后提交仅补写本段验证记录，不修改运行代码。飞书交接文档已回读 Win11 Coco 的 P0 新记录，保留接手方证据，并同步最新代码基线与测试入口。
