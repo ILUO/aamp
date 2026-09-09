@@ -11,7 +11,7 @@
   "description": "One-click manager for local Agent and Feishu Bot bindings.",
   "type": "module",
   "bin": {
-    "aamp-feishu-task-agent": "bin/feishu-task-agent.mjs",
+    "aamp-feishu-task-agent": "bin/aamp-feishu-task-agent.mjs",
     "feishu-task-agent": "bin/feishu-task-agent.mjs",
     "aamp-logs": "bin/aamp-logs.mjs"
   },

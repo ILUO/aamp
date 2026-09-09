@@ -71,7 +71,7 @@ test('Codex npm package resolves declared Windows vendor executable for CODEX_PA
     AAMP_WINDOWS_TEST_PLATFORM: 'win32',
     AAMP_WINDOWS_TEST_ARCH: 'x64',
     AAMP_NPX_CLI_BIN: process.execPath,
-    AAMP_TASK_SKIP_LOGIN_CHECK: 'true',
+    AAMP_TASK_SKIP_LOGIN_CHECK: 'true', CODEX_AUTO_UPDATE: 'false',
     AAMP_TASK_RUNTIME_HOME: path.join(dir, 'runtime'),
   }
   await runWindowsHelper('__prepare-agent', { agent_type: 'codex' }, env)

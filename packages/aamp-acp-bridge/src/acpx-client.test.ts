@@ -79,7 +79,7 @@ test('buildAcpxEnvironment pins local bin through one case-insensitive PATH key'
   assert.equal(env.Path, 'C:\\workspace\\node_modules\\.bin;C:\\global-bin')
 })
 
-test('exec reports synchronous native resolver failures after trying npx fallback', async () => {
+test('exec preserves synchronous resolver errors without an unrelated npx fallback', async () => {
   const attempted: string[] = []
   const client = new AcpxClient(process.cwd(), {
     resolveCommand: (command) => {
@@ -90,9 +90,9 @@ test('exec reports synchronous native resolver failures after trying npx fallbac
 
   await assert.rejects(
     () => client.ensureSession('codex', 'resolver-failure'),
-    /npx shim is unsupported/,
+    /acpx shim is unsupported/,
   )
-  assert.deepEqual(attempted, ['acpx', 'npx'])
+  assert.deepEqual(attempted, ['acpx'])
 })
 
 test('WindowsOwnedProcessTree cleans a retained orphan without touching reused or unrelated pids', async () => {
@@ -799,3 +799,12 @@ test('Windows failed stdin delivery terminates the exact child that remains runn
     await client.stop()
   }
 })
+
+for (const platform of ['darwin', 'linux'] as const) {
+  test(`ACP preserves case-sensitive PATH variables on ${platform}`, () => {
+    const env = buildAcpxEnvironment('/workspace', {Path:'/custom', PATH:'/usr/bin', path:'/other'}, platform)
+    assert.equal(env.PATH, '/workspace/node_modules/.bin:/usr/bin')
+    assert.equal(env.Path, '/custom')
+    assert.equal(env.path, '/other')
+  })
+}

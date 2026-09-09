@@ -1,6 +1,6 @@
 import {spawn} from 'node:child_process';
 import {readFileSync} from 'node:fs';
-import {mkdtemp,readFile,readdir,rm,access} from 'node:fs/promises';
+import {readFile,access} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
@@ -8,10 +8,10 @@ import os from 'node:os';
 const commands = new Set(['install','start','status','stop','restart','logs','list','add','remove','update','help','__service-run']);
 const packageDir = fileURLToPath(new URL('../', import.meta.url));
 
-export function parseWindowsArguments(argv) {
+export function parseWindowsArguments(argv, entry = 'short') {
   const args = [...argv];
   if (args[0] === 'normal') args.shift();
-  const result = {command:'help',foreground:false,agent:'',host:'https://meshmail.ai',debug:false};
+  const result = {command:args.length === 0 && entry === 'long' ? 'install' : 'help',foreground:false,agent:'',host:'https://meshmail.ai',debug:false};
   if (commands.has(args[0])) result.command = args.shift();
   else if (args.length && !['-h','--help'].includes(args[0])) result.command = 'install';
   while (args.length) {
@@ -51,8 +51,23 @@ export async function validateWindowsUpdatePackage(directory, expectedName) {
   }
 }
 
+export function windowsEntryKind(argv1 = '', env = process.env) {
+  if (env.AAMP_TASK_ENTRY) return env.AAMP_TASK_ENTRY;
+  return /^aamp-feishu-task-agent(?:\.(?:cmd|ps1|mjs))?$/i.test(path.win32.basename(argv1)) ? 'long' : 'short';
+}
+
+export function windowsNpmEnvironment(source = process.env) {
+  const registry=source.AAMP_TASK_NPM_REGISTRY || source.NPM_REGISTRY || 'https://registry.npmjs.org/';
+  const cache=source.AAMP_TASK_NPM_CACHE_DIR || source.NPM_CONFIG_CACHE || source.npm_config_cache || path.join(os.tmpdir(),'aamp-one-click-npm-cache');
+  const env={...source,AAMP_TASK_NPM_REGISTRY:registry,AAMP_TASK_NPM_CACHE_DIR:cache,
+    npm_config_registry:registry,NPM_CONFIG_REGISTRY:registry,npm_config_cache:cache,NPM_CONFIG_CACHE:cache};
+  const prefix=source.AAMP_TASK_NPM_GLOBAL_PREFIX || source.NPM_GLOBAL_PREFIX || source.npm_config_prefix || source.NPM_CONFIG_PREFIX;
+  if(prefix) Object.assign(env,{AAMP_TASK_NPM_GLOBAL_PREFIX:prefix,NPM_GLOBAL_PREFIX:prefix,npm_config_prefix:prefix,NPM_CONFIG_PREFIX:prefix});
+  return env;
+}
+
 export async function runWindowsEntry(argv) {
-  const options=parseWindowsArguments(argv);
+  const options=parseWindowsArguments(argv,windowsEntryKind(process.argv[1]));
   if (options.command === 'help') {
     console.log('feishu-task-agent <install|start|status|stop|restart|logs|list|add|remove|update>\n  --agent <name>  --aamp-host <url>  --foreground  --debug');
     return;
@@ -65,7 +80,7 @@ export async function runWindowsEntry(argv) {
   const {resolveNativeCommand}=await import('../bin/windows-platform.mjs');
   const npm=await resolveNativeCommand('npm',process.env);
   if (!npm) throw new Error('npm is unavailable; install Node.js with npm first');
-  const env={...process.env,
+  const env={...windowsNpmEnvironment(process.env),
     AAMP_TASK_DEFAULT_AGENT:options.agent || process.env.AAMP_TASK_DEFAULT_AGENT || '',
     AAMP_TASK_AAMP_HOST:options.host,
     AAMP_TASK_FOREGROUND:String(options.foreground || process.env.AAMP_TASK_FOREGROUND === 'true'),
@@ -85,22 +100,11 @@ export async function runWindowsEntry(argv) {
     env[key]=env.AAMP_TASK_ALLOW_PACKAGE_OVERRIDES === 'true' ? env[alias] || env[key] || fallback : fallback;
   }
   const controller=path.join(packageDir,'bin','feishu-task-agent-controller.mjs');
-  if (options.command === 'update') {
-    const stage=await mkdtemp(path.join(os.tmpdir(),'aamp-windows-update-'));
-    try {
-      const install=await runChild(npm.command,[...(npm.argsPrefix || []),'pack','--ignore-scripts','--pack-destination',stage,`${metadata.name}@${env.AAMP_TASK_AGENT_CHANNEL || 'dev'}`],env);
-      if (install!==0) {process.exitCode=install;return;}
-      const archives=(await readdir(stage)).filter(file=>file.endsWith('.tgz'));
-      if (archives.length!==1) throw new Error('更新包数量异常，保留当前版本');
-      const archive=path.join(stage,archives[0]);
-      const staged=await runChild(npm.command,[...(npm.argsPrefix || []),'install','--ignore-scripts','--no-audit','--no-fund','--prefix',stage,archive],env);
-      if(staged!==0) {process.exitCode=staged;return;}
-      await validateWindowsUpdatePackage(path.join(stage,'node_modules',...metadata.name.split('/')),metadata.name);
-      const stopped=await runChild(process.execPath,[controller,'stop'],env);
-      if (stopped !== 0) {process.exitCode=stopped; return;}
-      process.exitCode=await runChild(npm.command,[...(npm.argsPrefix || []),'install','--global',archive],env);
-    } finally {await rm(stage,{recursive:true,force:true});}
-    return;
+  // Resolve and perform updates before constructing any service/controller runtime.
+  if (options.command !== '__service-run') {
+    const {runWindowsUpdate}=await import('./windows-update.mjs');
+    const outcome=await runWindowsUpdate({argv,command:options.command,metadata,packageDir,npm,env,runChild,validate:validateWindowsUpdatePackage});
+    if(outcome.handled) { process.exitCode=outcome.code; return; }
   }
   process.exitCode=await runChild(process.execPath,[controller,options.command],env);
 }

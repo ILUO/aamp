@@ -58,9 +58,25 @@ test('register binding preserves SDK request parity and exact Lark profile contr
   assert.deepEqual(request.addons.events.items.tenant, [
     'task.task.update_user_access_v2',
   ])
+
+  await runWindowsHelper('__register-binding', {}, {
+    AAMP_REGISTER_APP_SDK_MODULE: sdk, AAMP_LARK_CLI_BIN: cli,
+    AAMP_FEISHU_AUTH_STATE_DIR: path.join(root,'override-auth'), AAMP_LARK_CLI_CONFIG_DIR: path.join(root,'override-config'),
+    FEISHU_USER_AUTH_MODE:'disabled', AAMP_TASK_TEST_NO_BROWSER:'true',
+    FEISHU_APP_SCOPES_TENANT:'tenant.custom', FEISHU_APP_SCOPES_USER:'user.custom',
+    FEISHU_APP_EVENTS_TENANT:'tenant.event', FEISHU_APP_EVENTS_USER:'user.event',
+  })
+  const override = JSON.parse(readFileSync(calls,'utf8'))
+  assert.deepEqual(override.addons.scopes,{tenant:['tenant.custom'],user:['user.custom']})
+  assert.deepEqual(override.addons.events.items,{tenant:['tenant.event'],user:['user.event']})
+  const old = await runWindowsHelper('__probe-profile', {agent_type:'codex',bot:{app_id:'cli_registered',lark_cli_profile:'aamp-test'}}, {
+    AAMP_LARK_CLI_BIN:cli,AAMP_LARK_CLI_CONFIG_DIR:path.join(root,'version-config'),LARK_CLI_MIN_VERSION:'9.0.0',
+  })
+  assert.equal(old.ready,false)
+
 })
 
-test('discovers only proven native existing agent types in stable order', async () => {
+test('discovers installed native Agents in stable order without a Codex allowlist', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-discover-'))
   const result = await runWindowsHelper(
     '__discover-agents',
@@ -71,7 +87,7 @@ test('discovers only proven native existing agent types in stable order', async 
       AAMP_TRAE_CLI_BIN: path.join(root, 'missing'),
     },
   )
-  assert.deepEqual(result, { agents: ['codex'] })
+  assert.deepEqual(result, { agents: ['codex', 'cursor'] })
 })
 
 test('prepare codex returns a wrapper command without secrets', async () => {
@@ -82,7 +98,7 @@ test('prepare codex returns a wrapper command without secrets', async () => {
     { agent_type: 'codex' },
     {
       AAMP_CODEX_CLI_BIN: codex,
-      AAMP_TASK_SKIP_LOGIN_CHECK: 'true',
+      AAMP_TASK_SKIP_LOGIN_CHECK: 'true', CODEX_AUTO_UPDATE: 'false',
       AAMP_LARK_CLI_CONFIG_DIR: path.join(root, 'lark'),
       AAMP_TASK_RUNTIME_HOME: path.join(root, 'runtime'),
     },
@@ -128,7 +144,7 @@ test('explicit Codex ACP override reaches the wrapper config', async () => {
     { agent_type: 'codex' },
     {
       AAMP_CODEX_CLI_BIN: process.execPath,
-      AAMP_TASK_SKIP_LOGIN_CHECK: 'true',
+      AAMP_TASK_SKIP_LOGIN_CHECK: 'true', CODEX_AUTO_UPDATE: 'false',
       AAMP_TASK_RUNTIME_HOME: root,
       AAMP_TASK_CODEX_ACP_PKG: 'custom-codex-acp@2.0.0',
     },
@@ -148,7 +164,8 @@ test('registration prints original authorization URL and expiry when browser ope
   const sdk={registerApp:async options=>{options.onQRCodeReady({url:'https://example.test/authorize?code=test',expireIn:180});return {client_id:'cli',client_secret:'secret'}},Domain:{Feishu:'feishu'},Client:class{constructor(){this.application={application:{get:async()=>({data:{app:{app_name:'Bot'}}})}}}}}
   const result=await registerFeishuApp({sdk,openUrl:()=>{throw new Error('browser blocked')},log:message=>logs.push(message)})
   assert.equal(result.app_id,'cli')
-  assert.deepEqual(logs,['请打开授权链接完成飞书 Bot 授权（180 秒内有效）：https://example.test/authorize?code=test'])
+  assert.ok(logs.includes('请打开授权链接完成飞书 Bot 授权（180 秒内有效）：https://example.test/authorize?code=test'))
+  assert.ok(logs.some(message=>message.includes('未能自动打开浏览器')))
 })
 
 test('profile readiness accepts named CLI entries and legacy strings while retaining scope checks', async (t) => {

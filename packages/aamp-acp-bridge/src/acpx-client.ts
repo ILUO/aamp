@@ -4,7 +4,7 @@ import { execFile, execFileSync, spawn, type ChildProcessWithoutNullStreams } fr
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join, win32 } from 'node:path'
+import { join, win32, posix } from 'node:path'
 import { resolveNativeCommand } from './native-command.js'
 
 export interface WindowsProcessIdentity {
@@ -294,14 +294,16 @@ export function buildAcpxEnvironment(
   platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
   const env = { ...source }
+  if (platform !== 'win32') {
+    env.PATH = [posix.join(cwd, 'node_modules', '.bin'), source.PATH ?? ''].filter(Boolean).join(':')
+    return env
+  }
   const pathKeys = Object.keys(env).filter((key) => key.toLowerCase() === 'path')
-  const pathKey = pathKeys[0] ?? (platform === 'win32' ? 'Path' : 'PATH')
+  const pathKey = pathKeys[0] ?? 'Path'
   const existingPath = pathKeys.map((key) => env[key]).find((value) => value !== undefined) ?? ''
   for (const key of pathKeys) delete env[key]
-  const pathJoin = platform === 'win32' ? win32.join : join
-  const pathDelimiter = platform === 'win32' ? ';' : delimiter
-  env[pathKey] = [pathJoin(cwd, 'node_modules', '.bin'), existingPath]
-    .filter(Boolean).join(pathDelimiter)
+  env[pathKey] = [win32.join(cwd, 'node_modules', '.bin'), existingPath]
+    .filter(Boolean).join(';')
   return env
 }
 
@@ -902,12 +904,18 @@ export class AcpxClient {
     try {
       attach(this.spawnAcpx(args))
     } catch (error) {
-      startedFallback = true
-      try {
-        attach(this.spawnNpxAcpx(args))
-      } catch (fallbackError) {
+      if (this.isSpawnNotFoundError(error)) {
+        startedFallback = true
+        try {
+          attach(this.spawnNpxAcpx(args))
+        } catch (fallbackError) {
+          settled = true
+          handlers.onError(fallbackError as Error)
+          resolveExitedIfComplete()
+        }
+      } else {
         settled = true
-        handlers.onError(fallbackError instanceof Error ? fallbackError : error as Error)
+        handlers.onError(error as Error)
         resolveExitedIfComplete()
       }
     }

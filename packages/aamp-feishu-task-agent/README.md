@@ -14,8 +14,28 @@ not evidence of Windows support. See the
 The target is Windows 11 x64, Windows PowerShell 5.1, and Node.js 22/24.
 Use PowerShell's explicit `.cmd` commands. WSL, Git Bash, administrator
 permissions, and a system Windows Service are not prerequisites.
-Codex is the first Windows integration; other Agent types require their own
-verified native entry before becoming selectable.
+Windows scans installed native Agent entries and asks the user to choose; it does
+not restrict the list to Codex. An explicit `--agent` still selects a detected
+Agent. Selecting Coco uses that installation's `coco acp serve` and does not switch
+to Codex or Traex. A CLI without the required ACP capability reports a preparation
+error or offers its existing update flow; discovery alone is not a real-machine
+support claim. The existing AIME tenant restriction remains in effect.
+
+If a desktop CLI is not on PATH, use `AAMP_CODEX_CLI_BIN`,
+`AAMP_CURSOR_CLI_BIN`, `AAMP_COCO_CLI_BIN`, `AAMP_TRAEX_CLI_BIN`,
+`AAMP_TRAECODE_CLI_BIN`, `AAMP_WORKBUDDY_CLI_BIN`, or
+`AAMP_WORKBUDDY_AI_CLI_BIN` to specify its executable or npm-generated Node shim.
+Opaque batch/PowerShell wrappers are not advertised as native executables.
+Windows retains proxy environment variables. Existing Feishu scope/event,
+CLI/SDK version, npm registry/cache and user-authorization overrides are preserved
+when preparing bindings and handing them to the background worker.
+
+Automatic Task Agent update checks retain `AAMP_TASK_AUTO_UPDATE` and cache
+settings; set `AAMP_TASK_AUTO_UPDATE=false` when testing an unreleased local
+artifact. Manual updates stage and validate the package before replacing it,
+prevent version downgrades and restore the previously running background binding
+selection. If installation or restoration fails, the command reports the failure;
+it does not promise a transactional package rollback.
 
 For development, build the **three modified packages** using `npm.cmd pack`
 and retain each exact returned `.tgz` path. Install the Task Agent artifact

@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import defaults from './task-agent-defaults.json' with { type: 'json' }
 import { resolveTaskAgentMetadata } from '../bin/agent-metadata.mjs'
+import {discoverWindowsAgents, prepareWindowsNativeAgent, ensureWindowsAgentLogin, ensureWindowsCodexUpdated} from './windows-agents.mjs'
 import { registerFeishuApp, defaultOpenUrl } from './register-feishu-app.mjs'
 import { withWindowsOperationLock } from '../bin/windows-operation-lock.mjs'
 import {
@@ -69,7 +70,7 @@ async function readable(file) {
 function command(env, key, name) {
   return envValue(env, key) || name
 }
-function run(commandName, args, { env, input, stdio = 'pipe' } = {}) {
+function run(commandName, args, { env, input, stdio = 'pipe', timeout, allowedExitCodes = [0] } = {}) {
   return new Promise((resolve, reject) => {
     const descriptor =
       typeof commandName === 'string'
@@ -84,6 +85,10 @@ function run(commandName, args, { env, input, stdio = 'pipe' } = {}) {
         shell: false,
       },
     )
+    let timedOut = false
+    const timer = timeout ? setTimeout(() => {timedOut = true; child.kill('SIGKILL')}, timeout) : undefined
+    child.once('error', () => clearTimeout(timer))
+    child.once('close', () => clearTimeout(timer))
     let stdout = '',
       stderr = ''
     if (stdio !== 'inherit') {
@@ -96,9 +101,9 @@ function run(commandName, args, { env, input, stdio = 'pipe' } = {}) {
     }
     child.once('error', reject)
     child.once('close', (code) =>
-      code === 0
+      !timedOut && allowedExitCodes.includes(code)
         ? resolve({ stdout, stderr })
-        : reject(new Error(`command failed (${code}): ${stderr.trim()}`)),
+        : reject(Object.assign(new Error(timedOut ? 'command timed out' : `command failed (${code}): ${stderr.trim()}`), {code: timedOut ? 'ETIMEDOUT' : code})),
     )
   })
 }
@@ -370,7 +375,8 @@ async function resolveLarkCli(extraEnv, env, { install = false } = {}) {
     'AAMP_TASK_RUNTIME_HOME',
     path.join(homedir(), '.aamp', 'feishu-task-agent'),
   )
-  const prefix = path.join(runtime, 'npm-global')
+  const prefix = envValue(extraEnv, 'NPM_GLOBAL_PREFIX', envValue(extraEnv, 'AAMP_TASK_NPM_GLOBAL_PREFIX', path.join(runtime, 'npm-global')))
+  const minimum = envValue(extraEnv, 'LARK_CLI_MIN_VERSION', defaults.larkCli.minVersion)
   const pathKey =
     Object.keys(env).find((key) => key.toLowerCase() === 'path') || 'PATH'
   const searchEnv = {
@@ -406,7 +412,7 @@ async function resolveLarkCli(extraEnv, env, { install = false } = {}) {
   if (descriptor) {
     try {
       const version = (await run(descriptor, ['--version'], { env })).stdout
-      if (versionAtLeast(version, defaults.larkCli.minVersion))
+      if (versionAtLeast(version, minimum))
         return descriptor
     } catch {}
   }
@@ -417,7 +423,7 @@ async function resolveLarkCli(extraEnv, env, { install = false } = {}) {
     )
   if (explicit)
     throw new Error(
-      `AAMP_LARK_CLI_BIN does not point to lark-cli >= ${defaults.larkCli.minVersion}: ${explicit}`,
+      `AAMP_LARK_CLI_BIN does not point to lark-cli >= ${minimum}: ${explicit}`,
     )
   await mkdir(prefix, { recursive: true })
   const npm = await npmLaunch(extraEnv)
@@ -440,9 +446,9 @@ async function resolveLarkCli(extraEnv, env, { install = false } = {}) {
   })
   const ready = { ...value, reported: value.argsPrefix[0] || value.command }
   const version = (await run(ready, ['--version'], { env: nextEnv })).stdout
-  if (!versionAtLeast(version, defaults.larkCli.minVersion))
+  if (!versionAtLeast(version, minimum))
     throw new Error(
-      `failed to select lark-cli >= ${defaults.larkCli.minVersion} after isolated install`,
+      `failed to select lark-cli >= ${minimum} after isolated install`,
     )
   return ready
 }
@@ -454,7 +460,8 @@ async function materializeRegisterSdk(extraEnv) {
     'AAMP_TASK_RUNTIME_HOME',
     path.join(homedir(), '.aamp', 'feishu-task-agent'),
   )
-  const prefix = path.join(runtime, 'register-sdk')
+  const sdkPackage = envValue(extraEnv, 'LARK_REGISTER_APP_SDK', defaults.packages.registerAppSdk)
+  const prefix = path.join(runtime, 'register-sdk', Buffer.from(sdkPackage).toString('base64url'))
   const require = createRequire(path.join(prefix, 'package.json'))
   try {
     return await import(
@@ -474,7 +481,7 @@ async function materializeRegisterSdk(extraEnv) {
       '--ignore-scripts',
       '--prefix',
       prefix,
-      defaults.packages.registerAppSdk,
+      sdkPackage,
     ],
     { env: extraEnv, stdio: 'inherit' },
   )
@@ -623,15 +630,7 @@ export async function runWindowsHelper(
     ),
   }
   if (action === '__discover-agents') {
-    return {
-      agents: (await nativeExecutable(
-        'codex',
-        envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'),
-        env,
-      ))
-        ? ['codex']
-        : [],
-    }
+    return {agents: await discoverWindowsAgents(env, () => nativeExecutable('codex', envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'), env))}
   }
   if (action === '__register-binding') {
     if (envValue(extraEnv, 'AAMP_TASK_NON_INTERACTIVE') === 'true')
@@ -640,10 +639,10 @@ export async function runWindowsHelper(
     const registered = await registerFeishuApp({
       sdk,
       appName: payload.display_name || 'AAMP 飞书 CLI',
-      tenantScopes: defaults.scopeManifest.app.tenant,
-      userScopes: defaults.scopeManifest.app.user,
-      tenantEvents: defaults.events.tenant,
-      userEvents: defaults.events.user,
+      tenantScopes: envValue(extraEnv, 'FEISHU_APP_SCOPES_TENANT') || defaults.scopeManifest.app.tenant,
+      userScopes: envValue(extraEnv, 'FEISHU_APP_SCOPES_USER') || defaults.scopeManifest.app.user,
+      tenantEvents: envValue(extraEnv, 'FEISHU_APP_EVENTS_TENANT') || defaults.events.tenant,
+      userEvents: envValue(extraEnv, 'FEISHU_APP_EVENTS_USER') || defaults.events.user,
       openUrl:
         envValue(extraEnv, 'AAMP_TASK_TEST_NO_BROWSER') === 'true'
           ? undefined
@@ -681,42 +680,30 @@ export async function runWindowsHelper(
       (typeof payload === 'string' ? payload : payload.agent_type) || '',
     )
     const metadata = resolveTaskAgentMetadata(type)
-    if (type !== 'codex')
-      throw new Error(
-        `${type} is unavailable on Windows until its native ACP entry is verified`,
-      )
-    const codex = await nativeExecutable(
-      'codex',
-      envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'),
-      env,
-    )
-    if (!codex) throw new Error('codex CLI is unavailable')
-    if (envValue(extraEnv, 'AAMP_TASK_SKIP_LOGIN_CHECK') !== 'true')
-      await run(codex, ['login', 'status'], { env, stdio: 'inherit' })
-    const runtime = envValue(
-      extraEnv,
-      'AAMP_TASK_RUNTIME_HOME',
-      path.join(homedir(), '.aamp', 'feishu-task-agent'),
-    )
-    await mkdir(runtime, { recursive: true })
-    const configPath = path.join(runtime, 'windows-codex-agent.json')
-    const launcher = await npxLaunch(extraEnv)
-    await writeFile(
-      configPath,
-      JSON.stringify({
-        command: launcher.command,
-        args: [
-          ...launcher.args,
-          '-y',
-          envValue(
-            extraEnv,
-            'AAMP_TASK_CODEX_ACP_PKG',
-            defaults.packages.codexAcp,
-          ),
-        ],
-        env: { CODEX_PATH: codex },
-      }),
-    )
+    const runtime = envValue(extraEnv, 'AAMP_TASK_RUNTIME_HOME', path.join(homedir(), '.aamp', 'feishu-task-agent'))
+    let config
+    if (type === 'codex') {
+      let codex = await nativeExecutable('codex', envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'), env)
+      if (!codex) throw new Error('codex CLI is unavailable')
+      await ensureWindowsCodexUpdated(codex, env, {run, npmLaunch, ...options})
+      codex = await nativeExecutable('codex', envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'), env)
+      if (!codex) throw new Error('升级后未找到 Codex CLI')
+      await ensureWindowsAgentLogin(type, codex, env, run)
+      const launcher = await npxLaunch(extraEnv)
+      config = {command:launcher.command, args:[...launcher.args,'-y',envValue(extraEnv, 'AAMP_TASK_CODEX_ACP_PKG', defaults.packages.codexAcp)],env:{CODEX_PATH:codex}}
+    } else {
+      config = await prepareWindowsNativeAgent(type,env,{run,npmLaunch,...options})
+      if (config.cancelled) return config
+    }
+    if (process.platform === 'win32') await ensurePrivateWindowsDirectory(runtime)
+    else await mkdir(runtime, {recursive:true})
+    const configPath = path.join(runtime, `windows-${type}-agent.json`)
+    const temporary = `${configPath}.${process.pid}.tmp`
+    try {
+      await writeFile(temporary, JSON.stringify(config), {mode:0o600})
+      if (process.platform === 'win32') await atomicReplaceWindows(temporary,configPath)
+      else await rename(temporary,configPath)
+    } finally {await rm(temporary,{force:true})}
     const result = {
       agent_type: type,
       acp_command: `${quote(process.execPath)} ${quote(wrapperPath)} ${quote(configPath)}`,
