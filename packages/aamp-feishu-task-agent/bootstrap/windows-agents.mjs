@@ -1,5 +1,5 @@
 // Native launch descriptors preserve the Agent selected by the user.
-import {access, readFile, realpath, mkdir, writeFile} from 'node:fs/promises'
+import {access, readFile, mkdir, writeFile} from 'node:fs/promises'
 import {constants} from 'node:fs'
 import path from 'node:path'
 import {homedir} from 'node:os'
@@ -39,23 +39,32 @@ async function descriptor(candidate, env) {
   } catch {return undefined}
 }
 
-export async function findWindowsAgent(type, env) {
+export async function findWindowsAgent(type, env, run) {
   const definition = agents[type]
   if (!definition) return undefined
+  const resolveCandidate = async candidate => {
+    const found = await descriptor(candidate, env)
+    if (!found || type !== 'cursor' || path.basename(candidate).replace(/\.(exe|com|cmd|mjs|cjs|js)$/i,'').toLowerCase() !== 'agent') return found
+    // The generic name may belong to another product; match the macOS identity probe.
+    try {
+      const result = await run(found, ['login','--help'], {env,timeout:10000})
+      return `${result.stdout}\n${result.stderr}`.includes('Authenticate with Cursor') ? found : undefined
+    } catch {return undefined}
+  }
   for (const key of definition.variables) {
     const value = env[key]
     if (!value) continue
     // Legacy TRAE_CLI_BIN is shared; do not advertise another binary as Coco.
     if (['AAMP_TRAE_CLI_BIN','TRAE_CLI_BIN'].includes(key) && path.basename(value).replace(/\.(exe|cmd|mjs|cjs|js)$/i,'') !== type) continue
-    return descriptor(value, env)
+    return resolveCandidate(value)
   }
   for (const name of definition.names) {
-    const found = await descriptor(name,env)
+    const found = await resolveCandidate(name)
     if (found) return found
   }
 }
 
-export async function discoverWindowsAgents(env, resolveCodex) {
+export async function discoverWindowsAgents(env, resolveCodex, run) {
   const found = new Map()
   for (const type of TASK_AGENT_TYPES) {
     if (type === 'aime') {
@@ -63,14 +72,15 @@ export async function discoverWindowsAgents(env, resolveCodex) {
     } else if (type === 'codex') {
       if (await resolveCodex()) found.set(type, null)
     } else {
-      const command = await findWindowsAgent(type,env)
+      const command = await findWindowsAgent(type,env,run)
       if (command) found.set(type,command)
     }
   }
-  // Coco also installs a traecli alias. Do not mislabel that same program as TraeCode.
-  if (found.has('coco') && found.has('traecli')) {
-    const identity = async d => realpath(d.argsPrefix[0] || d.command).catch(()=>d.argsPrefix[0] || d.command)
-    if (await identity(found.get('coco')) === await identity(found.get('traecli'))) found.delete('traecli')
+  // Preserve the macOS menu: offer only the first installed member of this family.
+  const traeFamily = ['traex','coco','traecli']
+  const preferred = traeFamily.find(type => found.has(type))
+  for (const type of traeFamily) {
+    if (type !== preferred) found.delete(type)
   }
   return [...found.keys()]
 }
@@ -104,7 +114,7 @@ export async function ensureWindowsAgentLogin(type, command, env, run) {
 export async function prepareWindowsNativeAgent(type, env, {run, npmLaunch, confirm = confirmWindowsAgentAction}) {
   const definition = agents[type]
   if (!definition) throw new Error(`Unknown native Agent: ${type}`)
-  let command = await findWindowsAgent(type,env)
+  let command = await findWindowsAgent(type,env,run)
   if (type === 'aime' && !command) {
     // AIME is a tenant-gated remote Agent, not a local desktop installation.
     const root = path.join(env.AAMP_TASK_RUNTIME_HOME || path.join(homedir(),'.aamp','feishu-task-agent'),'aime-acp')
@@ -129,7 +139,7 @@ export async function prepareWindowsNativeAgent(type, env, {run, npmLaunch, conf
       interactive(env)
       if (!await confirm(`${type} 当前版本不支持 ACP，是否执行 ${type} update？`)) return {cancelled:true,agent_type:type,reason:'用户取消升级，本次未启动飞书任务连接。'}
       await run(command,['update'],{env,stdio:'inherit'})
-      command = await findWindowsAgent(type,env)
+      command = await findWindowsAgent(type,env,run)
       if (!command) throw new Error(`升级后未找到 ${type}；请检查 CLI 路径。`)
       await probe()
     }

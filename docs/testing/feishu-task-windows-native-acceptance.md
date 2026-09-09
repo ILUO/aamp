@@ -367,3 +367,10 @@ Windows 目录 ACL 初始化原来占用了锁等待预算；实机约 3 秒初�
 ### 远端提交与 CI 回读
 
 代码修复提交 `43f8deabcfc6118ddb1a0118c00adba085e1b82c` 已推送至原开发分支。对应 [CI 34332705482](https://github.com/ILUO/aamp/actions/runs/34332705482) 六组全部 success：macOS、Ubuntu、Windows × Node22/24，包含三包测试/类型及实际打包。Windows CI 为 Server runner，不替代 Win11 普通用户与 Coco 真实业务。随后提交仅补写本段验证记录，不修改运行代码。飞书交接文档已回读 Win11 Coco 的 P0 新记录，保留接手方证据，并同步最新代码基线与测试入口。
+
+
+## 2026-09-09 Agent 发现规则对齐
+
+在前述范围修正之后，仅调整 Windows 发现规则以匹配现有 macOS：Trae 系列按 `traex > coco > traecli` 只展示第一个检测到的类型；通用 `agent` 命令执行 `login --help`，仅在退出成功且 stdout/stderr 含 `Authenticate with Cursor` 时作为 Cursor 候选。准备阶段使用同一身份检查，探针限时 10 秒；专用 `cursor-agent` 名称保持原有信任规则。扫描后的手动选择、所选 Agent 身份及 Windows 代理环境传递不变，macOS Bash 实现未修改。
+
+验证：macOS Node 24.19.0 执行 TaskAgent 平台全量 489 项，479 通过、10 跳过、0 失败；Agent 选择与 Windows helper 定向 23 项全部通过。Win10 Enterprise 22H2（build 19045）、Node 24.20.0 在既有隔离测试副本运行同样定向测试，23 项全部通过。覆盖 Trae 三档优先级回退、非 Cursor 拒绝、stdout/stderr 识别、非零退出拒绝、准备阶段检查，以及手选 Coco 后 fixture 子进程执行与 HTTPS_PROXY 保留。Spec/Standards 审查均无发现，JS 语法检查与 diff 检查通过。本轮没有执行真实模型或飞书业务调用，不能替代 Win11/Coco 完整业务验收；上节 CI 结果属于原代码提交，不作为本次提交的 CI 结果。

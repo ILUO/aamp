@@ -42,12 +42,16 @@ test('scan offers installed Agents, user chooses Coco, and the wrapper actually 
   assert.deepEqual(JSON.parse(output),{args:['acp','serve'],proxy:env.HTTPS_PROXY})
 })
 
-test('all installed local types remain selectable and AIME retains its tenant gate',async t=>{
+test('Trae family discovery follows macOS priority and AIME retains its tenant gate',async t=>{
   const {env,root}=await fixture(t)
   for(const [key,name] of [['AAMP_CURSOR_CLI_BIN','cursor'],['AAMP_TRAEX_CLI_BIN','traex'],['AAMP_TRAECODE_CLI_BIN','traecli'],['AAMP_WORKBUDDY_CLI_BIN','workbuddy'],['AAMP_WORKBUDDY_AI_CLI_BIN','workbuddy-ai']]){
     env[key]=path.join(root,`${name}.mjs`);await writeFile(env[key],'')
   }
-  assert.deepEqual((await runWindowsHelper('__discover-agents',{},env)).agents,['codex','cursor','coco','traex','traecli','workbuddy','workbuddy_ai'])
+  assert.deepEqual((await runWindowsHelper('__discover-agents',{},env)).agents,['codex','cursor','traex','workbuddy','workbuddy_ai'])
+  env.AAMP_TRAEX_CLI_BIN=path.join(root,'missing-traex')
+  assert.deepEqual((await runWindowsHelper('__discover-agents',{},env)).agents,['codex','cursor','coco','workbuddy','workbuddy_ai'])
+  env.AAMP_COCO_CLI_BIN=path.join(root,'missing-coco')
+  assert.deepEqual((await runWindowsHelper('__discover-agents',{},env)).agents,['codex','cursor','traecli','workbuddy','workbuddy_ai'])
   assert.equal((await runWindowsHelper('__discover-agents',{}, {...env,AAMP_TASK_USER_TENANT_KEY:'other'})).agents.includes('aime'),false)
   assert.equal((await runWindowsHelper('__discover-agents',{}, {...env,AAMP_TASK_USER_TENANT_KEY:'736588c9260f175d'})).agents.includes('aime'),true)
 })
@@ -89,4 +93,26 @@ test('Codex prerelease-to-stable upgrade retains semantic version ordering',asyn
   const {root}=await fixture(t);let confirmed=false
   await ensureWindowsCodexUpdated('codex.exe',{CODEX_UPDATE_CACHE_FILE:path.join(root,'pre.json')},{npmLaunch:async()=>({command:'npm',args:[]}),run:async(_cmd,args)=>({stdout:args[0]==='--version'?'codex 1.0.0-rc.1':'1.0.0',stderr:''}),confirm:async()=>{confirmed=true;return false}})
   assert.equal(confirmed,true)
+})
+
+
+test('generic agent npm shim must identify itself as Cursor before discovery or preparation',async t=>{
+  const {root,env}=await fixture(t)
+  const entry=path.join(root,'generic.mjs')
+  await writeFile(path.join(root,'agent.CMD'),'@SET "dp0=%~dp0"\r\n@"node" "%dp0%/generic.mjs" %*\r\n')
+  const scanEnv={...env,PATH:root,Path:root,PATHEXT:'.CMD'}
+  for(const [body,expected] of [
+    ["console.log('Unrelated Agent')",false],
+    ["console.log('Authenticate with Cursor')",true],
+    ["console.error('Authenticate with Cursor')",true],
+    ["console.log('Authenticate with Cursor');process.exitCode=1",false],
+  ]){
+    await writeFile(entry,`if(process.argv.slice(2).join(' ')!=='login --help')throw new Error('unexpected probe');${body}`)
+    assert.equal((await runWindowsHelper('__discover-agents',{},scanEnv)).agents.includes('cursor'),expected)
+  }
+  await writeFile(entry,"console.log('Unrelated Agent')")
+  await assert.rejects(runWindowsHelper('__prepare-agent',{agent_type:'cursor'},scanEnv),/未检测到 cursor/)
+  // A dedicated cursor-agent name remains trusted, just as on macOS.
+  await writeFile(path.join(root,'cursor-agent.CMD'),'@SET "dp0=%~dp0"\r\n@"node" "%dp0%/generic.mjs" %*\r\n')
+  assert.equal((await runWindowsHelper('__discover-agents',{},scanEnv)).agents.includes('cursor'),true)
 })

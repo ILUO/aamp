@@ -630,7 +630,7 @@ export async function runWindowsHelper(
     ),
   }
   if (action === '__discover-agents') {
-    return {agents: await discoverWindowsAgents(env, () => nativeExecutable('codex', envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'), env))}
+    return {agents: await discoverWindowsAgents(env, () => nativeExecutable('codex', envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'), env), run)}
   }
   if (action === '__register-binding') {
     if (envValue(extraEnv, 'AAMP_TASK_NON_INTERACTIVE') === 'true')
