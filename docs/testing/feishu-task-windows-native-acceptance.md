@@ -14,6 +14,8 @@
 
 ## 验证记录
 
+最新范围：用户改为验证 Codex 以外的 Agent，允许改验 AIME，覆盖前轮“先通过 Coco”的执行顺序。AIME 租户资格和原生扫描通过，固定适配器安装/认证/doctor 通过；真实 ACP 返回正确391，但严格仅整数断言失败，远程计算后 EOF 15秒未退出。仅握手后 EOF 正常退出。产品代码未改，飞书任务闭环及原三包失败仍未关闭，详见末节。
+
 本轮 Win11/Coco 接手复验（2026-09-10，代码 a8b68b9）：真实普通用户 Session 1 的 CIM 查询通过；npm 含空格 Node 路径失败及两项 ACP CIM 夹具失败均已重新复现。Coco 0.121.0 只读启动探针耗时 11.620s、8.605s，第三次 145.621s 无输出后仅终止已验证身份的测试进程。P1/P2 未关闭；详见末节。先验 Coco，通过后再验其他 Agent，正常流程必须扫描可用 Agent 并由用户选择。
 
 最新 2026-09-10 普通用户修复：ACL 重复保护与不安全权限修正已在 Win10 标准用户通过，三包实际打包和安装 help 通过；该账号的 SSH 会话拒绝本机 CIM/WMI 查询，TaskAgent/ACP 普通用户全量及生命周期尚未转绿。详见末节；以下历史记录不覆盖当前提交。
@@ -439,3 +441,25 @@ macOS 初次并行跑三包时，原有 POSIX TERM-resistant fixture 用例超�
 下一步：对 Coco 慢启动采集独立终端与受控子进程的对照，定位等待环节；不得仅增大超时后宣称修复。修正 npm 路径边界及 ACP 只读 CIM 夹具后重跑三包与 Node22/24。Coco 验证通过前不切换其他 Agent；安装必须保留扫描后用户选择流程。未升级 Coco，未合并 PR，未 npm 发布。
 
 本地原始证据：C:\codex\aamp-evidence-20260910 下 task-shim-repro.log、acp-cim-repro.log、coco-timing.jsonl。上表完整列出可跨主机回读的最小复现、错误及数值；原始本地文件未上传，不能视为远端可访问附件。本节提交 SHA 与被测代码 SHA 分开，以 git log 查询本节提交。
+
+
+## 2026-09-10 Windows 11 / AIME：用户改验与认证后 ACP 预检
+
+- 执行器 Codex；被测 AIME 为 remote Agent，用户已明确切换目标。正常产品流程保留“扫描后由用户选择”，未修改绑定类型。Coco 的既有失败保留。
+- 产品代码 a8b68b9860278bd7eb884cf0f5c5fbd33d8e8a25，上一轮验收记录提交 b048188；本轮仍未修改产品源码。
+- 真实用户身份查询确认租户符合 AIME 条件；将服务端返回的实际 tenant_key 用于产品 runWindowsHelper('__discover-agents')，输出 codex、coco、aime。没有伪造租户门禁；此为能力预检，不代替未来新 Bot 的身份检查。
+- 独立预检目录 C:\codex\aamp-aime-preflight；安装命令 npm install --prefix C:\codex\aamp-aime-preflight --registry https://bnpm.byted.org @tengchengwei/aime-acp@0.1.1-dev.1 --fetch-timeout=20000 --fetch-retries=0 --no-audit --no-fund。安装 exit 0、347 packages，入口 help 成功。不是三包重新 pack/产品安装已通过。
+- 初次 auth status/doctor 为 unauthenticated/AUTH_REQUIRED；用户完成页面授权后，通过包原生 auth login --complete --resume-token-stdin --site cn --json 完成登录，exit 0。恢复凭据仅本机保存，未写入日志/Git/飞书；页面成功与本机认证完成分别验证。
+- 最终 auth status：authenticated；doctor：compatible=true、authenticated=true、aimeReachable=true，均 exit 0。固定 aime-acp 0.1.1-dev.1、bytedcli 0.123.0、ACP SDK 0.28.1；Node 24.19.0。
+
+| 原生 ACP 操作 | 实测证据 | 判定 |
+|---|---|---|
+| initialize | 2026-09-10 15:44:36 CST，1594ms，protocolVersion=1、agentInfo aime-acp 0.1.1-dev.1 | PASS |
+| session/new | 15:44:37，session 8cfcf1cc-e505-4493-8341-3ad6371aa0b3 | PASS |
+| session/prompt：17×23，仅整数 | 15:44:47 返回 end_turn；文本“收到，我来计算17乘以23的结果。17 × 23 = 391” | 数值正确；严格仅整数断言 FAIL，不改测试冒充全通过 |
+| 完成计算后 stdin EOF | 15秒未退出，stderr 0字节；仅通过持有的测试子进程句柄终止，SIGTERM | 未满足本次15秒退出窗口；根因未定，不宣称永久挂死或已经修复 |
+| 仅 initialize 后 EOF 对照 | 15:46:12，握手1956ms，随后约74ms exit 0，stderr 0字节 | PASS；退出延迟与远程任务路径相关，尚未进一步定位 |
+
+本次没有向 AIME 提供私有文档、凭据、本地文件或 MCP；只发送无敏感数据的计算请求。AIME 的远程任务会话不是飞书 Task，本次没有 Task ID、ACK、飞书服务端完成证据。没有验证运行中取消或附件；按现有设计 AIME 不支持本地文件/附件交付，不能算这部分 Windows 本地能力通过。
+
+证据目录 C:\codex\aamp-evidence-20260910：aime-auth-status.json、aime-doctor.json、aime-acp-probe.jsonl、aime-acp-initialize-only.jsonl，及对应探针脚本。上述表格包含供跨主机回读的完整最小结果；原始文件仅本地保留。下一步：定位远程任务后的退出收尾、修复/复验此前 P2 npm 路径和 CIM 夹具问题，再进入正常产品扫描选择及专用 Bot 业务。未合并 PR、未发布 npm 包。
