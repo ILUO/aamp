@@ -8,15 +8,15 @@
 
 - 仓库：ILUO/aamp；分支：`feat/feishu-task-windows-native`。
 - 固定基线：`7c4b7ff50b2fc766f9076dcbc7d87ce910ca8b76`，来自 `fix/feishu-auth-scope-negotiation`。
-- 开发主机：macOS 26.5.2 arm64、Node v22.22.2。实测主机：Windows 10 企业版 22H2 / 10.0.19045 x64、Administrator、PowerShell 5.1.19041.6456、Node 22.22.2 / 24.20.0、Codex 0.153.4；存在活动 console 登录，无 RDP。Windows 11 尚无实测记录。
+- 开发主机：macOS 26.5.2 arm64、Node v22.22.2。实测主机：Windows 10 企业版 22H2 / 10.0.19045 x64、Administrator、PowerShell 5.1.19041.6456、Node 22.22.2 / 24.20.0、Codex 0.153.4；存在活动 console 登录，无 RDP。该条描述历史Win10基线；Win11普通用户实测见最新结论及末尾记录。
 - Windows 目标：Windows 11 x64 普通用户、PowerShell 5.1、Node 22/24。
 - 已注册专用新 Bot、完成用户 OAuth 与真实任务补测；已推送开发分支并创建 Draft PR https://github.com/ILUO/aamp/pull/1，未合并或 npm 发布。
 
 ## 验证记录
 
-最新结论：用户明确允许 AIME 回复附带说明、允许任务结束后常驻；此前严格格式/EOF退出判定撤销，AIME 认证、连通性、ACP 会话和391计算通过。Windows npm 路径/CIM夹具修正后三包 Node22/24 全量、类型与 pack 均通过；真实飞书任务闭环仍待下一阶段。详细新证据见末节。
+最新结论（2026-09-10 Win11/AIME）：3930c5a代码的Node22/24三包测试/类型/打包通过；专用新Bot、正常扫描选择、普通任务、缺输入经重启与Owner补充、真实非Owner拒绝、父子任务、单次及两实例重复提醒已取得真实证据。AIME原生运行中取消在Node22/24通过；后台就绪后启动终端退出，随后真实任务完成。远程附件按既有产品边界在派发前拒绝，本地CSV交付不支持，不冒充通过。无效更新包在stop前拒绝；有效更新、故障恢复/耗尽、注销自启/禁用、最终卸载及完整交付仍在执行。锁屏一次结果与锁屏时间对不上，复核待完成。详见末节逐项证据。
 
-最新范围：用户改为验证 Codex 以外的 Agent，允许改验 AIME，覆盖前轮“先通过 Coco”的执行顺序。AIME 租户资格和原生扫描通过，固定适配器安装/认证/doctor 通过；真实 ACP 返回正确391，但严格仅整数断言失败，远程计算后 EOF 15秒未退出。仅握手后 EOF 正常退出。产品代码未改，飞书任务闭环及原三包失败仍未关闭，详见末节。
+历史范围调整（后续实测已更新结论）：用户改为验证 Codex 以外的 Agent，允许改验 AIME，覆盖前轮“先通过 Coco”的执行顺序。AIME 租户资格和原生扫描通过，固定适配器安装/认证/doctor 通过；真实 ACP 返回正确391，但严格仅整数断言失败，远程计算后 EOF 15秒未退出。仅握手后 EOF 正常退出。产品代码未改，飞书任务闭环及原三包失败仍未关闭，详见末节。
 
 本轮 Win11/Coco 接手复验（2026-09-10，代码 a8b68b9）：真实普通用户 Session 1 的 CIM 查询通过；npm 含空格 Node 路径失败及两项 ACP CIM 夹具失败均已重新复现。Coco 0.121.0 只读启动探针耗时 11.620s、8.605s，第三次 145.621s 无输出后仅终止已验证身份的测试进程。P1/P2 未关闭；详见末节。先验 Coco，通过后再验其他 Agent，正常流程必须扫描可用 Agent 并由用户选择。
 
@@ -524,3 +524,30 @@ Node24=24.19.0/npm11.17.0；Node22=22.22.2/npm10.9.7（官方便携 zip，SHA256
 本轮证明除Codex外的AIME可经真实AAMP/飞书链路处理普通任务及Owner后续补充。Owner补充用例不是B02完整通过：尚未覆盖缺输入need_help、中间重启和非Owner拒绝；取消、父子/提醒重复完整矩阵、桌面后台/锁屏/注销恢复仍待验证。AIME远程本地文件/附件能力按既有边界记录，不计为Windows本地附件通过。未合并或npm发布；当前提交三平台CI仍未取得结论。
 
 本地证据：C:/codex/aamp-evidence-20260910/aime-business-state.json、aime-basic-task-final.json、aime-followup-task-final.json；原始Bridge日志位于当前用户.aamp/logs/runs/1789028318172-13600。提取证据不包含认证token或内部思考步骤；原始文件未公开上传。前台运行保留供后续验收。
+
+
+## 2026-09-10 Win11 / AIME：完整矩阵推进检查点一
+
+用户已明确持续完成全部测试。保留交接A01–D02及交付要求的完整范围，AIME远程本地文件限制不替换为Codex结果。当前产品代码3930c5a，记录基线44baed5；工作树源码无新增修改。以下为真实Win11普通用户Session1，时间UTC。
+
+| 用例 | 本轮结果及精确证据 | 当前判定 |
+|---|---|---|
+| A02运行中取消 | Node24会话114ee9f2-b793-4ca7-8805-c12d04f6b3d1；09:27:55.179收到agent_message_chunk，55.180发session/cancel，55.238 cancelled，exit0/stderr0。Node22会话b2fcfb06-12e7-4484-b743-38eea2e0491c；09:28:26.350收到输出，26.352取消，26.453 cancelled，exit0/stderr0。原生shell:false独立适配器，无本地工具/MCP | 原生取消PASS；本地文件能力见B05限制 |
+| B02 | Task56af83c7-46f5-49bf-9b16-6f3f6f09eab4，09:12:22 need_help，服务端todo/3。停止前台并正常后台重启后，第二账号真实评论事件ce147dd9955b929d2b3cc23025804c30及fd2816a44359ada0c93dc2bcfc9c466f均comment_author_not_app_owner，用户确认收到拒绝。Owner评论7683835697697934293提供N=11，事件db56a028c0240b64a6d50d7c545f37e0，ACK与结果回写成功，37×11=407；服务端done/4，completed_at=1789032637000 | PASS |
+| B03 | 父528615d4-7bf8-479a-aace-dfce85abe09d；子A8474cb3c-db1b-4c8b-a284-29437a6e9598，子B52017bec-0d7d-40e3-a7fa-e71d22fa75a3。父子准备后分配Bot，assignment事件按既有allowlist忽略；Owner评论7683835701158235097触发，事件6fa47b80c538481fd11eced1ee7df3c6，结果A=84/B=104/合计188。三个Task服务端均done/4，完成时间1789032543000/1789032497000/1789032498000 | PASS |
+| B04单次 | 4fabed85-b8a9-428c-ad1e-1b2096016739，创建因已配置reminder延迟到真实task_reminder_fire，结果29×7=203，服务端done/4/completed_at1789032728000 | PASS |
+| B04重复 | 第一8ec86003-d83a-4d42-bf55-c177d8fb3374，自动生成第二0887fdbd-506b-4de9-b2a5-e2662f2435b7。第二继承每日repeat及reminder，due从1789119060000提前为1789033037000；两次均真实task_reminder_fire、ACK/结果217/服务端done。第三753d02ae-f91f-4a6d-a4c5-295091d8bc81已清除repeat_rule与提醒并由验收执行器关闭；回读done/reminders=null/repeat_rule空/next_task_guid空。非24小时稳定性测试 | PASS |
+| B05远程附件 | 8c4b6e16-b3f4-435b-b0b8-85217ffa8417；106字节UTF8 CRLF CSV、唯一marker w11-aime-b05-20260910-f43a，值17/23/9，中文空格目录和文件名；真实输入附件GUID490ec5d3-6d50-4aad-95e2-b450c7b338d5。Owner评论7683837113363664084触发后Bridge在派发前记录remote attachments blocked category=input_attachment count=1，服务端todo/3。没有AIME读取、输出CSV或文件交付 | 远程拒绝边界PASS；原本地CSV闭环UNSUPPORTED，不宣称完成 |
+| B06特殊目录 | 原Node24 tgz实际安装到C:/codex/aamp 特殊 & (验收)/installed，安装exit0，Node直达已装原生入口help exit0；已有原生npm参数/中文/CRLF/stdin/exit测试通过。B05输入真实上传成功 | 安装和输入PASS；远程输出文件不支持 |
+| B07边界 | 已审查src/task/runtime.test.ts真实Windows临时文件truncate到52428799/52428800/52428801字节，受控API断言前两完整内容上传、超限上传次数0；Node24全量日志131–133行分别128.3706/159.9961/53.6951ms均通过，Node22对应全量通过 | 原生NTFS+受控API PASS；未执行真实云大文件传输 |
+| C01 | 前台13600停止后原Coco16916（2026-09-09 22:48:39）存活。无TTY start失败input.setRawMode is not a function，保留run1789031771775-1676；交互菜单选择已存绑定后后台ready PID22792、generation27a2abf7-da07-48ba-82eb-e1578f1a32b4。启动终端旧controller24468已退出，后台继续存活；退出后Owner评论触发的B03完整完成，另后台任务f09588cd-f2fa-45e8-81ab-11dce985e4a6返回533/done | PASS；无TTY失败单独保留 |
+| C02 | 首条731因处理时间早于锁屏未计通过。用户按提示保持锁屏并从手机发送第二条；WTSINFOEX在17:44:34及17:53:50 CST均Session1/flags0=locked。复核事件5781108698c84777e9b9630875741837于09:49:33.081收到，09:51:05.093完成47×19=893；独立服务端回读done/4/completed_at1789033864000。用户确认手机已发送，已提示可解锁 | 锁屏执行PASS；解锁后的下一轮验证待用户恢复桌面 |
+| C06无效更新 | 本机回环registry16736/49193，fixture0.1.1-dev.7缺bootstrap/windows-entry.mjs；正常update exit1明确保留当前版本。拒绝前后PID22792、创建时间、generation及ready未变，仍0.1.1-dev.6；bindings SHA256 1C30F78DB97DA250F88C87859765633B71D49FE7ABCC3A5D917B1BCD07E669C2 | 无效包PASS；有效包尚未执行 |
+
+原生锁屏状态定义依微软文档：https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ns-wtsapi32-wtsinfoex_level1_w 。观察脚本只读取当前session的状态字段，不采集用户名/域名。
+
+CI：API回读run34457377857，head_sha44baed5cc34fdb0f531afda1c77c5b406ac24fcd，Feishu Task native platforms总体completed/success。随后jobs接口再次限流，六job细项待回读；不沿用旧提交结果。链接https://github.com/ILUO/aamp/actions/runs/34457377857 。
+
+当前仍需C02解锁确认、C03/C04实际注销登录、C05原生故障恢复及三次耗尽/等待中stop、C06有效更新和后续业务、C07最终卸载、D01/D02逐项证据归档及多绑定、Node22完整运行补齐、CI作业/计划/PR最终审计。用户已确认能配合锁屏/注销与第二账号，注销前必须先保存并同步检查点，由用户自行退出和恢复登录；不自动注销承载Codex的会话。
+
+证据位于C:/codex/aamp-evidence-20260910：b02-need-help-before-restart.json、aime-cancel-22.jsonl、aime-cancel-24.jsonl、c01-background-readiness.json、matrix-evidence-1789033537804.json、matrix-evidence-1789034059132.json、session-lock-observations.jsonl、update-fixtures/before-invalid.json和after-invalid.json。仅上传本节安全字段，运行日志/原始profile/worker环境/授权链接不入Git。
