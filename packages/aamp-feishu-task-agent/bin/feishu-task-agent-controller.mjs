@@ -1741,6 +1741,7 @@ async function startManagedProcess({
     child.once('error', (error) => { void finish({ code: 1, error }); });
     child.once('close', (code, signal) => { void finish({ code: code ?? 1, signal }); });
   });
+  if (record.windowsSampleReady) await record.windowsSampleReady;
   if (stopRequested) {
     await stopManagedProcess(record);
     throwIfStopping();
@@ -1757,7 +1758,10 @@ function windowsProcessJournalMode(command) {
 async function sampleWindowsProcessTree(record, journal = windowsProcessJournal, operations = {}) {
   const snapshotTree = operations.snapshotTree || snapshotOwnedWindowsTree;
   const identity = await record.windowsIdentity;
-  if (!identity) return;
+  if (!identity) {
+    if (record.exited) return;
+    throw record.windowsIdentityError || new Error(`Cannot verify Windows process ${record.child.pid}; refusing sampling`);
+  }
   await journal?.record([identity]);
   for (const item of await snapshotTree(identity)) record.windowsDescendants.set(item.pid, item);
   await journal?.record(record.windowsDescendants.values());
@@ -1765,7 +1769,10 @@ async function sampleWindowsProcessTree(record, journal = windowsProcessJournal,
 
 function trackWindowsProcess(record) {
   record.windowsDescendants = new Map();
-  record.windowsIdentity = readWindowsProcessIdentity(record.child.pid).catch(() => undefined);
+  record.windowsIdentity = readWindowsProcessIdentity(record.child.pid).catch((error) => {
+    record.windowsIdentityError = error;
+    return undefined;
+  });
   let sampling = false;
   const sample = async () => {
     if (sampling) return;
@@ -1788,7 +1795,8 @@ function trackWindowsProcess(record) {
   record.windowsSampleTimer = setInterval(() => {void sample().catch(handleJournalFailure);}, 1000);
   record.windowsSampleTimer.unref();
   record.child.once('exit', () => clearInterval(record.windowsSampleTimer));
-  void sample().catch(handleJournalFailure);
+  record.windowsSampleReady = sample();
+  void record.windowsSampleReady.catch(handleJournalFailure);
 }
 
 function signalProcess(record, signal) {

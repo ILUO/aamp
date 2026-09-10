@@ -121,3 +121,24 @@ test('Windows foreground stop refuses fallback when the PID identity changes', a
   })
   assert.equal(killed, false)
 })
+
+test('Windows sampling rejects an unverified live process instead of silently skipping it', async () => {
+  const record = { child: { pid: 4321 }, exited: false, windowsIdentity: Promise.resolve(undefined), windowsDescendants: new Map() }
+  await assert.rejects(sampleWindowsProcessTree(record, {
+    record: async () => assert.fail('unverified identity must never enter a journal'),
+  }, {
+    snapshotTree: async () => assert.fail('unverified process must never be traversed'),
+  }), /Cannot verify Windows process 4321/)
+})
+
+test('Windows sampling may ignore an exited process with no identity', async () => {
+  await sampleWindowsProcessTree({ child: { pid: 4321 }, exited: true, windowsIdentity: Promise.resolve(undefined), windowsDescendants: new Map() }, {
+    record: async () => assert.fail('missing identity cannot enter a journal'),
+  })
+})
+
+test('Windows sampling reports the original identity query failure', async () => {
+  const error = new Error('CIM identity query timed out')
+  const record = { child: { pid: 4321 }, exited: false, windowsIdentity: Promise.resolve(undefined), windowsIdentityError: error, windowsDescendants: new Map() }
+  await assert.rejects(sampleWindowsProcessTree(record, { record: async () => assert.fail('unverified identity') }), received => received === error)
+})
