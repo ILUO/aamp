@@ -679,3 +679,26 @@ CI日志计数（每组失败均为0）：
 | ubuntu / 24 | 480/14 | 197/6 | 108/8 |
 
 Win11本地Task Agent为283通过/15跳过，Windows CI为284/14；唯一额外本地跳过是普通用户无创建符号链接权限的可信配对文件用例，CI对应断言实际通过。本轮未开启Developer Mode或修改权限。PR正文及飞书交接摘要revision28均已同步回读，包含正确的源码/CI链接和UNSUPPORTED、USER_SKIPPED边界。
+
+
+## 2026-09-10 npm dev 发布完成
+
+用户明确授权发布 dev。发布源码提交为 `18d267f`，基于验收产品代码 `d06c14a`，只更新三包版本、TaskAgent 精确依赖引用及相应测试期望。发布账号为 `zhengqilin`，通过 npm 官方浏览器 2FA 逐包认证；未合并开发分支。
+
+| 源码包 | 发布目标 | 版本 / 标签 |
+|---|---|---|
+| @zengxingyuan/aamp-acp-bridge | @zhengqilin/aamp-acp-bridge | 0.1.29-dev.1 / dev |
+| @zengxingyuan/aamp-feishu-bridge | @zhengqilin/aamp-feishu-bridge | 0.1.52-dev.6 / dev |
+| @larktask/aamp-feishu-task-agent | @larktask/aamp-feishu-task-agent | 0.1.1-dev.8 / dev |
+
+TaskAgent 的 `latest` 保持 `0.1.0-dev.171`。两个 Bridge 是当前账号下的新包；npm 为新包自动生成的 latest 不属于 TaskAgent 稳定渠道变更。TaskAgent 使用精确版本引用两个 Bridge，AIME ACP 的原有内部 registry 引用保持不变。
+
+发布检查：两个 Bridge TypeScript 构建通过；Bootstrap/defaults 回归 70/70 通过；runtime-package-executable 定向测试此前 12 通过、1 跳过；同步默认值与 git diff 检查通过。三个公开 registry 版本元数据均可读取，实际下载 tgz 的 SHA512 与发布前产物逐一完全相同；从 npm 在隔离目录安装 TaskAgent dev.8 并执行帮助入口成功。本轮没有重跑 Windows 实机业务；实机结论及 UNSUPPORTED、USER_SKIPPED 边界沿用上文，不扩大声明。
+
+| 发布目标 | tgz SHA512 integrity |
+|---|---|
+| ACP Bridge | `sha512-fz2teIKXOIL/7Wz8Icwivby7C8wTAxB0CWxACsq9gqYHmDw7NdV4gTFkj9ZeNZgFdyvVwCKeAHCcyaBv2jBXXw==` |
+| Feishu Bridge | `sha512-iC/BYOEsl5QD6AKL0WKEpDNVjzmnTYI4/FUV2FajSfvcirZmniWeIl9DH4902qAkB7UUeeBoTMlopvPM0kXOSg==` |
+| TaskAgent | `sha512-NbiPsU9Vy1qwFdoah1b81VOcH9XOIZjclMJbDj+4vix9We5/Q2UxvQoN+lE5CdAxsXTBbQoaKuH+501hR8+OWA==` |
+
+Windows 原生安装使用 `npm.cmd install --global @larktask/aamp-feishu-task-agent@0.1.1-dev.8`，再运行 `feishu-task-agent.cmd install`，保持扫描后用户手动选择 Agent。后续启动使用 `feishu-task-agent.cmd start`。
