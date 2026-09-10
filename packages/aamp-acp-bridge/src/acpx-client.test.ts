@@ -686,8 +686,15 @@ for (const tree of [false, true]) {
     const fixture = String.raw`
 $script:reads = 0
 $script:snapshot = [pscustomobject]@{ ProcessId=10384; ParentProcessId=1; CreationDate=[datetime]::Parse('2026-09-08T01:00:00Z'); ExecutablePath='C:\node.exe' }
+if ($env:AAMP_CIM_RACE -like 'image-*') { $script:snapshot.ExecutablePath = '' }
 function Get-CimInstance {
   $script:reads++
+  if ($env:AAMP_CIM_RACE -like 'image-*' -and $script:reads -le 2) { return $script:snapshot }
+  if ($env:AAMP_CIM_RACE -like 'image-*' -and $script:reads -gt 2) {
+    if ($env:AAMP_CIM_RACE -eq 'image-gone') { return $null }
+    if ($env:AAMP_CIM_RACE -eq 'image-reused') { return [pscustomobject]@{ ProcessId=10384; CreationDate=$script:snapshot.CreationDate.AddSeconds(1); ExecutablePath='C:\replacement.exe' } }
+    if ($env:AAMP_CIM_RACE -eq 'image-recovered') { $script:snapshot.ExecutablePath = 'C:\node.exe' }
+  }
   if ($script:reads -eq 1) { return $script:snapshot }
   if ($env:AAMP_CIM_RACE -eq 'reread-failure') { throw 'CIM reread denied' }
   if ($env:AAMP_CIM_RACE -like '*gone') { return $null }
@@ -706,12 +713,14 @@ function Invoke-CimMethod {
       env: { ...process.env, AAMP_CIM_RACE: scenario, AAMP_ACP_WINDOWS_INPUT_BASE64: Buffer.from(JSON.stringify({ pid: 10384 })).toString('base64') },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    for (const scenario of ['error-gone', 'error-reused', 'success-gone', 'success-reused']) {
+    for (const scenario of ['error-gone', 'error-reused', 'success-gone', 'success-reused', 'image-gone', 'image-reused']) {
       if (tree) assert.deepEqual(JSON.parse(run(scenario)), { processes: [] })
       else assert.throws(() => run(scenario), (error: unknown) => (error as { status: number }).status === 3)
     }
     const live = JSON.parse(run('success-live'))
     assert.equal((tree ? live.processes[0] : live).pid, 10384)
+    const recovered = JSON.parse(run('image-recovered'))
+    assert.equal((tree ? recovered.processes[0] : recovered).executablePath, 'C:\\node.exe')
     for (const scenario of ['error-live', 'return-code-live', 'reread-failure']) assert.throws(() => run(scenario))
   })
 }
@@ -760,7 +769,7 @@ test('Windows prompt rejects when the child closes stdin before accepting the pa
 })
 
 
-test('Windows failed stdin delivery terminates the exact child that remains running', { timeout: 30_000 }, async (t) => {
+test('Windows failed stdin delivery terminates the exact child that remains running', { timeout: 60_000 }, async (t) => {
   const { cwd } = createFakeAcpx('success')
   const entry = join(cwd, 'hold-after-input-close.mjs')
   const pidFile = join(cwd, 'held.pid')
@@ -792,8 +801,16 @@ test('Windows failed stdin delivery terminates the exact child that remains runn
     }
     await assert.rejects(execution, /EPIPE|pipe|stream|ECONNRESET|EOF/i)
     const pid = Number(readFileSync(pidFile, 'utf8'))
+    // Cleanup drains an in-flight CIM snapshot (10s), verifies identity, and
+    // runs bounded taskkill. Wait for the actual owned close lifecycle first.
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.all(ownedClosed),
+        new Promise((_, reject) => { cleanupTimer = setTimeout(() => reject(new Error('owned EPIPE cleanup did not close within 45s')), 45_000) }),
+      ])
+    } finally { if (cleanupTimer) clearTimeout(cleanupTimer) }
     await waitForProcessExit(pid)
-    await Promise.all(ownedClosed)
     assert.equal(client['activeProcesses'].size, 0)
   } finally {
     await client.stop()
@@ -806,5 +823,45 @@ for (const platform of ['darwin', 'linux'] as const) {
     assert.equal(env.PATH, '/workspace/node_modules/.bin:/usr/bin')
     assert.equal(env.Path, '/custom')
     assert.equal(env.path, '/other')
+  })
+}
+
+
+test('Windows cleanup reports unavailable identity without killing or exposing query output', () => {
+  const expected: WindowsProcessIdentity = { pid: 4312, creationDate: '2026-09-08T01:00:00Z', executablePath: 'C:\node.exe', ownerSid: 'S-1-5-21-1000' }
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (message: string) => { warnings.push(message) }
+  try {
+    const outcome = terminateWindowsProcessTree(expected, () => ({ status: 'unknown', reason: 'query-timeout' }), (() => { assert.fail('unknown identity must not be killed') }) as never)
+    assert.equal(outcome, 'unconfirmed')
+    assert.deepEqual(warnings, ['Windows cleanup unconfirmed for PID 4312: query-timeout'])
+  } finally { console.warn = original }
+})
+
+for (const tree of [false, true]) {
+  test(`native ACP ${tree ? 'tree' : 'identity'} recovers a live image through a pinned native handle`, { skip: process.platform !== 'win32' }, async () => {
+    const { execFileSync } = await import('node:child_process')
+    const { WINDOWS_PROCESS_IDENTITY_SCRIPT, WINDOWS_PROCESS_TREE_SCRIPT } = await import('./acpx-client.js')
+    const fixture = String.raw`
+$ErrorActionPreference = 'Stop'
+$script:targetPid = $PID
+$script:actual = CimCmdlets\Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $PID)
+$script:expectedImage = $script:actual.ExecutablePath
+$script:reads = 0
+$env:AAMP_ACP_WINDOWS_INPUT_BASE64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(('{"pid":' + $PID + '}')))
+function Get-CimInstance {
+  $script:reads++
+  $value = CimCmdlets\Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $script:targetPid)
+  $value.ExecutablePath = ''
+  return $value
+}
+`
+    const result = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(fixture + (tree ? WINDOWS_PROCESS_TREE_SCRIPT : WINDOWS_PROCESS_IDENTITY_SCRIPT) + "\nif ($script:reads -lt 8) { throw 'bounded image rereads were skipped' }", 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 15_000 })
+    const parsed = JSON.parse(result)
+    const identity = tree ? parsed.processes[0] : parsed
+    assert.ok(identity.pid > 0)
+    assert.match(identity.executablePath, /powershell\.exe$/i)
+    assert.match(identity.ownerSid, /^S-1-/)
   })
 }

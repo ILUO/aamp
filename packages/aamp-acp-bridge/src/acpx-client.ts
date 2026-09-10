@@ -38,6 +38,43 @@ function Read-VerifiedSnapshotOwner($snapshot) {
   if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
   return $owner
 }
+function Read-VerifiedSnapshot($snapshot) {
+  $owner = Read-VerifiedSnapshotOwner $snapshot
+  if ($null -eq $owner) { return $null }
+  # CIM may retain incomplete metadata briefly while a process starts or exits.
+  # Retry only this missing field, and recheck identity on every bounded attempt.
+  for ($attempt = 0; [string]::IsNullOrWhiteSpace($snapshot.ExecutablePath) -and $attempt -lt 5; $attempt++) {
+    if ($attempt -gt 0) { Start-Sleep -Milliseconds 100 }
+    $current = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$snapshot.ProcessId)
+    if ($null -eq $current) { return $null }
+    if ($null -eq $current.CreationDate -or $null -eq $snapshot.CreationDate) {
+      throw 'unable to verify process creation identity'
+    }
+    if ([int]$current.ProcessId -ne [int]$snapshot.ProcessId -or
+      $current.CreationDate.ToUniversalTime().Ticks -ne $snapshot.CreationDate.ToUniversalTime().Ticks) { return $null }
+    $snapshot = $current
+  }
+  $executablePath = [string]$snapshot.ExecutablePath
+  if ([string]::IsNullOrWhiteSpace($executablePath)) {
+    $native = $null
+    try {
+      try { $native = [System.Diagnostics.Process]::GetProcessById([int]$snapshot.ProcessId) }
+      catch [System.ArgumentException] { return $null }
+      # Pin a native handle while comparing creation identity and reading its image.
+      $null = $native.Handle
+      if ($native.HasExited) { return $null }
+      $nativeTicks = $native.StartTime.ToUniversalTime().Ticks
+      # CIM timestamps have microsecond precision; native FILETIME has 100ns precision.
+      if (($nativeTicks - ($nativeTicks % 10)) -ne $snapshot.CreationDate.ToUniversalTime().Ticks) { return $null }
+      $executablePath = [string]$native.MainModule.FileName
+      if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+      if ([string]::IsNullOrWhiteSpace($executablePath)) {
+        throw 'unable to read process executable path for a verified live process'
+      }
+    } finally { if ($null -ne $native) { $native.Dispose() } }
+  }
+  return @{ process = $snapshot; owner = $owner; executablePath = $executablePath }
+}
 `
 
 export const WINDOWS_PROCESS_IDENTITY_SCRIPT = WINDOWS_SNAPSHOT_OWNER + String.raw`
@@ -46,12 +83,14 @@ $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AAMP_
 $processId = [uint32]$config.pid
 $process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId"
 if ($null -eq $process) { exit 3 }
-$owner = Read-VerifiedSnapshotOwner $process
-if ($null -eq $owner) { exit 3 }
+$verified = Read-VerifiedSnapshot $process
+if ($null -eq $verified) { exit 3 }
+$process = $verified.process
+$owner = $verified.owner
 [pscustomobject]@{
   pid = [uint32]$process.ProcessId
   creationDate = $process.CreationDate.ToString('o')
-  executablePath = [string]$process.ExecutablePath
+  executablePath = [string]$verified.executablePath
   ownerSid = [string]$owner.Sid
 } | ConvertTo-Json -Compress
 `
@@ -78,13 +117,15 @@ do {
 $identities = @()
 foreach ($process in $all) {
   if (-not $selected.Contains([uint32]$process.ProcessId)) { continue }
-  $owner = Read-VerifiedSnapshotOwner $process
-  if ($null -eq $owner) { continue }
+  $verified = Read-VerifiedSnapshot $process
+  if ($null -eq $verified) { continue }
+  $process = $verified.process
+  $owner = $verified.owner
   $identities += [pscustomobject]@{
     pid = [uint32]$process.ProcessId
     parentPid = [uint32]$process.ParentProcessId
     creationDate = $process.CreationDate.ToString('o')
-    executablePath = [string]$process.ExecutablePath
+    executablePath = [string]$verified.executablePath
     ownerSid = [string]$owner.Sid
   }
 }
@@ -107,22 +148,23 @@ function windowsProcessEnvironment(pid: number): NodeJS.ProcessEnv {
 type WindowsIdentityRead =
   | { status: 'found'; identity: WindowsProcessIdentity }
   | { status: 'gone' }
-  | { status: 'unknown' }
+  | { status: 'unknown'; reason?: 'incomplete-metadata' | 'query-timeout' | 'query-failed' }
 
 function inspectWindowsProcessIdentity(pid: number): WindowsIdentityRead {
   try {
     const value = JSON.parse(execFileSync('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_IDENTITY_SCRIPT,
-    ], { encoding: 'utf8', windowsHide: true, timeout: WINDOWS_CIM_TIMEOUT_MS, maxBuffer: 1024 * 1024, env: windowsProcessEnvironment(pid) })) as Partial<WindowsProcessIdentity>
-    if (value.pid !== pid || !value.creationDate || !value.executablePath || !value.ownerSid) return { status: 'unknown' }
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: WINDOWS_CIM_TIMEOUT_MS, maxBuffer: 1024 * 1024, env: windowsProcessEnvironment(pid) })) as Partial<WindowsProcessIdentity>
+    if (value.pid !== pid || !value.creationDate || !value.executablePath || !value.ownerSid) return { status: 'unknown', reason: 'incomplete-metadata' }
     return { status: 'found', identity: value as WindowsProcessIdentity }
   } catch (error) {
-    return (error as { status?: number }).status === 3 ? { status: 'gone' } : { status: 'unknown' }
+    return (error as { status?: number }).status === 3 ? { status: 'gone' } : { status: 'unknown', reason: (error as { code?: string }).code === 'ETIMEDOUT' ? 'query-timeout' : 'query-failed' }
   }
 }
 
 export function readWindowsProcessIdentity(pid: number): WindowsProcessIdentity | undefined {
   const result = inspectWindowsProcessIdentity(pid)
+  if (result.status === 'unknown') console.warn(`Windows process ownership unconfirmed for PID ${pid}: ${result.reason ?? 'identity-unavailable'}`)
   return result.status === 'found' ? result.identity : undefined
 }
 
@@ -273,7 +315,10 @@ export function terminateWindowsProcessTree(
 ): WindowsTerminationOutcome {
   const before = inspectIdentity(expected.pid)
   if (before.status === 'gone') return 'gone'
-  if (before.status !== 'found') return 'unconfirmed'
+  if (before.status !== 'found') {
+    console.warn(`Windows cleanup unconfirmed for PID ${expected.pid}: ${before.reason ?? 'identity-unavailable'}`)
+    return 'unconfirmed'
+  }
   if (!sameWindowsProcessIdentity(expected, before.identity)) return 'identity-changed'
   try {
     taskkill('taskkill.exe', ['/pid', String(expected.pid), '/t', '/f'], {

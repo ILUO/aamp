@@ -82,6 +82,15 @@ test('discovers installed native Agents in stable order without a Codex allowlis
     '__discover-agents',
     {},
     {
+      // runWindowsHelper merges the host environment; override every discovery
+      // input, including differently-cased Windows PATH and Agent variables.
+      ...Object.fromEntries(Object.keys(process.env)
+        .filter(key => /^(path|.*(?:aamp_.*_cli_bin|aamp_aime_acp_bin|trae_cli_bin|traecode_cli_bin))$/i.test(key))
+        .map(key => [key, ''])),
+      PATH: '', AAMP_TASK_USER_TENANT_KEY: '',
+      AAMP_COCO_CLI_BIN: '', AAMP_TRAEX_CLI_BIN: '', TRAE_CLI_BIN: '',
+      AAMP_TRAECODE_CLI_BIN: '', TRAECODE_CLI_BIN: '',
+      AAMP_WORKBUDDY_CLI_BIN: '', AAMP_WORKBUDDY_AI_CLI_BIN: '', AAMP_AIME_ACP_BIN: '',
       AAMP_CODEX_CLI_BIN: fakeCommand(root, 'codex'),
       AAMP_CURSOR_CLI_BIN: fakeCommand(root, 'cursor-agent'),
       AAMP_TRAE_CLI_BIN: path.join(root, 'missing'),

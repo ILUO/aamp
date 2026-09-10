@@ -15,6 +15,9 @@ test('writePrivateJsonAtomic writes and replaces private files', async () => {
     await writePrivateJsonAtomic(target, { app_secret: 'SECOND_SENTINEL' })
     await assertPrivateFile(target)
     assert.deepEqual(JSON.parse(await readFile(target, 'utf8')), { app_secret: 'SECOND_SENTINEL' })
+    await writePrivateJsonAtomic(target, { app_secret: 'THIRD_SENTINEL' })
+    await assertPrivateFile(target)
+    assert.deepEqual(JSON.parse(await readFile(target, 'utf8')), { app_secret: 'THIRD_SENTINEL' })
     assert.deepEqual((await readdir(dirname(target))).sort(), ['config.json'])
   } finally {
     await rm(root, { recursive: true, force: true })

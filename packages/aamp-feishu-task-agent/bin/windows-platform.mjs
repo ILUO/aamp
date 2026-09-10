@@ -86,39 +86,44 @@ const POWERSHELL_SCRIPTS = Object.freeze({
 $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $systemSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
 $administratorsSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
-$acl = Get-Acl -LiteralPath $config.path
-$acl.SetAccessRuleProtection($true, $false)
-$acl.SetOwner($currentSid)
-foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
+$allowedSids = @($currentSid.Value, $systemSid.Value, $administratorsSid.Value)
 $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
 $propagation = [System.Security.AccessControl.PropagationFlags]::None
 $allow = [System.Security.AccessControl.AccessControlType]::Allow
-foreach ($sid in @($currentSid, $systemSid, $administratorsSid)) {
-  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    $sid, [System.Security.AccessControl.FileSystemRights]::FullControl,
-    $inheritance, $propagation, $allow
-  )
-  [void]$acl.AddAccessRule($rule)
-}
-Set-Acl -LiteralPath $config.path -AclObject $acl
-$verified = Get-Acl -LiteralPath $config.path
-if (-not $verified.AreAccessRulesProtected) { throw 'private directory still inherits access rules' }
-$verifiedOwner = $verified.Owner
-if ($verifiedOwner -ne $currentSid.Value -and $verifiedOwner -ne $currentSid.Translate([System.Security.Principal.NTAccount]).Value) {
-  throw ('private directory owner is not the current user: ' + $verifiedOwner)
-}
-$allowedSids = @($currentSid.Value, $systemSid.Value, $administratorsSid.Value)
-$hasCurrentUserFullControl = $false
-foreach ($rule in $verified.Access) {
-  $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-  if ($rule.AccessControlType -ne $allow -or $allowedSids -notcontains $sid) {
-    throw ('private directory contains an unexpected access rule for ' + $sid)
+$fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
+$sections = [System.Security.AccessControl.AccessControlSections]'Access, Owner'
+$directory = New-Object System.IO.DirectoryInfo($config.path)
+function Test-PrivateDirectoryAcl($acl) {
+  if (-not $acl.AreAccessRulesProtected) { return $false }
+  if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $currentSid.Value) { return $false }
+  $hasCurrentUserFullControl = $false
+  foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+    $sid = $rule.IdentityReference.Value
+    if ($rule.AccessControlType -ne $allow -or $allowedSids -notcontains $sid -or $rule.IsInherited) { return $false }
+    # InheritOnly does not grant access to this directory; NoPropagate cannot
+    # protect nested private files. Require effective, propagating FullControl.
+    if ($sid -eq $currentSid.Value -and ($rule.FileSystemRights -band $fullControl) -eq $fullControl -and
+      $rule.InheritanceFlags -eq $inheritance -and $rule.PropagationFlags -eq $propagation) {
+      $hasCurrentUserFullControl = $true
+    }
   }
-  if ($sid -eq $currentSid.Value -and (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl)) {
-    $hasCurrentUserFullControl = $true
-  }
+  return $hasCurrentUserFullControl
 }
-if (-not $hasCurrentUserFullControl) { throw 'private directory lacks current user FullControl' }
+# Read only owner and DACL: standard users must never need SACL privileges.
+$acl = $directory.GetAccessControl($sections)
+if (-not (Test-PrivateDirectoryAcl $acl)) {
+  # A fresh descriptor tracks only the sections changed below. Do not persist
+  # an unchanged owner or an audit section through the PowerShell ACL provider.
+  $replacement = New-Object System.Security.AccessControl.DirectorySecurity
+  $replacement.SetAccessRuleProtection($true, $false)
+  foreach ($sid in @($currentSid, $systemSid, $administratorsSid)) {
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $fullControl, $inheritance, $propagation, $allow)
+    [void]$replacement.AddAccessRule($rule)
+  }
+  if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $currentSid.Value) { $replacement.SetOwner($currentSid) }
+  $directory.SetAccessControl($replacement)
+  if (-not (Test-PrivateDirectoryAcl ($directory.GetAccessControl($sections)))) { throw 'private directory ACL verification failed' }
+}
 @{ path = $config.path; ownerSid = $currentSid.Value } | ConvertTo-Json -Compress
 `,
   'read-process-identity': POWERSHELL_PREAMBLE + POWERSHELL_SNAPSHOT_OWNER + String.raw`

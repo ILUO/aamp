@@ -14,6 +14,8 @@
 
 ## 验证记录
 
+最新 2026-09-10 普通用户修复：ACL 重复保护与不安全权限修正已在 Win10 标准用户通过，三包实际打包和安装 help 通过；该账号的 SSH 会话拒绝本机 CIM/WMI 查询，TaskAgent/ACP 普通用户全量及生命周期尚未转绿。详见末节；以下历史记录不覆盖当前提交。
+
 本轮 2026-09-09 范围修正：Node 24 本机 TaskAgent 全量 477 通过/10 跳过，Win10 原生 278 通过/14 跳过；Agent 扫描和手动选择使用测试 CLI 验证，真实 Win11/Coco 业务仍待验收。新结果详见末节。以下表格保留 2026-09-08 业务补测证据，不将旧提交成功等同于本轮代码验收。真实桌面证据来自 Windows 10 Enterprise 22H2 Administrator；CI 的 Windows runner 是 Windows Server 2025，不是 Windows 11。Node 24 已完成三包原生测试及更新后真实后台任务闭环。历史失败保留在下方，不将已被后续证据覆盖的旧状态作为当前结论。
 
 | 验证层 | 当前状态 | 说明 |
@@ -374,3 +376,39 @@ Windows 目录 ACL 初始化原来占用了锁等待预算；实机约 3 秒初�
 在前述范围修正之后，仅调整 Windows 发现规则以匹配现有 macOS：Trae 系列按 `traex > coco > traecli` 只展示第一个检测到的类型；通用 `agent` 命令执行 `login --help`，仅在退出成功且 stdout/stderr 含 `Authenticate with Cursor` 时作为 Cursor 候选。准备阶段使用同一身份检查，探针限时 10 秒；专用 `cursor-agent` 名称保持原有信任规则。扫描后的手动选择、所选 Agent 身份及 Windows 代理环境传递不变，macOS Bash 实现未修改。
 
 验证：macOS Node 24.19.0 执行 TaskAgent 平台全量 489 项，479 通过、10 跳过、0 失败；Agent 选择与 Windows helper 定向 23 项全部通过。Win10 Enterprise 22H2（build 19045）、Node 24.20.0 在既有隔离测试副本运行同样定向测试，23 项全部通过。覆盖 Trae 三档优先级回退、非 Cursor 拒绝、stdout/stderr 识别、非零退出拒绝、准备阶段检查，以及手选 Coco 后 fixture 子进程执行与 HTTPS_PROXY 保留。Spec/Standards 审查均无发现，JS 语法检查与 diff 检查通过。本轮没有执行真实模型或飞书业务调用，不能替代 Win11/Coco 完整业务验收；上节 CI 结果属于原代码提交，不作为本次提交的 CI 结果。
+
+
+## 2026-09-10 普通用户权限修复与验证边界
+
+基于 `2aeb4a4` 修复，Windows Agent 手动选择、Trae 系列菜单优先级及代理传递保留，POSIX 产品逻辑未改。Node 24.20.0（npm 11.19.0）使用官方 Windows zip 和官方 SHA256 校验安装至标准用户 `%LOCALAPPDATA%/Programs/nodejs/node-v24.20.0-win-x64`，仅修改用户 PATH；新 SSH 会话已能发现 Node。测试目录为 `%LOCALAPPDATA%/AAMP-Standard-20260910`，未使用管理员业务安装或实际 Bot。
+
+### 修复内容
+
+- TaskAgent 与独立 Feishu Bridge 同步修复 ACL：只读 Owner/DACL；当前用户所有、断继承、仅允许当前用户/SYSTEM/Administrators、当前用户具备生效且可向下继承的 FullControl 时直接返回。不安全的已保护目录仍修正；使用仅含必要变更的 DirectorySecurity 写入，不重复写 Owner 或通过 Set-Acl 请求无关审计权限。
+- ACP 单进程/进程树快照补齐 ExecutablePath 有界重查与原生句柄读取，保留创建时间/归属验证；查询不可用时只输出 PID 和固定错误类别，不按不可信 PID 杀进程。清理测试等待实际清理链路结束。
+- Agent 发现测试隔离 PATH 与相关覆盖配置；符号链接测试仅在 Windows 实际出现 EPERM/EACCES 时标记能力不足跳过，产品对符号链接的拒绝规则保留。
+
+### 结果
+
+| 环境与检查 | 结果 |
+| --- | --- |
+| Win10 22H2 build19045 标准用户修复前重复 ACL | 第1次成功，第2/3次 SeSecurityPrivilege 失败；独立 Bridge 私有写入也失败 |
+| 同账号修复后两套原生 ACL 回归 | 均通过：连续3次保护，以及多余主体、拒绝规则、InheritOnly 不安全权限的修正与再次调用 |
+| 同账号 TaskAgent 定向（选择/helper/remote-pending/ACL） | 29项：17通过、11失败、1符号链接能力跳过；失败均源于 CIM 拒绝访问，包括1个父测试汇总 |
+| 同账号 Feishu Bridge 全量与类型 | 116通过、0失败、0跳过；tsc通过 |
+| 同账号 ACP 身份/归属确定性用例 | 13通过，包含实际 PowerShell 中模拟缺字段、退出、PID复用的用例；不等同于真实 CIM 查询和生命周期通过 |
+| 同账号三包实际 pack + TaskAgent 安装 help | 全通过；两Bridge类型/构建、defaults同步检查通过 |
+| macOS Node24 TaskAgent全量 | 490项：479通过、11平台跳过、0失败 |
+| macOS Node24 ACP全量串行复跑 | 203项：197通过、6平台跳过、0失败 |
+| macOS Node24 Feishu Bridge全量 | 116项：108通过、8平台跳过、0失败 |
+| Spec/Standards静态审查 | 均无发现 |
+
+macOS 初次并行跑三包时，原有 POSIX TERM-resistant fixture 用例超时并留下测试子进程；精确核对后清理，单条重跑及整包串行复跑通过，没有调整该 POSIX 测试超时或产品逻辑。保留初次失败，不能将其记为通过。
+
+### 尚未解除的环境阻塞
+
+该标准用户 SSH 会话为 Medium/NETWORK 令牌，仅有基础特权；执行 `Get-CimInstance Win32_Process` 查询当前 PowerShell 自身即报 `0x80041003 Access denied`，`Get-WmiObject` 也拒绝，而原生 .NET 可以读取自身镜像。此现象独立于 ACL 与 ExecutablePath 暂缺，不作为已修复的元数据竞态。修复前 ACP EPIPE 用例在该权限下失败并留下 fixture，已核对专属 PID、启动时间和镜像后清理。修复后没有绕过身份校验、授予额外系统权限或将依赖真实 CIM 的测试改为跳过。
+
+继续验证需要一个能正常查询本机 CIM 的普通用户会话；随后重跑 TaskAgent/ACP 全量、真实进程清理和多绑定/重启。Win11 接手方先保留未提交改动、对齐含本节修复的最新分支，再用本地普通用户终端复测。Win11/Coco pack与真实飞书矩阵仍按其原计划推进，不能用本轮 Win10 打包帮助入口代替授权/任务/附件闭环。本轮未取得对应新提交的远端 CI 结论，不沿用旧提交 CI 成功。
+
+本轮普通用户产物 SHA256：TaskAgent `c9c4d26f44c5f0bbb4a5d0f302ebe9cb7cbb36f2895eaeac1ef12a56a6fdb094`；ACP `88e47c8f6c950ece0646e93eb77a4aeaec241503913dcc574653ae1954350f52`；Feishu `ed9e9a4426a34f668f05f472b12364476d9623cfd5830a64d3856af01945acd8`。
