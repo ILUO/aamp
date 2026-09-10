@@ -33,7 +33,7 @@ test('global Task Agent installation requires the TraeCode readiness helper', ()
 test('task agent source keeps canonical package metadata and records the last successful release pins', () => {
   const canonicalPackage = '@larktask/aamp-feishu-task-agent'
   const releasedTaskAgent = '@larktask/aamp-feishu-task-agent'
-  const releasedAcpBridge = '@luckyterry/aamp-acp-bridge@0.1.29-dev.0'
+  const releasedAcpBridge = '@zhengqilin/aamp-acp-bridge@0.1.29-dev.1'
   const source = readFileSync(bootstrap, 'utf8')
   const controller = readFileSync(path.resolve(__dirname, '../bin/feishu-task-agent-controller.mjs'), 'utf8')
   const readme = readFileSync(path.resolve(__dirname, '../README.md'), 'utf8')

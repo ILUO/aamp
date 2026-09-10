@@ -8,7 +8,7 @@ test('defaults JSON owns exact package pins and scope manifest v2', () => {
   const defaults=JSON.parse(readFileSync(new URL('../bootstrap/task-agent-defaults.json',import.meta.url),'utf8'))
   assert.equal(defaults.schemaVersion,1); assert.equal(defaults.scopeManifest.version,2)
   assert.equal(defaults.packages.codexAcp,'@agentclientprotocol/codex-acp@1.0.2')
-  assert.equal(defaults.packages.acpBridge,'@luckyterry/aamp-acp-bridge@0.1.29-dev.0')
+  assert.equal(defaults.packages.acpBridge,'@zhengqilin/aamp-acp-bridge@0.1.29-dev.1')
   assert.equal(defaults.scopeManifest.app.tenant.includes('im:message:send_as_bot'),true)
   assert.deepEqual(defaults.profile.domains,['task'])
 })

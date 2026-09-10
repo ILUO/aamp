@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "packages": {
-    "acpBridge": "@luckyterry/aamp-acp-bridge@0.1.29-dev.0",
-    "feishuBridge": "@iluolyx/aamp-feishu-bridge@0.1.52-dev.5",
+    "acpBridge": "@zhengqilin/aamp-acp-bridge@0.1.29-dev.1",
+    "feishuBridge": "@zhengqilin/aamp-feishu-bridge@0.1.52-dev.6",
     "aimeAcp": "@tengchengwei/aime-acp@0.1.1-dev.1",
     "codexAcp": "@agentclientprotocol/codex-acp@1.0.2",
     "codexCli": "@openai/codex",
