@@ -21,6 +21,7 @@ import {
 import {
   createPackageExecutableLauncher,
   npmExecutableResolverArgs,
+  npmExecutableResolverCommand,
   parseResolvedPackageExecutable,
 } from './runtime-package-executable.mjs';
 import {
@@ -1498,7 +1499,7 @@ const packageExecutableLauncher = createPackageExecutableLauncher({
   materialize: async (packageSpec, executable, options = {}) => {
     const result = await runNpmExecCapture(
       packageSpec,
-      process.execPath,
+      npmExecutableResolverCommand(),
       npmExecutableResolverArgs(executable),
       options,
     );

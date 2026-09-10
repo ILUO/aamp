@@ -71,6 +71,12 @@ process.stderr.write('unable to resolve npm executable shim: ' + executable + '\
 process.exit(1)
 `
 
+// npm treats its executable as shell command text on Windows. Preserve the
+// absolute Node path so spaces cannot split it or select a package-local node.
+export function npmExecutableResolverCommand({ platform = process.platform, execPath = process.execPath } = {}) {
+  return platform === 'win32' ? '""' + execPath + '""' : execPath
+}
+
 export function npmExecutableResolverArgs(executable, { platform = process.platform } = {}) {
   // npm exec crosses cmd.exe on Windows, where a multiline --eval argument is
   // truncated even when npm exits successfully. Keep the fixed module in one

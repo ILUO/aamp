@@ -853,8 +853,16 @@ $env:AAMP_ACP_WINDOWS_INPUT_BASE64 = [Convert]::ToBase64String([Text.Encoding]::
 function Get-CimInstance {
   $script:reads++
   $value = CimCmdlets\Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $script:targetPid)
-  $value.ExecutablePath = ''
-  return $value
+  # Mask only the image field on a detached view: native CIM properties are read-only.
+  return $value | Select-Object ProcessId, ParentProcessId, CreationDate, @{Name='ExecutablePath';Expression={''}}
+}
+function Invoke-CimMethod {
+  param($InputObject, $MethodName)
+  $native = CimCmdlets\Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$InputObject.ProcessId)
+  if ($native.CreationDate.ToUniversalTime().Ticks -ne $InputObject.CreationDate.ToUniversalTime().Ticks) {
+    throw 'fixture process identity changed'
+  }
+  return CimCmdlets\Invoke-CimMethod -InputObject $native -MethodName $MethodName
 }
 `
     const result = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(fixture + (tree ? WINDOWS_PROCESS_TREE_SCRIPT : WINDOWS_PROCESS_IDENTITY_SCRIPT) + "\nif ($script:reads -lt 8) { throw 'bounded image rereads were skipped' }", 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 15_000 })

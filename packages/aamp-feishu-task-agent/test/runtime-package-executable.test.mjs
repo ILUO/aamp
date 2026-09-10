@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process'
 import {
   createPackageExecutableLauncher,
   npmExecutableResolverArgs,
+  npmExecutableResolverCommand,
   parseResolvedPackageExecutable,
 } from '../bin/runtime-package-executable.mjs'
 
@@ -100,7 +101,7 @@ async function npmMaterialize(packageSpec, executable, cacheDir, environment = p
   const { stdout } = await npmRun([
     'exec', '--yes', '--offline', '--cache', cacheDir,
     '--package', packageSpec, '--',
-    process.execPath, ...npmExecutableResolverArgs(executable),
+    npmExecutableResolverCommand(), ...npmExecutableResolverArgs(executable),
   ], {
     env: { ...environment, npm_config_offline: 'true' },
     timeout: 15_000,
