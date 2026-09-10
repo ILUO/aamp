@@ -14,6 +14,8 @@
 
 ## 验证记录
 
+最新结论：用户明确允许 AIME 回复附带说明、允许任务结束后常驻；此前严格格式/EOF退出判定撤销，AIME 认证、连通性、ACP 会话和391计算通过。Windows npm 路径/CIM夹具修正后三包 Node22/24 全量、类型与 pack 均通过；真实飞书任务闭环仍待下一阶段。详细新证据见末节。
+
 最新范围：用户改为验证 Codex 以外的 Agent，允许改验 AIME，覆盖前轮“先通过 Coco”的执行顺序。AIME 租户资格和原生扫描通过，固定适配器安装/认证/doctor 通过；真实 ACP 返回正确391，但严格仅整数断言失败，远程计算后 EOF 15秒未退出。仅握手后 EOF 正常退出。产品代码未改，飞书任务闭环及原三包失败仍未关闭，详见末节。
 
 本轮 Win11/Coco 接手复验（2026-09-10，代码 a8b68b9）：真实普通用户 Session 1 的 CIM 查询通过；npm 含空格 Node 路径失败及两项 ACP CIM 夹具失败均已重新复现。Coco 0.121.0 只读启动探针耗时 11.620s、8.605s，第三次 145.621s 无输出后仅终止已验证身份的测试进程。P1/P2 未关闭；详见末节。先验 Coco，通过后再验其他 Agent，正常流程必须扫描可用 Agent 并由用户选择。
@@ -463,3 +465,40 @@ macOS 初次并行跑三包时，原有 POSIX TERM-resistant fixture 用例超�
 本次没有向 AIME 提供私有文档、凭据、本地文件或 MCP；只发送无敏感数据的计算请求。AIME 的远程任务会话不是飞书 Task，本次没有 Task ID、ACK、飞书服务端完成证据。没有验证运行中取消或附件；按现有设计 AIME 不支持本地文件/附件交付，不能算这部分 Windows 本地能力通过。
 
 证据目录 C:\codex\aamp-evidence-20260910：aime-auth-status.json、aime-doctor.json、aime-acp-probe.jsonl、aime-acp-initialize-only.jsonl，及对应探针脚本。上述表格包含供跨主机回读的完整最小结果；原始文件仅本地保留。下一步：定位远程任务后的退出收尾、修复/复验此前 P2 npm 路径和 CIM 夹具问题，再进入正常产品扫描选择及专用 Bot 业务。未合并 PR、未发布 npm 包。
+
+
+## 2026-09-10 Win11 Node22/24：Windows 前置修复与 AIME 标准澄清
+
+产品源码提交：3930c5a174841483f35002a949e063c8394e7790。本节是后续记录提交，不与被测代码 SHA 混淆。
+
+用户澄清：返回正确391时附带说明/算式符合预期，远程任务完成后适配器常驻也符合预期。旧探针原始观测保留，但不是失败门禁；未为此改动 AIME、ACP取消/结果协议或驻留行为。
+
+最小修复：npm 在 Windows 内部将 executable 当作 cmd 命令文本，单层引号仍被消费；双层命令引号保留 C:\Program Files\nodejs\node.exe 的边界，POSIX 保持原路径。原生 npm 包参数/中文/特殊符号/CRLF/stdin/exit 用例红绿复验通过。ACP 两项夹具把原生 CIM 对象只读字段改为脱离对象的字段视图，读取 owner 时先重核创建时间再调用真实 CIM；产品身份规则未改。独立代码审查未发现 actionable findings。
+
+环境分离：首次从 Codex PowerShell7 继承模块路径时，两 Bridge 出现 Get-Acl/CouldNotAutoloadMatchingModule，不能算产品功能失败。对照原生 PowerShell5.1模块路径成功；仅给本轮子进程设置 PSModulePath 为 WindowsPowerShell/v1.0/Modules，保留代理和其他环境，未改系统设置。失败日志保留在 node24，复验存 node24-ps51。Task Agent 原轮已全量通过，未无故重跑。
+
+Node22 首轮 Task Agent 为278通过/1失败/15跳过，唯一失败是测试夹具 npm pack 超过30秒。锁定 Node22/npm10.9.7 的定向复验通过；随后仅重跑 Task Agent 全量，结果见表，原失败日志保留。未延长测试超时、未跳过原用例。
+
+Node24=24.19.0/npm11.17.0；Node22=22.22.2/npm10.9.7（官方便携 zip，SHA256 7c93e9d92bf68c07182b471aa187e35ee6cd08ef0f24ab060dfff605fcc1c57c）。真实用户中完整性、Session1、Win11 26200；PowerShell5.1为系统原生模块。
+
+| 运行时 | 包 | 实测测试汇总 |
+|---|---|---|
+| v24.19.0 | aamp-feishu-task-agent | ℹ tests 294; ℹ pass 279; ℹ fail 0; ℹ cancelled 0; ℹ skipped 15 |
+| v24.19.0 | aamp-acp-bridge | ℹ tests 203; ℹ pass 199; ℹ fail 0; ℹ cancelled 0; ℹ skipped 4 |
+| v24.19.0 | aamp-feishu-bridge | ℹ tests 116; ℹ pass 116; ℹ fail 0; ℹ cancelled 0; ℹ skipped 0 |
+| v22.22.2 | aamp-acp-bridge | # tests 203; # pass 199; # fail 0; # skipped 4 |
+| v22.22.2 | aamp-feishu-bridge | # tests 116; # pass 116; # fail 0; # skipped 0 |
+| v22.22.2 | aamp-feishu-task-agent | # tests 294; # pass 279; # fail 0; # skipped 15 |
+
+三包实际 npm pack 均 exit0，两 Bridge 类型检查均 exit0，共享 defaults 校验 exit0。Node24 Task Agent tgz 已装入独立 C:\codex\aamp-aime-run\installed，Node22 对应 tgz 安装在 C:\codex\aamp-aime-run-node22\installed，两者分别用对应 Node/npm 安装后实际 .cmd help exit0。
+
+| artifact 来源目录 | 文件 | SHA256 |
+|---|---|---|
+| node24 | larktask-aamp-feishu-task-agent-0.1.1-dev.6.tgz | 3684aaeb19c53506b78df0956bf0591a65c4637fccd80497771091c6c9d43654 |
+| node24-ps51 | zengxingyuan-aamp-acp-bridge-0.1.29-dev.0.tgz | 1d57839d591cd8807c652e853a75c9e5261b8703c19fcba8e9b140a63a604983 |
+| node24-ps51 | zengxingyuan-aamp-feishu-bridge-0.1.52-dev.5.tgz | dc481f34dae593e4bae22ac60dd26640420c48d54c6d2e1fd35f30f3cf4840a8 |
+| node22-ps51 | larktask-aamp-feishu-task-agent-0.1.1-dev.6.tgz | 3684aaeb19c53506b78df0956bf0591a65c4637fccd80497771091c6c9d43654 |
+| node22-ps51 | zengxingyuan-aamp-acp-bridge-0.1.29-dev.0.tgz | 1d57839d591cd8807c652e853a75c9e5261b8703c19fcba8e9b140a63a604983 |
+| node22-ps51 | zengxingyuan-aamp-feishu-bridge-0.1.52-dev.5.tgz | dc481f34dae593e4bae22ac60dd26640420c48d54c6d2e1fd35f30f3cf4840a8 |
+
+原始证据 C:\codex\aamp-evidence-20260910；本表供跨主机回读，原始文件未作为公开附件上传。Node24 的产品安装使用 node24 Task Agent 与 node24-ps51 两 Bridge，明确开启本地包覆盖，关闭自动更新保持被测 SHA；不设默认 Agent、不跳过登录，文档 CLI 与新 Bot 配置隔离。CI 为单独证据，不能用本地通过代替三平台 CI。下一步正常 install / 扫描选择 AIME / 专用新 Bot 授权和任务闭环。未合并、未 npm 发布。
