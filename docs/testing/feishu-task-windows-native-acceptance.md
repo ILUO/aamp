@@ -1,6 +1,6 @@
 # 飞书任务 Windows 原生开发与验收记录
 
-日期：2026-09-07 至 2026-09-08。状态：Windows 10 Administrator 已取得原生自动化、受控生命周期及真实飞书任务闭环证据，附件闭环在已登录用户的交互会话后台模式通过；Windows 11 普通用户等剩余矩阵仍待验收。
+日期：2026-09-07 至 2026-09-10。状态：Win11普通用户/AIME本地验收已逐项取证并完成卸载；本机文件能力不支持，实际注销由用户跳过。最新修复尚未推送，三平台CI及远端交付仍待完成。
 
 用户先要求“先开发”，随后提供 Windows SSH 测试机，并明确确认上传三个消费包源码、测试与开发 tgz，后续授权真实 Bot 与任务业务补测。下表汇总最新证据；未完成的验收项仍是发布门禁。
 
@@ -14,7 +14,33 @@
 
 ## 验证记录
 
-最新结论（2026-09-10 Win11/AIME）：3930c5a代码的Node22/24三包测试/类型/打包通过；专用新Bot、正常扫描选择、普通任务、缺输入经重启与Owner补充、真实非Owner拒绝、父子任务、单次及两实例重复提醒已取得真实证据。AIME原生运行中取消在Node22/24通过；后台就绪后启动终端退出，随后真实任务完成。远程附件按既有产品边界在派发前拒绝，本地CSV交付不支持，不冒充通过。无效更新包在stop前拒绝；有效更新、故障恢复/耗尽、注销自启/禁用、最终卸载及完整交付仍在执行。锁屏一次结果与锁屏时间对不上，复核待完成。详见末节逐项证据。
+最新结论（2026-09-10 Win11/AIME）：d626d3c修复首次进程身份采样，Node22/24 Task Agent各283通过、15跳过、0失败；真实更新后793/done，锁屏893/done、故障恢复901/done、最终卸载复核通过。AIME本机文件不支持，注销/登录部分按用户要求跳过。最新代码未推送，CI及PR/飞书摘要同步待完成。逐项最终状态及证据见紧接的本地矩阵和末节；后续旧表为历史Win10记录。
+
+| 用例 | 最终本地状态 | 证据与范围 |
+|---|---|---|
+| A01 | PASS | Win11 Pro 26200 x64，普通用户中完整性 Session1，PowerShell5.1；Node22.22.2/24.19.0，AIME真实入口/认证/ACP探针；正常扫描后由用户选择。 |
+| A02 | 部分通过 / 文件UNSUPPORTED | 实际产品 Windows wrapper 在 Node22/24 均创建会话、收到运行中输出后取消、返回 cancelled、退出0；计算由真实任务证明。AIME远程运行不支持本机文件，不能判文件交付通过。 |
+| A03 | PASS（Windows本地） | 3930c5a三包测试/类型/pack/安装入口见前文；d626d3c仅改Task Agent，其Node22/24全量各298项、283通过、15平台跳过、0失败，sync及pack退出0。最新跨平台CI另列。 |
+| B01 | PASS | 专用新Bot、OAuth、正常选择AIME；391及Owner继续361，ACK/结果/完成。 |
+| B02 | PASS | 缺输入经后台重启、真实第二账号拒绝、Owner补充N=11后407/done。 |
+| B03 | PASS | 父子任务84/104/188，服务端全部done。 |
+| B04 | PASS | 单次203、每日重复两实例217；第二实例提前due加速，非24小时耐久测试；后继重复已清理。 |
+| B05 | BOUNDARY_PASS / UNSUPPORTED | 真实中文CSV附件在远程AIME派发前拒绝；不冒充本机读取/产物上传通过。负例任务保留待确认，未执行可选远端关闭。 |
+| B06 | 部分通过 / 输出UNSUPPORTED | 中文、空格、&和括号目录实际安装入口退出0；中文CRLF输入上传。远程AIME本机输出能力不支持。 |
+| B07 | PASS（受控API） | 实际NTFS文件52,428,799/52,428,800字节上传一次，52,428,801字节上传前拒绝；没有执行三次真实云大文件传输。 |
+| C01 | PASS | 后台启动终端退出后，真实B03任务完成。 |
+| C02 | PASS | 用户保持锁屏从手机发47×19，事件处理区间位于两次WTS锁屏观测之间，893/done；首次43×17不计锁屏证据。 |
+| C03 | USER_SKIPPED | 用户明确要求跳过注销；没有实际注销/重新登录。 |
+| C04 | PASS / 登录部分USER_SKIPPED | 正常stop禁用任务且旧进程消失；显式start恢复enabled/ready并保留绑定；首次准备超时保留历史。实际登录触发未验。 |
+| C05 | PASS（含历史首次超时） | 真实controller故障后第二次重试恢复，后续901/done；独立原生worker三次默认60秒重试耗尽退出23、等待中stop及旁观进程存活。 |
+| C06 | PASS（修复后复测） | 非法包stop前拒绝；dev8首次恢复失败保留；d626d3c的dev9正常update退出0、ready、绑定未变、实际安装controller与源码哈希一致，随后793/done。 |
+| C07 | PASS | 三个隔离prefix卸载退出0；所属计划任务和入口均移除；最新复核受管进程0、测试registry进程0、绑定哈希未变、原Coco身份存活。 |
+| D01 | PASS（受控） | 缺CLI、登录/权限、网络错误、ACL失败的关闭/提示/重试断言；没有实际撤权、拔网或修改企业策略。 |
+| D02 | PASS（分层证据） | 身份/CIM/PID重用/旧generation/外部用户为受控断言；真实原生故障清理与旁观者保护另有证据。Node22/24多绑定集合及generation就绪探针通过，非真实第二Bot并行业务。 |
+| CI | PENDING | 61b2692的run34463388746总体Success仅为旧提交证据，六个子job尚未逐项核对；d626d3c尚未推送，无最新三平台×Node22/24结果。 |
+| 交付 | PENDING | 本地记录与计划更新；远端推送、最新CI、PR及飞书交接摘要待同步。不得宣称整体目标完成或发布就绪。 |
+
+### 历史验证记录（不替代以上Win11/AIME状态）
 
 历史范围调整（后续实测已更新结论）：用户改为验证 Codex 以外的 Agent，允许改验 AIME，覆盖前轮“先通过 Coco”的执行顺序。AIME 租户资格和原生扫描通过，固定适配器安装/认证/doctor 通过；真实 ACP 返回正确391，但严格仅整数断言失败，远程计算后 EOF 15秒未退出。仅握手后 EOF 正常退出。产品代码未改，飞书任务闭环及原三包失败仍未关闭，详见末节。
 
@@ -38,7 +64,7 @@
 | stop/start/restart / 崩溃恢复 | 已验部分通过 | 实际 controller 强退后同 worker 自动恢复，新 controller ready；测试覆盖三次重试耗尽及等待期间 stop。关闭终端后交互后台业务继续；锁屏、注销/重新登录仍待可恢复交互登录条件 |
 | 运行中 update / 卸载 | 通过（修复后） | 非法包拒绝且旧服务/包不变；合法包安装保留绑定；后续修复包 Node 24 任务 361/done。正常 stop 与 npm uninstall 退出 0，计划任务/入口/隔离包移除，绑定字节不变，受管 Node 0，三个旁观进程存活 |
 | 异常与安全边界 | 受控测试通过 | Windows profile/ACL/CLI 缺失、网络错误分类与重试、CIM 权限拒绝/PID 重用、多绑定隔离纳入已通过的原生/CI 测试；不表示真实租户 token 撤销、拔网或修改企业策略已实测 |
-| Windows 11 普通用户 | 未验证 | 独立验收门禁，不能用 Win10 管理员或 Windows Server CI 替代 |
+| Windows 11 普通用户 | 历史表当时未验证 | 最新Win11/AIME证据见顶部矩阵及末节；仍不能用Win10管理员或Windows Server CI替代 |
 
 ## 原生验收录入模板
 
@@ -551,3 +577,72 @@ CI：API回读run34457377857，head_sha44baed5cc34fdb0f531afda1c77c5b406ac24fcd�
 当前仍需C02解锁确认、C03/C04实际注销登录、C05原生故障恢复及三次耗尽/等待中stop、C06有效更新和后续业务、C07最终卸载、D01/D02逐项证据归档及多绑定、Node22完整运行补齐、CI作业/计划/PR最终审计。用户已确认能配合锁屏/注销与第二账号，注销前必须先保存并同步检查点，由用户自行退出和恢复登录；不自动注销承载Codex的会话。
 
 证据位于C:/codex/aamp-evidence-20260910：b02-need-help-before-restart.json、aime-cancel-22.jsonl、aime-cancel-24.jsonl、c01-background-readiness.json、matrix-evidence-1789033537804.json、matrix-evidence-1789034059132.json、session-lock-observations.jsonl、update-fixtures/before-invalid.json和after-invalid.json。仅上传本节安全字段，运行日志/原始profile/worker环境/授权链接不入Git。
+
+
+## 2026-09-10 Win11 / AIME：故障恢复与用户跳过注销
+
+用户明确要求“注销这个跳过吧”：C03及C04中必须注销/重新登录的步骤标记USER_SKIPPED，不计PASS；当前会话继续，其余用例仍执行。C02解锁后继续操作正常，锁屏结果893已在上节记录。
+
+C05真实故障：18:02:17 CST持有controller22792进程句柄，校验SID、创建时间、路径、父worker28828和generation后只终止该控制器。worker存活并清理journal后进入默认60000ms等待。第1次重启controller30000在Agent准备阶段command timed out，日志run1789034771858-30000保留；第2次重试controller23752（18:07:49.227 CST创建）恢复ready，仍由原worker28828承载，generation及bindings SHA256均未变。不得将60秒重试间隔写成总恢复时间；日志清理耗时较长。原Coco16916始终存活。
+
+恢复后Owner评论7683846625722207450触发事件bb9781c43cdb9a87da8ed070fad85f72，Task f09588cd-f2fa-45e8-81ab-11dce985e4a6。10:09:17.652Z收到，10:10:13.270Z完成53×17=901；ACK/结果/完成标记齐全；独立服务端done/4/completed_at1789035012000。实际恢复及后续业务PASS，首轮超时为保留观测，未声称根因修复。
+
+C05隔离原生worker测试使用已安装代码，真实spawn专用失败子进程，未注入runOnce/wait或缩短默认60000ms。等待中stop：1次启动，3923ms返回0，观察者存活。三次重试耗尽：四个controller PID6392/28448/28668/24764，总200323ms，三条retry 1/3、2/3、3/3日志均60000ms，最终返回23，不再启动第五次，观察者存活并由脚本持有句柄清理。证据native-worker-probe-o2fLab/evidence.json=result PASS。首次验收脚本因Windows ESM绝对路径导入失败，在任何spawn前终止；改为file URL后实际执行通过，非产品改动。
+
+本地证据c05-before-crash.json、c05-after-recovery.json、matrix-evidence-1789035163910.json、native-worker-probe-o2fLab/evidence.json。login-after-20260910-180950.json只是复用只读快照脚本产生的文件名，并无注销发生，正式证据c05-after-recovery.json已明确scope。
+
+D01/D02覆盖已逐项对照测试源和Node24/Node22最终日志，见本地D01-D02-coverage-audit.md。缺CLI/缺profile/缺scope/过期token均为受控helper测试，不撤销真实授权；CIM错误/PID身份变化/foreign SID/stale generation防误杀受控覆盖，企业策略与多绑定真实验收不能由这些单测替代。
+
+CI精确记录提交61b2692对应run34463388746，公开运行页面标题确认SHA、整体Success；显示六组平台/Node矩阵及六份产物。API限流，匿名作业片段404，六job逐项详情尚未取得，保留待核。页面有六条GitHub Actions Node20运行时弃用警告。https://github.com/ILUO/aamp/actions/runs/34463388746
+
+C06有效fixture dev8正常update已经开始，结果和后续业务尚待验证。当前尚未最终卸载，未合并或npm发布。
+
+C06有效更新实际结果：FAIL，更新命令exit1。有效fixture dev8安装成功，bindings SHA256保持1C30F78DB97DA250F88C87859765633B71D49FE7ABCC3A5D917B1BCD07E669C2，但后台恢复未完成：前两轮AIME准备command timed out，第三轮run1789035523041-14504记录Cannot verify Windows process28692; refusing cleanup。更新调用方另报计划任务查询30秒超时及“更新已安装；后台恢复失败”。当前安装仍dev8，不能宣称回滚或业务恢复。worker29636/controller14504及该子进程仍存在，原Coco16916存活；保留现场继续排查，未绕过身份保护或启动重复实例。
+
+排查发现首次windowsIdentity查询异常被catch为undefined，后续采样直接返回、停止拒绝清理；此为待复现的源码线索，尚未修复。独立AIME auth/doctor约2.25/2.09秒通过；复用worker环境时约9.06/2.12秒也通过，不能断言登录失效。完整状态保存在本地C06-FAILURE-CHECKPOINT.md，原始环境和认证数据未上传。
+
+## 2026-09-10 Win11/AIME 最终本地复测与清理（远端交付待完成）
+
+产品提交为 d626d3c295bf3ceb453c45ade91505afc000aa71。现场复核时间 2026-09-10T19:26:27.9219000+08:00。本节和顶部结论覆盖旧段落的“待执行”状态；失败经过继续保留。原用户选择AIME代替Coco、接受额外解释文字与任务后驻留、跳过注销的决定不变。
+
+| 用例 | 最终本地状态 | 证据与范围 |
+|---|---|---|
+| A01 | PASS | Win11 Pro 26200 x64，普通用户中完整性 Session1，PowerShell5.1；Node22.22.2/24.19.0，AIME真实入口/认证/ACP探针；正常扫描后由用户选择。 |
+| A02 | 部分通过 / 文件UNSUPPORTED | 实际产品 Windows wrapper 在 Node22/24 均创建会话、收到运行中输出后取消、返回 cancelled、退出0；计算由真实任务证明。AIME远程运行不支持本机文件，不能判文件交付通过。 |
+| A03 | PASS（Windows本地） | 3930c5a三包测试/类型/pack/安装入口见前文；d626d3c仅改Task Agent，其Node22/24全量各298项、283通过、15平台跳过、0失败，sync及pack退出0。最新跨平台CI另列。 |
+| B01 | PASS | 专用新Bot、OAuth、正常选择AIME；391及Owner继续361，ACK/结果/完成。 |
+| B02 | PASS | 缺输入经后台重启、真实第二账号拒绝、Owner补充N=11后407/done。 |
+| B03 | PASS | 父子任务84/104/188，服务端全部done。 |
+| B04 | PASS | 单次203、每日重复两实例217；第二实例提前due加速，非24小时耐久测试；后继重复已清理。 |
+| B05 | BOUNDARY_PASS / UNSUPPORTED | 真实中文CSV附件在远程AIME派发前拒绝；不冒充本机读取/产物上传通过。负例任务保留待确认，未执行可选远端关闭。 |
+| B06 | 部分通过 / 输出UNSUPPORTED | 中文、空格、&和括号目录实际安装入口退出0；中文CRLF输入上传。远程AIME本机输出能力不支持。 |
+| B07 | PASS（受控API） | 实际NTFS文件52,428,799/52,428,800字节上传一次，52,428,801字节上传前拒绝；没有执行三次真实云大文件传输。 |
+| C01 | PASS | 后台启动终端退出后，真实B03任务完成。 |
+| C02 | PASS | 用户保持锁屏从手机发47×19，事件处理区间位于两次WTS锁屏观测之间，893/done；首次43×17不计锁屏证据。 |
+| C03 | USER_SKIPPED | 用户明确要求跳过注销；没有实际注销/重新登录。 |
+| C04 | PASS / 登录部分USER_SKIPPED | 正常stop禁用任务且旧进程消失；显式start恢复enabled/ready并保留绑定；首次准备超时保留历史。实际登录触发未验。 |
+| C05 | PASS（含历史首次超时） | 真实controller故障后第二次重试恢复，后续901/done；独立原生worker三次默认60秒重试耗尽退出23、等待中stop及旁观进程存活。 |
+| C06 | PASS（修复后复测） | 非法包stop前拒绝；dev8首次恢复失败保留；d626d3c的dev9正常update退出0、ready、绑定未变、实际安装controller与源码哈希一致，随后793/done。 |
+| C07 | PASS | 三个隔离prefix卸载退出0；所属计划任务和入口均移除；最新复核受管进程0、测试registry进程0、绑定哈希未变、原Coco身份存活。 |
+| D01 | PASS（受控） | 缺CLI、登录/权限、网络错误、ACL失败的关闭/提示/重试断言；没有实际撤权、拔网或修改企业策略。 |
+| D02 | PASS（分层证据） | 身份/CIM/PID重用/旧generation/外部用户为受控断言；真实原生故障清理与旁观者保护另有证据。Node22/24多绑定集合及generation就绪探针通过，非真实第二Bot并行业务。 |
+| CI | PENDING | 61b2692的run34463388746总体Success仅为旧提交证据，六个子job尚未逐项核对；d626d3c尚未推送，无最新三平台×Node22/24结果。 |
+| 交付 | PENDING | 本地记录与计划更新；远端推送、最新CI、PR及飞书交接摘要待同步。不得宣称整体目标完成或发布就绪。 |
+
+### 修复与回归证据
+
+d626d3c只修改Task Agent控制器及两个测试文件：活进程身份采样缺失时保留原始错误并拒绝；启动返回前等待第一次已验证采样。原先错误被吞掉或首次采样尚未完成即可返回的缺陷均先有失败复现；未放宽身份清理、Owner或取消规则。独立审查指出测试子进程可能泄漏，已增加独立30秒寿命。Node22/24完整Task Agent测试、配置同步和实际pack结果分别保存在 identity-fix-validation/node22-ps51-task-recheck/summary.json 和 node24-ps51-task-recheck/summary.json。Bridge源码未因本修复变化，原三包基线结果保留，不能据此替代新提交的跨平台CI。
+
+真实wrapper取消证据：aime-wrapper-cancel-22.jsonl、aime-wrapper-cancel-24.jsonl；均在agent_message_chunk之后发送cancel，返回cancelled且进程退出0。D02多绑定补证：multi-binding-readiness-F445ik/evidence.json（Node22）和 multi-binding-readiness-o0izrr/evidence.json（Node24），部分集合/不同绑定/旧generation均false，同一集合逆序true；调度器及身份为受控注入。
+
+### C06有效更新复测
+
+本地fixture包0.1.1-dev.9基于d626d3c构建，仅测试版本元数据变化，未npm发布。tgz SHA256为0257cc44baa2a4b76ce41062d3d921b9f2acbad702d447b9f2fe6080d29b5fc7。通过正常update从dev8更新，命令退出0，恢复ready。update-fixtures-identity/after.json记录实际安装controller与源码SHA256均为6755342B69F78B32C3B496D38E8F728DCB8CB6B21CBB6F2485CF1F24CBE7A409；绑定未变化。
+
+更新后真实任务f09588cd-f2fa-45e8-81ab-11dce985e4a6，Owner评论7683863562703359250，事件6869933c3e3b562eb82727d1731b2476：2026-09-10T11:15:02.030Z收到，11:16:06.152Z完成，61×13=793；ACK、结果、完成记录齐全，服务端done/4，completed_at=1789038965000。证据matrix-evidence-1789038989068.json。dev8初次恢复失败和间歇AIME准备超时仍为历史事实；后续同预算prepare探针通过不能证明间歇超时根因已修复。
+
+### C07最终状态
+
+c07-uninstall.json记录三个隔离安装目录正常卸载退出0、验证归属后移除本产品计划任务；保留远端Bot、绑定和本地证据。c07-final-verification.json再次独立查询确认计划任务0、安装入口0、受管产品进程0、测试registry服务0，原Coco PID16916创建时间匹配且存活。绑定SHA256保持1C30F78DB97DA250F88C87859765633B71D49FE7ABCC3A5D917B1BCD07E669C2。不要依据旧失败检查点重启已卸载服务。
+
+全部脱敏本地证据根目录为C:/codex/aamp-evidence-20260910。该目录包含测试脚本、日志和结果，不是额外产品包。本轮只把所需摘要写入仓库文档，不把整个目录提交。自动审批先后拒绝验收记录推送与单独代码推送，尚未上传d626d3c或本节；也拒绝了可选关闭B05负例任务，已放弃该清理动作，任务保持待确认。当前没有测试后台服务在运行。
