@@ -502,3 +502,25 @@ Node24=24.19.0/npm11.17.0；Node22=22.22.2/npm10.9.7（官方便携 zip，SHA256
 | node22-ps51 | zengxingyuan-aamp-feishu-bridge-0.1.52-dev.5.tgz | dc481f34dae593e4bae22ac60dd26640420c48d54c6d2e1fd35f30f3cf4840a8 |
 
 原始证据 C:\codex\aamp-evidence-20260910；本表供跨主机回读，原始文件未作为公开附件上传。Node24 的产品安装使用 node24 Task Agent 与 node24-ps51 两 Bridge，明确开启本地包覆盖，关闭自动更新保持被测 SHA；不设默认 Agent、不跳过登录，文档 CLI 与新 Bot 配置隔离。CI 为单独证据，不能用本地通过代替三平台 CI。下一步正常 install / 扫描选择 AIME / 专用新 Bot 授权和任务闭环。未合并、未 npm 发布。
+
+
+## 2026-09-10 Win11 / AIME：新 Bot 与两轮真实任务闭环
+
+被测源码3930c5a174841483f35002a949e063c8394e7790；包及哈希沿用上一节，未修改产品代码。实际 Node24、原生 Windows PowerShell5.1、普通用户 Session1；显式前台运行，未把前台常驻冒充计划任务后台生命周期通过。
+
+- 用户创建专用新 Bot：70Win11-Task / cli_aa28d75997f89be9。注册和用户 OAuth 两阶段分别收到 CLI 成功；独立配置 profile aamp-feishu-task-cli_aa28d75997f89be9，whoami 校验 identity=user / tokenStatus=ready。未保存凭据到证据或 Git。
+- 正常 install 扫描菜单出现 codex、coco、aime，按用户此前明确选定的 AIME，通过方向键和回车选择；未设默认 Agent、未使用 --agent、未修改绑定 JSON。绑定ID f9af1493-218b-4d62-93f7-02fd85d315c3，远程ACP配对成功，产品报告启动1/1。
+- 启动阶段日志曾报 agent.session.deferred / saved ACP session missing or stale；保留该观测，随后两轮任务正常完成，未手工删会话或修改AIME。不能据此宣称提示根因已修复。
+
+真实 Task GUID b01d6406-b745-49dd-9836-119b2f1e42b9，显示ID t39218269，标题[W11-AIME-20260910] 普通任务计算验证。链接：https://applink.larkoffice.com/client/todo/detail?guid=b01d6406-b745-49dd-9836-119b2f1e42b9 。以下时间为UTC。
+
+| 场景 | 证据 | 判定 |
+|---|---|---|
+| 普通任务17×23 | task_create事件f9b9c9d1b207150c1cdf57c18055f169；08:43:43.937 AIME收到，08:43:46.939 ACK；返回summary“计算结果：17×23=391。简要过程：17×(20+3)=340+51=391。”；08:45:13.920 task.completed，Bridge确认结果评论和完成；服务端status=done / agent_task_status=4 / completed_at=1789029914000 | PASS |
+| Owner在已完成任务补充19×19 | 用户评论ID7683825390837615556；task_comment事件a9ad50bea3c7f196a8b46b7f04d272e7；08:46:54.794建执行记录，ACK/结果评论各一次；返回summary“新的计算结果：19×19=361。简要过程：19×19=(20-1)×(20-1)=400-20-20+1=361。”；08:47:53.756完成；独立服务端读取done / agent_task_status=4 / completed_at=1789030073000 | PASS，仅补充执行 |
+
+两个AAMP任务ID均为feishu-task-加上述GUID-加各自事件ID，记录了各自ACK、resultHandled与feishuCompleted标记。Bot自己的评论事件被ignored reason=comment_authored_by_current_app忽略，未触发递归执行。AIME doctor复查compatible/authenticated/aimeReachable均true。
+
+本轮证明除Codex外的AIME可经真实AAMP/飞书链路处理普通任务及Owner后续补充。Owner补充用例不是B02完整通过：尚未覆盖缺输入need_help、中间重启和非Owner拒绝；取消、父子/提醒重复完整矩阵、桌面后台/锁屏/注销恢复仍待验证。AIME远程本地文件/附件能力按既有边界记录，不计为Windows本地附件通过。未合并或npm发布；当前提交三平台CI仍未取得结论。
+
+本地证据：C:/codex/aamp-evidence-20260910/aime-business-state.json、aime-basic-task-final.json、aime-followup-task-final.json；原始Bridge日志位于当前用户.aamp/logs/runs/1789028318172-13600。提取证据不包含认证token或内部思考步骤；原始文件未公开上传。前台运行保留供后续验收。
