@@ -14,6 +14,8 @@
 
 ## 验证记录
 
+本轮 Win11/Coco 接手复验（2026-09-10，代码 a8b68b9）：真实普通用户 Session 1 的 CIM 查询通过；npm 含空格 Node 路径失败及两项 ACP CIM 夹具失败均已重新复现。Coco 0.121.0 只读启动探针耗时 11.620s、8.605s，第三次 145.621s 无输出后仅终止已验证身份的测试进程。P1/P2 未关闭；详见末节。先验 Coco，通过后再验其他 Agent，正常流程必须扫描可用 Agent 并由用户选择。
+
 最新 2026-09-10 普通用户修复：ACL 重复保护与不安全权限修正已在 Win10 标准用户通过，三包实际打包和安装 help 通过；该账号的 SSH 会话拒绝本机 CIM/WMI 查询，TaskAgent/ACP 普通用户全量及生命周期尚未转绿。详见末节；以下历史记录不覆盖当前提交。
 
 本轮 2026-09-09 范围修正：Node 24 本机 TaskAgent 全量 477 通过/10 跳过，Win10 原生 278 通过/14 跳过；Agent 扫描和手动选择使用测试 CLI 验证，真实 Win11/Coco 业务仍待验收。新结果详见末节。以下表格保留 2026-09-08 业务补测证据，不将旧提交成功等同于本轮代码验收。真实桌面证据来自 Windows 10 Enterprise 22H2 Administrator；CI 的 Windows runner 是 Windows Server 2025，不是 Windows 11。Node 24 已完成三包原生测试及更新后真实后台任务闭环。历史失败保留在下方，不将已被后续证据覆盖的旧状态作为当前结论。
@@ -412,3 +414,28 @@ macOS 初次并行跑三包时，原有 POSIX TERM-resistant fixture 用例超�
 继续验证需要一个能正常查询本机 CIM 的普通用户会话；随后重跑 TaskAgent/ACP 全量、真实进程清理和多绑定/重启。Win11 接手方先保留未提交改动、对齐含本节修复的最新分支，再用本地普通用户终端复测。Win11/Coco pack与真实飞书矩阵仍按其原计划推进，不能用本轮 Win10 打包帮助入口代替授权/任务/附件闭环。本轮未取得对应新提交的远端 CI 结论，不沿用旧提交 CI 成功。
 
 本轮普通用户产物 SHA256：TaskAgent `c9c4d26f44c5f0bbb4a5d0f302ebe9cb7cbb36f2895eaeac1ef12a56a6fdb094`；ACP `88e47c8f6c950ece0646e93eb77a4aeaec241503913dcc574653ae1954350f52`；Feishu `ed9e9a4426a34f668f05f472b12364476d9623cfd5830a64d3856af01945acd8`。
+
+
+## 2026-09-10 Windows 11 / Coco：Codex 接手与原生复现
+
+- 记录 ID：W11-COCO-20260910-CODEX-01；时区 Asia/Shanghai。
+- 执行器为 Codex，被测入口为原生 Coco；未以 Codex 的运行结果替代 Coco。
+- 实际代码：a8b68b9860278bd7eb884cf0f5c5fbd33d8e8a25。fetch 后远端同 SHA，开始前工作区干净；本轮没有修改产品代码。
+- 环境：Windows 11 专业版 10.0.26200 x64，真实用户中完整性、Administrators deny-only、交互 Session 1；Node 24.19.0 / npm 11.17.0；Coco 0.121.0，build 5c27ca56。
+- Codex 沙箱账号的 CIM 查询拒绝访问；切回真实用户运行的只读盘点成功，未提权为管理员、未修改 WMI/企业策略。两种执行环境的结果分别记录。
+
+| 项目 | 本轮命令/输入 | 本轮结果 |
+|---|---|---|
+| A03 npm 原生包入口 | Task Agent 包内：node --test --test-name-pattern="native Windows npm package shim" test/runtime-package-executable.test.mjs | FAIL，exit 1；执行 1、通过 0、失败 1、跳过 0。错误：'C:\Program' is not recognized as an internal or external command。调用使用 C:\Program Files\nodejs\node.exe；npm exec 内部将可执行路径作为命令文本，未保护空格边界。产品 materialize 同样传 process.execPath，尚未修复。 |
+| A03 ACP 原生身份夹具 | ACP 包内：node --import tsx --test --test-name-pattern="native ACP (identity\|tree) recovers a live image" src/acpx-client.test.ts | FAIL，exit 1；两项均在夹具对 CIM 对象 ExecutablePath 赋值时出现 ReadOnlyCIMProperty，尚未进入预期的 native handle 回退验证；不得据此称产品身份校验失败或通过。 |
+| A01 Coco 启动 1 | coco.exe --version；shell:false，stdin EOF，保留原环境 | 正常 exit 0；首字节 11606ms，退出 11620ms。 |
+| A01 Coco 启动 2 | coco.exe acp serve --help；同上 | 正常 exit 0；首字节 8558ms，退出 8605ms。 |
+| A01 Coco 启动 3 | coco.exe --version；同上 | BLOCKED：145621ms 无 stdout/stderr，未正常退出；核对 PID、父进程、创建时间和路径后结束该测试进程。用户原有 Coco PID 16916 仍存活。该退出码不算 Coco 自行失败退出。 |
+
+历史日志回读（非本轮全量重跑）：此前本机 p3 日志 Task Agent 278 pass / 1 fail / 15 skip，ACP 197 pass / 2 fail / 4 skip，Feishu 116 pass。此前 acpx 日志包含会话、计算391、读取49及写文件；取消只有 nothing to cancel，不能作为运行中取消通过证据。
+
+状态：A01 部分取证；A02 运行中取消/完整当前提交会话仍待复验；A03 失败且 Node22 尚未覆盖。B/C/D 的真实业务及桌面生命周期本轮 NOT_RUN，无本轮 Task ID、新 Bot/OAuth 或包哈希。不把以上状态计作完整 P1/P2 通过。
+
+下一步：对 Coco 慢启动采集独立终端与受控子进程的对照，定位等待环节；不得仅增大超时后宣称修复。修正 npm 路径边界及 ACP 只读 CIM 夹具后重跑三包与 Node22/24。Coco 验证通过前不切换其他 Agent；安装必须保留扫描后用户选择流程。未升级 Coco，未合并 PR，未 npm 发布。
+
+本地原始证据：C:\codex\aamp-evidence-20260910 下 task-shim-repro.log、acp-cim-repro.log、coco-timing.jsonl。上表完整列出可跨主机回读的最小复现、错误及数值；原始本地文件未上传，不能视为远端可访问附件。本节提交 SHA 与被测代码 SHA 分开，以 git log 查询本节提交。
