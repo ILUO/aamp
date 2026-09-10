@@ -312,8 +312,9 @@ defaults:
 - [x] 按设计验收矩阵逐项填写结果，已知非 Windows 业务缺陷独立记录；不得通过修业务缺陷使本次范围变大。
 - [x] 执行 `git diff --check` 和 `git diff --stat 7c4b7ff50b2fc766f9076dcbc7d87ce910ca8b76`，逐文件解释对应平台阻断点；检查无 SDK/服务端/旧 Task Bridge 改动。
 - [x] 发布准备仅记录：必要 Bridge patch → Controller 精确包引用 → Task Agent patch；发布身份/版本核验完成后才具备发布条件。未获发布授权不执行 npm publish。
-- [ ] 最新交付：d626d3c及本轮验收记录/计划尚未推送；自动审批要求用户明确授权。历史README/记录已推送不代表本轮完成。
-- [ ] d626d3c对应三平台×Node22/24 CI、Draft PR和飞书交接摘要待同步与核验。
+- [x] 用户确认后d626d3c及验收/计划111f154已推送并回读远端SHA；最终CI结果补充见验收记录。
+- [x] 包含d626d3c的111f154对应三平台×Node22/24 CI run34471995377六组成功，三包测试/类型/pack及Windows安装入口已逐项核对。
+- [x] 最终Draft PR描述与飞书摘要revision28已同步并回读；不改变Draft或发布状态。
 
 **完成标准:** Windows 原生普通用户完整闭环 + tgz 验证 + CI/实机证据齐全 + macOS/Linux 回归。当前 macOS 上通过静态检查不等于支持完成。
 
@@ -382,7 +383,13 @@ defaults:
 | C07 | PASS | 三个隔离prefix卸载退出0；所属计划任务和入口均移除；最新复核受管进程0、测试registry进程0、绑定哈希未变、原Coco身份存活。 |
 | D01 | PASS（受控） | 缺CLI、登录/权限、网络错误、ACL失败的关闭/提示/重试断言；没有实际撤权、拔网或修改企业策略。 |
 | D02 | PASS（分层证据） | 身份/CIM/PID重用/旧generation/外部用户为受控断言；真实原生故障清理与旁观者保护另有证据。Node22/24多绑定集合及generation就绪探针通过，非真实第二Bot并行业务。 |
-| CI | PENDING | 61b2692的run34463388746总体Success仅为旧提交证据，六个子job尚未逐项核对；d626d3c尚未推送，无最新三平台×Node22/24结果。 |
-| 交付 | PENDING | 本地记录与计划更新；远端推送、最新CI、PR及飞书交接摘要待同步。不得宣称整体目标完成或发布就绪。 |
+| CI | PASS | 提交111f154（包含产品修复d626d3c）的[run34471995377](https://github.com/ILUO/aamp/actions/runs/34471995377)六个job全部Success；三包测试/类型/pack及两组Windows打包入口逐项核验通过。后续仅文档变化不冒充新产品代码。 |
+| 交付 | 已同步 | 产品/验收已推送；PR描述及飞书摘要revision28已写入并回读。最终CI证据补充在本节；保持Draft，未合并或npm发布。 |
 
 最终隔离安装已卸载；保留绑定及证据。C06更新后793/done及C07独立现场复核通过；d626d3c本地Task Agent在Node22/24各283通过、15跳过、0失败。间歇AIME准备超时历史保留，不宣称根因已消除。Task10整体仍未完成，具体证据以验收记录顶部和最后一节为准。
+
+
+授权推送后：111f154对应run34471995377六组CI已核对success，本次仅追加文档，产品源码与该运行一致。用户注销跳过和AIME文件能力不支持仍单独记录。PR描述与飞书摘要revision28已同步回读；未合并或npm发布。
+
+
+最终同步回读：PR1保持open/Draft，正文包含实际通过的run34471995377；飞书摘要revision28包含同一产品与CI证据。Task10按用户指定AIME完成全部可执行矩阵与交付，A02/B05/B06本机文件为UNSUPPORTED、C03/C04实际注销登录为USER_SKIPPED；这些状态没有被改成PASS。没有其他已知未执行的本轮适用用例。
