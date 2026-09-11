@@ -51,215 +51,226 @@ test('background handoff releases foreground resources before launchd starts', a
   assert.deepEqual(result, { state: 'running', pid: 2468 })
 })
 
-test('add activation merges new bindings into the saved background selection', async () => {
-  assert.equal(typeof controller.activateAddedBindings, 'function')
-  const calls = []
-  const result = await controller.activateAddedBindings([bindings[1], bindings[2]], {
-    platform: 'darwin',
-    getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2468 }),
-    loadBindings: async () => bindings,
-    readSelection: async () => ['binding-a'],
-    startService: async (bindingIds) => {
-      calls.push(bindingIds)
-      return { loaded: true, state: 'running', pid: 2469 }
-    },
-  })
-
-  assert.deepEqual(calls, [['binding-a', 'binding-b', 'binding-c']])
-  assert.deepEqual(result, {
-    mode: 'background',
-    bindingIds: ['binding-a', 'binding-b', 'binding-c'],
-    pid: 2469,
-  })
-})
-
-test('add activation restores the previous background selection when a new binding fails', async () => {
-  assert.equal(typeof controller.activateAddedBindings, 'function')
-  const calls = []
-  await assert.rejects(
-    controller.activateAddedBindings([bindings[1]], {
-      platform: 'darwin',
+for (const platform of ['darwin', 'win32']) {
+  test(`${platform}: add activation merges new bindings into the saved background selection`, async () => {
+    assert.equal(typeof controller.activateAddedBindings, 'function')
+    const calls = []
+    const result = await controller.activateAddedBindings([bindings[1], bindings[2]], {
+      platform,
+      withControlLock: async (action) => action(),
       getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2468 }),
       loadBindings: async () => bindings,
       readSelection: async () => ['binding-a'],
       startService: async (bindingIds) => {
         calls.push(bindingIds)
-        if (calls.length === 1) throw new Error('binding-b failed readiness')
-        return { loaded: true, state: 'running', pid: 2470 }
+        return { loaded: true, state: 'running', pid: 2469 }
       },
-    }),
-    /新增绑定已保存，但自动启动失败.*binding-b failed readiness/,
-  )
+    })
 
-  assert.deepEqual(calls, [
-    ['binding-a', 'binding-b'],
-    ['binding-a'],
-  ])
-})
-
-test('replacement failure restores config before restarting the previous binding selection', async () => {
-  const oldBinding = { binding_id: 'binding-old', agent_type: 'codex' }
-  const replacement = { binding_id: 'binding-new', agent_type: 'codex' }
-  const calls = []
-  await assert.rejects(
-    controller.activateAddedBindings([replacement], {
-      platform: 'darwin',
-      getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2471 }),
-      loadBindings: async () => [replacement],
-      readSelection: async () => ['binding-old'],
-      beforeRollback: async () => calls.push('restore-config'),
-      startService: async (bindingIds) => {
-        calls.push(`start:${bindingIds.join(',')}`)
-        if (bindingIds.includes('binding-new')) throw new Error('replacement failed readiness')
-        return { loaded: true, state: 'running', pid: 2472 }
-      },
-      stopRuntime: async () => calls.push('stop'),
-    }),
-    /新增绑定已保存，但自动启动失败/,
-  )
-
-  assert.deepEqual(calls, [
-    'start:binding-new',
-    'restore-config',
-    'start:binding-old',
-  ])
-})
-
-test('replacement rollback error tells the user that the old binding was restored', async () => {
-  const oldBinding = { binding_id: 'binding-old', agent_type: 'codex' }
-  await assert.rejects(
-    controller.activateAddedBindings([
-      { binding_id: 'binding-new', agent_type: 'codex' },
-    ], {
-      platform: 'darwin',
-      getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2472 }),
-      loadBindings: async () => [{ binding_id: 'binding-new', agent_type: 'codex' }],
-      readSelection: async () => ['binding-old'],
-      beforeRollback: async () => [oldBinding],
-      startService: async (bindingIds) => {
-        if (bindingIds.includes('binding-new')) throw new Error('replacement readiness failed')
-        return { loaded: true, state: 'running', pid: 2473 }
-      },
-    }),
-    /替换绑定自动启动失败，已恢复原绑定.*重新运行.*add/,
-  )
-})
-
-test('add activation leaves a legacy foreground runtime untouched', async () => {
-  const calls = []
-  const result = await controller.activateAddedBindings([bindings[1]], {
-    platform: 'darwin',
-    getRuntimeStatus: async () => ({ mode: 'foreground', state: 'running', pid: 2473 }),
-    loadBindings: async () => bindings,
-    readSelection: async () => [],
-    startService: async () => calls.push('start'),
-    stopRuntime: async () => calls.push('stop'),
-  })
-
-  assert.deepEqual(calls, [])
-  assert.deepEqual(result, {
-    mode: 'manual',
-    reason: 'foreground-running',
-    bindingIds: ['binding-b'],
-    pid: 2473,
-  })
-})
-
-test('add activation leaves a legacy foreground owner untouched when launchd is also loaded', async () => {
-  const calls = []
-  const result = await controller.activateAddedBindings([bindings[1]], {
-    platform: 'darwin',
-    getRuntimeStatus: async () => ({
+    assert.deepEqual(calls, [['binding-a', 'binding-b', 'binding-c']])
+    assert.deepEqual(result, {
       mode: 'background',
-      state: 'waiting',
-      pid: null,
-      pids: [2476],
-    }),
-    loadBindings: async () => bindings,
-    readSelection: async () => [],
-    startService: async () => calls.push('start'),
-    stopService: async () => calls.push('stop-service'),
-    stopRuntime: async () => calls.push('stop-runtime'),
+      bindingIds: ['binding-a', 'binding-b', 'binding-c'],
+      pid: 2469,
+    })
   })
 
-  assert.deepEqual(calls, [])
-  assert.deepEqual(result, {
-    mode: 'manual',
-    reason: 'foreground-running',
-    bindingIds: ['binding-b'],
-    pid: 2476,
-  })
-})
+  test(`${platform}: add activation restores the previous background selection when a new binding fails`, async () => {
+    assert.equal(typeof controller.activateAddedBindings, 'function')
+    const calls = []
+    await assert.rejects(
+      controller.activateAddedBindings([bindings[1]], {
+        platform,
+        withControlLock: async (action) => action(),
+        getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2468 }),
+        loadBindings: async () => bindings,
+        readSelection: async () => ['binding-a'],
+        startService: async (bindingIds) => {
+          calls.push(bindingIds)
+          if (calls.length === 1) throw new Error('binding-b failed readiness')
+          return { loaded: true, state: 'running', pid: 2470 }
+        },
+      }),
+      /新增绑定已保存，但自动启动失败.*binding-b failed readiness/,
+    )
 
-test('failed first add unloads only launchd and never stops unrelated foreground owners', async () => {
-  const calls = []
-  await assert.rejects(
-    controller.activateAddedBindings([bindings[1]], {
-      platform: 'darwin',
-      getRuntimeStatus: async () => ({ mode: 'stopped', state: 'stopped', pid: null, pids: [] }),
+    assert.deepEqual(calls, [
+      ['binding-a', 'binding-b'],
+      ['binding-a'],
+    ])
+  })
+
+  test(`${platform}: replacement failure restores config before restarting the previous binding selection`, async () => {
+    const oldBinding = { binding_id: 'binding-old', agent_type: 'codex' }
+    const replacement = { binding_id: 'binding-new', agent_type: 'codex' }
+    const calls = []
+    await assert.rejects(
+      controller.activateAddedBindings([replacement], {
+        platform,
+        withControlLock: async (action) => action(),
+        getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2471 }),
+        loadBindings: async () => [replacement],
+        readSelection: async () => ['binding-old'],
+        beforeRollback: async () => calls.push('restore-config'),
+        startService: async (bindingIds) => {
+          calls.push(`start:${bindingIds.join(',')}`)
+          if (bindingIds.includes('binding-new')) throw new Error('replacement failed readiness')
+          return { loaded: true, state: 'running', pid: 2472 }
+        },
+        stopRuntime: async () => calls.push('stop'),
+      }),
+      /新增绑定已保存，但自动启动失败/,
+    )
+
+    assert.deepEqual(calls, [
+      'start:binding-new',
+      'restore-config',
+      'start:binding-old',
+    ])
+  })
+
+  test(`${platform}: replacement rollback error tells the user that the old binding was restored`, async () => {
+    const oldBinding = { binding_id: 'binding-old', agent_type: 'codex' }
+    await assert.rejects(
+      controller.activateAddedBindings([
+        { binding_id: 'binding-new', agent_type: 'codex' },
+      ], {
+        platform,
+        withControlLock: async (action) => action(),
+        getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2472 }),
+        loadBindings: async () => [{ binding_id: 'binding-new', agent_type: 'codex' }],
+        readSelection: async () => ['binding-old'],
+        beforeRollback: async () => [oldBinding],
+        startService: async (bindingIds) => {
+          if (bindingIds.includes('binding-new')) throw new Error('replacement readiness failed')
+          return { loaded: true, state: 'running', pid: 2473 }
+        },
+      }),
+      /替换绑定自动启动失败，已恢复原绑定.*重新运行.*add/,
+    )
+  })
+
+  test(`${platform}: add activation leaves a legacy foreground runtime untouched`, async () => {
+    const calls = []
+    const result = await controller.activateAddedBindings([bindings[1]], {
+      platform,
+      withControlLock: async (action) => action(),
+      getRuntimeStatus: async () => ({ mode: 'foreground', state: 'running', pid: 2473 }),
       loadBindings: async () => bindings,
       readSelection: async () => [],
-      startService: async () => {
-        calls.push('start')
-        throw new Error('service readiness failed')
-      },
+      startService: async () => calls.push('start'),
+      stopRuntime: async () => calls.push('stop'),
+    })
+
+    assert.deepEqual(calls, [])
+    assert.deepEqual(result, {
+      mode: 'manual',
+      reason: 'foreground-running',
+      bindingIds: ['binding-b'],
+      pid: 2473,
+    })
+  })
+
+  test(`${platform}: add activation leaves a legacy foreground owner untouched when launchd is also loaded`, async () => {
+    const calls = []
+    const result = await controller.activateAddedBindings([bindings[1]], {
+      platform,
+      withControlLock: async (action) => action(),
+      getRuntimeStatus: async () => ({
+        mode: 'background',
+        state: 'waiting',
+        pid: null,
+        pids: [2476],
+      }),
+      loadBindings: async () => bindings,
+      readSelection: async () => [],
+      startService: async () => calls.push('start'),
       stopService: async () => calls.push('stop-service'),
       stopRuntime: async () => calls.push('stop-runtime'),
-    }),
-    /service readiness failed/,
-  )
+    })
 
-  assert.deepEqual(calls, ['start', 'stop-service'])
-})
+    assert.deepEqual(calls, [])
+    assert.deepEqual(result, {
+      mode: 'manual',
+      reason: 'foreground-running',
+      bindingIds: ['binding-b'],
+      pid: 2476,
+    })
+  })
 
-test('concurrent add activation serializes selection merge so no binding is lost', async () => {
-  let selection = ['binding-a']
-  let firstRead = true
-  let queue = Promise.resolve()
-  const withControlLock = async (action) => {
-    const pending = queue.then(action, action)
-    queue = pending.catch(() => {})
-    return pending
-  }
-  const operations = {
-    platform: 'darwin',
-    getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2474 }),
-    loadBindings: async () => bindings,
-    readSelection: async () => {
-      const snapshot = [...selection]
-      if (firstRead) {
-        firstRead = false
-        await new Promise((resolve) => setTimeout(resolve, 20))
-      }
-      return snapshot
-    },
-    startService: async (bindingIds) => {
-      selection = [...bindingIds]
-      return { loaded: true, state: 'running', pid: 2474 }
-    },
-    withControlLock,
-  }
+  test(`${platform}: failed first add unloads only launchd and never stops unrelated foreground owners`, async () => {
+    const calls = []
+    await assert.rejects(
+      controller.activateAddedBindings([bindings[1]], {
+        platform,
+        withControlLock: async (action) => action(),
+        getRuntimeStatus: async () => ({ mode: 'stopped', state: 'stopped', pid: null, pids: [] }),
+        loadBindings: async () => bindings,
+        readSelection: async () => [],
+        startService: async () => {
+          calls.push('start')
+          throw new Error('service readiness failed')
+        },
+        stopService: async () => calls.push('stop-service'),
+        stopRuntime: async () => calls.push('stop-runtime'),
+      }),
+      /service readiness failed/,
+    )
 
-  await Promise.all([
-    controller.activateAddedBindings([bindings[1]], operations),
-    controller.activateAddedBindings([bindings[2]], operations),
-  ])
+    assert.deepEqual(calls, ['start', 'stop-service'])
+  })
 
-  assert.deepEqual(selection, ['binding-a', 'binding-b', 'binding-c'])
-})
+  test(`${platform}: concurrent add activation serializes selection merge so no binding is lost`, async () => {
+    let selection = ['binding-a']
+    let firstRead = true
+    let queue = Promise.resolve()
+    const withControlLock = async (action) => {
+      const pending = queue.then(action, action)
+      queue = pending.catch(() => {})
+      return pending
+    }
+    const operations = {
+      platform,
+      getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2474 }),
+      loadBindings: async () => bindings,
+      readSelection: async () => {
+        const snapshot = [...selection]
+        if (firstRead) {
+          firstRead = false
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        return snapshot
+      },
+      startService: async (bindingIds) => {
+        selection = [...bindingIds]
+        return { loaded: true, state: 'running', pid: 2474 }
+      },
+      withControlLock,
+    }
 
-test('add activation fails closed when a saved binding disappears before service selection', async () => {
-  await assert.rejects(
-    controller.activateAddedBindings([bindings[1]], {
-      platform: 'darwin',
-      getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2475 }),
-      loadBindings: async () => [bindings[0]],
-      readSelection: async () => ['binding-a'],
-      startService: async () => assert.fail('a missing added binding must not report a successful restart'),
-    }),
-    /配置已被其他命令修改.*重新运行.*add/,
-  )
-})
+    await Promise.all([
+      controller.activateAddedBindings([bindings[1]], operations),
+      controller.activateAddedBindings([bindings[2]], operations),
+    ])
+
+    assert.deepEqual(selection, ['binding-a', 'binding-b', 'binding-c'])
+  })
+
+  test(`${platform}: add activation fails closed when a saved binding disappears before service selection`, async () => {
+    await assert.rejects(
+      controller.activateAddedBindings([bindings[1]], {
+        platform,
+        withControlLock: async (action) => action(),
+        getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2475 }),
+        loadBindings: async () => [bindings[0]],
+        readSelection: async () => ['binding-a'],
+        startService: async () => assert.fail('a missing added binding must not report a successful restart'),
+      }),
+      /配置已被其他命令修改.*重新运行.*add/,
+    )
+  })
+
+}
 
 test('add invokes automatic activation unless no-start is requested', async () => {
   assert.equal(typeof controller.runAdd, 'function')

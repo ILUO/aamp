@@ -264,7 +264,7 @@ feishu-task-agent help
 - `logs` prints the latest 100 lines from the persistent background log.
 - `list` prints saved Agent-Bot pairs and never prints App Secrets.
 - `add` uses the same confirmed atomic add/replace behavior and initially saves
-  each pair as pending. On macOS it then merges the new pairs into the managed
+  each pair as pending. On macOS and Windows it then merges the new pairs into the managed
   background-service selection and restarts that service automatically. The
   first service start completes ACP pairing, creates runtime configuration,
   registers the Task Agent, and changes the pair to ready. Existing selected
@@ -273,7 +273,7 @@ feishu-task-agent help
   restored. If a replacement cannot start, the replaced ready binding is
   restored instead. A legacy foreground runtime is left untouched and the
   command prints the explicit `stop` then `start` migration steps.
-  `add --no-start` keeps the save-only behavior; on platforms without the macOS
+  `add --no-start` keeps the save-only behavior; on platforms without a supported
   background service, run `feishu-task-agent start` after `add`.
 - `remove` multi-selects pairs, with a `全部` option. It only removes saved
   pairing records; Bridges that are already running are not stopped.
@@ -292,7 +292,7 @@ existing process; an Agent lease prevents competing runtimes from being
 started for the same Agent identity.
 
 Bridge processes are launched by `install`, `start`, or the private service
-worker. On macOS, `add` updates and restarts the managed service rather than
+worker. On macOS and Windows, `add` updates and restarts the managed service rather than
 starting a competing Bridge in the interactive process. Before an interactive
 foreground startup begins, it acquires one global runtime-session lease and
 also checks for Agent leases left by an older Task Agent version. If another

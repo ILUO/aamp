@@ -3667,7 +3667,7 @@ async function restoreReplacedBindings(previousBindings, acceptedBindings, opera
 async function activateAddedBindings(addedBindings, operations = {}) {
   const platform = operations.platform || process.platform;
   const addedBindingIds = [...new Set(addedBindings.map((binding) => binding.binding_id))];
-  if (platform !== 'darwin') {
+  if (!['darwin', 'win32'].includes(platform)) {
     return { mode: 'manual', bindingIds: addedBindingIds, pid: null };
   }
   const withControlLock = operations.withControlLock || withServiceControlLock;

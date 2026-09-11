@@ -45,19 +45,19 @@ test('Windows entry uses only an explicit agent argument, matching the macOS lau
     await writeFile(path.join(root,'bin','windows-platform.mjs'),'export async function resolveNativeCommand(){return {command:process.execPath,argsPrefix:[]}}');
     // Observe the real launcher's child environment before any update/install work.
     await writeFile(path.join(root,'bootstrap','windows-update.mjs'),`export async function runWindowsUpdate({env}) {
-      console.log(JSON.stringify({agent:env.AAMP_TASK_DEFAULT_AGENT,parentAgent:process.env.AAMP_TASK_DEFAULT_AGENT}));
+      console.log(JSON.stringify({agent:env.AAMP_TASK_DEFAULT_AGENT,parentAgent:process.env.AAMP_TASK_DEFAULT_AGENT,noStart:env.AAMP_TASK_NO_START}));
       return {handled:true,code:0};
     }`);
     const {pathToFileURL} = await import('node:url');
     const fixtureUrl = pathToFileURL(path.join(root,'bootstrap','windows-entry.mjs')).href;
-    for (const [argv,expected] of [[['install'],''],[['add'],''],[['install','--agent','coco'],'coco']]) {
+    for (const [argv,expected] of [[['install'],''],[['add'],''],[['add','--no-start'],''],[['install','--agent','coco'],'coco']]) {
       await t.test(argv.join(' '),()=>{
         const code = `Object.defineProperty(process.stdin,'isTTY',{value:true});Object.defineProperty(process.stdout,'isTTY',{value:true});const m=await import(${JSON.stringify(fixtureUrl)});await m.runWindowsEntry(${JSON.stringify(argv)});`;
         const result = spawnSync(process.execPath,['--input-type=module','-e',code],{
           env:{...process.env,AAMP_TASK_DEFAULT_AGENT:'traex'},encoding:'utf8',timeout:10000,
         });
         assert.equal(result.status,0,result.stderr);
-        assert.deepEqual(JSON.parse(result.stdout),{agent:expected,parentAgent:'traex'});
+        assert.deepEqual(JSON.parse(result.stdout),{agent:expected,parentAgent:'traex',noStart:String(argv.includes('--no-start'))});
       });
     }
   } finally {await rm(root,{recursive:true,force:true});}
@@ -98,4 +98,10 @@ test('POSIX aliases retain short help and standalone install defaults', {skip: p
       assert.equal(result.stdout,expected);
     }
   } finally {await fs.rm(directory,{recursive:true,force:true});}
+});
+
+test('Windows add supports save-only mode explicitly', async () => {
+  const {parseWindowsArguments}=await import(moduleUrl);
+  assert.equal(parseWindowsArguments(['add']).noStart, undefined);
+  assert.equal(parseWindowsArguments(['add','--no-start']).noStart, true);
 });

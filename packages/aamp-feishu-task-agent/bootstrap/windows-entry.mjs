@@ -17,6 +17,7 @@ export function parseWindowsArguments(argv, entry = 'short') {
   while (args.length) {
     const flag=args.shift();
     if (flag === '--foreground') result.foreground=true;
+    else if (flag === '--no-start') result.noStart=true;
     else if (flag === '--debug') result.debug=true;
     else if (flag === '--help' || flag === '-h') result.command='help';
     else if (flag === '--agent' || flag === '--aamp-host') {
@@ -69,7 +70,7 @@ export function windowsNpmEnvironment(source = process.env) {
 export async function runWindowsEntry(argv) {
   const options=parseWindowsArguments(argv,windowsEntryKind(process.argv[1]));
   if (options.command === 'help') {
-    console.log('feishu-task-agent <install|start|status|stop|restart|logs|list|add|remove|update>\n  --agent <name>  --aamp-host <url>  --foreground  --debug');
+    console.log('feishu-task-agent <install|start|status|stop|restart|logs|list|add|remove|update>\n  --agent <name>  --aamp-host <url>  --foreground  --debug  --no-start');
     return;
   }
   if (['install','add','remove'].includes(options.command) && (!process.stdin.isTTY || !process.stdout.isTTY)) {
@@ -83,6 +84,7 @@ export async function runWindowsEntry(argv) {
   const env={...windowsNpmEnvironment(process.env),
     // Match the macOS launcher: only --agent may bypass interactive selection.
     AAMP_TASK_DEFAULT_AGENT:options.agent,
+    AAMP_TASK_NO_START:String(options.noStart || process.env.AAMP_TASK_NO_START === 'true'),
     AAMP_TASK_AAMP_HOST:options.host,
     AAMP_TASK_FOREGROUND:String(options.foreground || process.env.AAMP_TASK_FOREGROUND === 'true'),
     AAMP_TASK_DEBUG_MODE:String(options.debug || process.env.AAMP_TASK_DEBUG_MODE === 'true'),
