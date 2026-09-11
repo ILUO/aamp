@@ -22,6 +22,7 @@ const PACKAGED_RUNTIME_FILES = [
   'bin/windows-platform.mjs',
   'bin/windows-process-journal.mjs',
   'bin/windows-service-worker.mjs',
+  'bin/windows-service-launcher.vbs',
   'bin/windows-service.mjs',
   'bootstrap/aamp-feishu-task-agent-bootstrap.sh',
   'bootstrap/register-feishu-app.mjs',

@@ -411,6 +411,26 @@ redacted before it is written by the Controller. Verbose Feishu registration
 details (SDK metadata, scopes, events, and raw SDK output) are written to a
 private per-run registration log instead of flooding the interactive terminal.
 
+On Windows, scheduled background runs use the packaged Windows Script Host
+launcher to start the worker hidden and return its exit status to Task Scheduler.
+Windows Script Host must be enabled. After upgrading local code, restart the
+managed service to register the new launch action. The launcher does not detach
+Task Scheduler from the worker's lifetime.
+
+Windows Codex preparation installs the ACP adapter before connecting the Bridge.
+Only complete installations are reused; incomplete installations are rebuilt
+under a process lock. The adapter runs directly from its managed installation,
+without relying on an existing npx executable cache. A missing Codex session-ready
+event is reported as a startup failure.
+
+Interactive waiting indicators refresh one terminal line and are cleared when
+the operation ends. Redirected output contains stage changes without periodic
+waiting messages. The Windows service directory additionally contains
+`worker-diagnostic.jsonl` and `controller-diagnostic.jsonl`; each has a 512 KiB
+limit and one rotated copy. These limits apply to the new lifecycle diagnostics,
+not the existing service or component logs. Hard process termination may prevent
+the final lifecycle event from being written.
+
 Useful diagnostics commands:
 
 ```bash

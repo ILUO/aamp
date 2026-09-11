@@ -107,11 +107,15 @@ $env:AAMP_SCHEDULER_INPUT=@{operation='status';name='in-memory-fixture';sid=$sid
 test('background config preserves explicit preparation policies and proxies but excludes unrelated secrets',async t=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-service-env-'));t.after(()=>fs.rm(root,{recursive:true,force:true}))
   const expected={FEISHU_USER_AUTH_MODE:'disabled',FEISHU_USER_AUTH_REQUESTED_SCOPES:'task:task:read',FEISHU_APP_SCOPES_TENANT:'task:task:read',LARK_CLI_MIN_VERSION:'1.2.3',LARK_REGISTER_APP_SDK:'@larksuiteoapi/node-sdk@1.2.3',NPM_REGISTRY:'https://registry.example.test',npm_config_cache:'cache',HTTPS_PROXY:'http://proxy.example.test:8080',CODEX_AUTO_UPDATE:'false'}
-  const manager=mod.createWindowsServiceManager({runtimeHome:root,controllerPath:'controller',workerPath:'worker',environment:{...expected,UNRELATED_SECRET:'sentinel'},currentSid:async()=>'S-1-5-21-1',ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),scheduler:async()=>({loaded:false,state:'Ready',ownerSid:'S-1-5-21-1'}),startupAttempts:0,stopAttempts:0})
+  const progress=[]
+  const manager=mod.createWindowsServiceManager({runtimeHome:root,controllerPath:'controller',workerPath:'worker',onProgress:message=>progress.push(message),environment:{...expected,UNRELATED_SECRET:'sentinel'},currentSid:async()=>'S-1-5-21-1',ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),scheduler:async()=>({loaded:false,state:'Ready',ownerSid:'S-1-5-21-1'}),startupAttempts:0,stopAttempts:0})
   await assert.rejects(manager.start(['selected-binding']))
   const config=JSON.parse(await fs.readFile(manager.paths.configFile,'utf8'))
   for(const [key,value] of Object.entries(expected))assert.equal(config.env[key],value,key)
   assert.equal(config.env.AAMP_TASK_NON_INTERACTIVE,'true')
   assert.equal(config.env.UNRELATED_SECRET,undefined)
   assert.equal(config.env.AAMP_TASK_AIME_ACP_HOME,path.join(os.homedir(),'.aamp','feishu-task-agent','aime-acp'))
+  assert.equal(config.env.AAMP_TASK_CODEX_ACP_HOME,path.join(os.homedir(),'.aamp','feishu-task-agent','codex-acp'))
+  assert.ok(progress.some(message=>message.includes('后台任务')))
+  assert.ok(progress.some(message=>message.includes('等待智能体')))
 })

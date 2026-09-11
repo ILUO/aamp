@@ -8,6 +8,8 @@ import { ReadStream, WriteStream } from 'node:tty';
 import { emitKeypressEvents } from 'node:readline';
 import { spawn, fork } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import {startupProgress} from './startup-progress.mjs';
+import {appendLifecycleDiagnostic} from './windows-lifecycle-diagnostics.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   TASK_AGENT_TYPES,
@@ -26,6 +28,7 @@ import {
 } from './runtime-package-executable.mjs';
 import {
   agentStartRetryError,
+  codexSessionFailure,
   agentStartFailureMessage,
   bridgeAuthenticationRetryError,
   classifyNetworkError,
@@ -103,7 +106,10 @@ const SERVICE_PATH = [...new Set([
   '/sbin',
 ].filter(Boolean))].join(path.delimiter);
 const launchdService = process.platform === 'win32'
-  ? createWindowsServiceManager({runtimeHome: RUNTIME_HOME, controllerPath: CONTROLLER_PATH})
+  ? createWindowsServiceManager({runtimeHome: RUNTIME_HOME, controllerPath: CONTROLLER_PATH, onProgress:message=>{
+    if (process.stderr.isTTY) process.stderr.write('\r\x1b[2K');
+    console.log(redact(message).startsWith('[aamp-one-click]') ? redact(message) : `[aamp-one-click] ${redact(message)}`);
+  }})
   : createLaunchdServiceManager({
   home: HOME,
   uid: typeof process.getuid === 'function' ? process.getuid() : 0,
@@ -329,6 +335,9 @@ function projectTrustedLocalAgentEvent(document, options = {}) {
   if (!document || typeof document !== 'object' || Array.isArray(document)) return undefined;
   const type = typeof document.type === 'string' ? document.type : '';
   const agent = trustedAgentIdentity(document.agent, options, 'local');
+  if (agent === 'codex' && ['agent.session.deferred', 'agent.session.ready'].includes(type)) {
+    return {type, agent, ...(type === 'agent.session.deferred' ? {message:redact(document.message || '适配器未就绪')} : {})};
+  }
   if (!agent || !['agent.starting', 'agent.started', 'agent.identity', 'agent.failed'].includes(type)) {
     return undefined;
   }
@@ -1450,7 +1459,10 @@ async function runWindowsBootstrapHelper(action, bindingOrAgent, extraEnv = {}) 
     response = message;
   });
   child.send({kind:'request', action, payload});
-  const exit = await record.exitPromise;
+  const stage = {'__prepare-agent':'智能体准备（版本、登录与适配器）','__ensure-profile':'飞书配置及授权检查','__probe-profile':'飞书授权状态检查','__register-binding':'创建飞书绑定','__discover-agents':'扫描可用智能体'}[action] || action;
+  const finishProgress = action === '__prepare-agent' ? () => {} : startupProgress(stage);
+  let exit;
+  try {exit = await record.exitPromise;} finally {finishProgress();}
   throwIfStopping();
   if (exit.code !== 0 || response?.kind !== 'result') throw new Error(response?.message || exit.error?.message || `Windows helper ${action} did not return a result`);
   return response.payload;
@@ -2169,14 +2181,17 @@ async function startAgentGroups(groups) {
       throwIfStopping();
       const running = started.running;
       throwIfStopping();
-      for (const agent of running.agents || []) group.availableAgents.add(agent.name);
+      const codexFailure = codexSessionFailure(group.process.events);
+      for (const agent of running.agents || []) {
+        if (agent.name !== 'codex' || !codexFailure) group.availableAgents.add(agent.name);
+      }
       for (const agent of agents) {
         if (!group.availableAgents.has(agent.name)) {
           const failed = group.process.events.find((event) => event.type === 'agent.failed' && event.agent === agent.name);
           recordStableAgentFailure(
             group,
             agent.name,
-            failed?.message || `${agent.name} Agent Bridge 启动失败`,
+            (agent.name === 'codex' && codexFailure) || failed?.message || `${agent.name} Agent Bridge 启动失败`,
           );
           await releaseLease(group.leases.get(agent.name));
           group.leases.delete(agent.name);
@@ -4028,6 +4043,12 @@ async function pollWindowsStopRequest() {
 }
 
 async function main() {
+  if (process.platform === 'win32' && COMMAND === '__service-run') {
+    const diagnosticFile=path.join(RUNTIME_HOME,'windows-service-v1','controller-diagnostic.jsonl');
+    appendLifecycleDiagnostic(diagnosticFile,{event:'controller.started'});
+    process.once('exit',code=>appendLifecycleDiagnostic(diagnosticFile,{event:'controller.exit',code}));
+    process.on('uncaughtExceptionMonitor',error=>appendLifecycleDiagnostic(diagnosticFile,{event:'controller.uncaught',errorCode:error.code || error.name}));
+  }
   await ensurePrivateDir(STATE_HOME);
   await assertNoSymlinkPath(RUNTIME_HOME, RUNTIME_HOME);
   await ensurePrivateDir(RUNTIME_HOME);
@@ -4048,6 +4069,7 @@ async function main() {
 
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
+    if (process.platform === 'win32') appendLifecycleDiagnostic(path.join(RUNTIME_HOME,'windows-service-v1','controller-diagnostic.jsonl'),{event:'controller.signal',signal});
     if (stopRequested) return;
     stopRequested = true;
     stopSignal = signal;

@@ -74,7 +74,7 @@ test('Codex npm package resolves declared Windows vendor executable for CODEX_PA
     AAMP_TASK_SKIP_LOGIN_CHECK: 'true', CODEX_AUTO_UPDATE: 'false',
     AAMP_TASK_RUNTIME_HOME: path.join(dir, 'runtime'),
   }
-  await runWindowsHelper('__prepare-agent', { agent_type: 'codex' }, env)
+  await runWindowsHelper('__prepare-agent', { agent_type: 'codex' }, env, {ensureCodexAdapter:async()=>path.join(dir,'adapter.mjs')})
   assert.equal(
     JSON.parse(
       await fs.readFile(

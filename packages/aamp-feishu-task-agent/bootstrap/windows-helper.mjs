@@ -17,6 +17,8 @@ import defaults from './task-agent-defaults.json' with { type: 'json' }
 import { resolveTaskAgentMetadata } from '../bin/agent-metadata.mjs'
 import {discoverWindowsAgents, prepareWindowsNativeAgent, ensureWindowsAgentLogin, ensureWindowsCodexUpdated} from './windows-agents.mjs'
 import {findUserCodexCli} from './windows-codex-discovery.mjs'
+import {ensureCodexAdapter} from './windows-codex-adapter.mjs'
+import {startupProgress} from '../bin/startup-progress.mjs'
 import { registerFeishuApp, defaultOpenUrl } from './register-feishu-app.mjs'
 import { withWindowsOperationLock } from '../bin/windows-operation-lock.mjs'
 import {
@@ -691,14 +693,30 @@ export async function runWindowsHelper(
     const runtime = envValue(extraEnv, 'AAMP_TASK_RUNTIME_HOME', path.join(homedir(), '.aamp', 'feishu-task-agent'))
     let config
     if (type === 'codex') {
+      const progress = options.progress || (message => console.error(`[aamp-one-click] ${message}`))
+      progress('Codex：正在查找 CLI 并检查版本...')
       let codex = await resolveWindowsCodexCli(env)
       if (!codex) throw new Error('codex CLI is unavailable')
       await ensureWindowsCodexUpdated(codex, env, {run, npmLaunch, ...options})
       codex = await resolveWindowsCodexCli(env)
       if (!codex) throw new Error('升级后未找到 Codex CLI')
+      progress('Codex：正在检查登录状态...')
       await ensureWindowsAgentLogin(type, codex, env, run)
-      const launcher = await npxLaunch(extraEnv)
-      config = {command:launcher.command, args:[...launcher.args,'-y',envValue(extraEnv, 'AAMP_TASK_CODEX_ACP_PKG', defaults.packages.codexAcp)],env:{CODEX_PATH:codex}}
+      const spec = envValue(extraEnv, 'AAMP_TASK_CODEX_ACP_PKG', defaults.packages.codexAcp)
+      const entry = await (options.ensureCodexAdapter || ensureCodexAdapter)({
+        root: envValue(extraEnv, 'AAMP_TASK_CODEX_ACP_HOME', path.join(runtime, 'codex-acp')), spec,
+        install: async directory => {
+          progress(`Codex：正在安装或重建适配器 ${spec}，最长等待 300 秒...`)
+          const npm = await npmLaunch(extraEnv)
+          const finishProgress=startupProgress('Codex：适配器安装中')
+          try {
+            await run(npm.command, [...npm.args, 'install', '--prefix', directory,
+              '--no-audit', '--no-fund', '--ignore-scripts', spec], {env, timeout:300_000})
+          } finally {finishProgress()}
+        },
+      })
+      progress('Codex：适配器文件已就绪，接下来初始化 ACP 会话。')
+      config = {command:process.execPath, args:[entry],env:{CODEX_PATH:codex}}
     } else {
       config = await prepareWindowsNativeAgent(type,env,{run,npmLaunch,...options})
       if (config.cancelled) return config

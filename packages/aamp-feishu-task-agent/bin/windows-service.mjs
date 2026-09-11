@@ -1,4 +1,6 @@
 import { withWindowsOperationLock } from './windows-operation-lock.mjs'
+import {startupProgress} from './startup-progress.mjs'
+import {StringDecoder} from 'node:string_decoder'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { homedir } from 'node:os'
@@ -39,7 +41,9 @@ switch ($c.operation) {
   $p=New-ScheduledTaskPrincipal -UserId $c.sid -LogonType Interactive -RunLevel Limited
   $trigger=New-ScheduledTaskTrigger -AtLogOn -User $c.sid
   $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-  $a=New-ScheduledTaskAction -Execute $c.node -Argument ('"'+$c.worker+'" "'+$c.config+'"') -WorkingDirectory $c.directory
+  $hostPath=Join-Path $env:SystemRoot 'System32\wscript.exe'
+  if (!(Test-Path -LiteralPath $hostPath) -or !(Test-Path -LiteralPath $c.launcher)) { throw 'Windows background launcher is unavailable' }
+  $a=New-ScheduledTaskAction -Execute $hostPath -Argument ('//B //Nologo "'+$c.launcher+'" "'+$c.node+'" "'+$c.worker+'" "'+$c.config+'"') -WorkingDirectory $c.directory
   Register-ScheduledTask -TaskName $c.name -Action $a -Principal $p -Trigger $trigger -Settings $settings -Force | Out-Null
   Start-ScheduledTask -TaskName $c.name
  }
@@ -127,6 +131,7 @@ export function createWindowsServiceManager({
     (await platform()).stopOwnedWindowsTree(identity),
   wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   startupAttempts = 600,
+  onProgress = () => {},
   stopAttempts = 100,
 } = {}) {
   if (!runtimeHome) throw new Error('Windows service runtimeHome is required')
@@ -146,6 +151,7 @@ export function createWindowsServiceManager({
       sid,
       name: `AAMP-FeishuTask-${sid}`,
       node: process.execPath,
+      launcher: fileURLToPath(new URL('./windows-service-launcher.vbs', import.meta.url)),
       worker: workerPath,
       config: paths.configFile,
       directory: path.dirname(workerPath),
@@ -283,19 +289,26 @@ export function createWindowsServiceManager({
     await fs.rm(paths.readinessFile, { force: true })
     return { stopped: true, wasLoaded: Boolean(task.loaded) }
   }
-  async function startUnlocked(bindingIds = [], { stopped = false } = {}) {
+  async function startUnlocked(bindingIds = [], options = {}) {
+    const finish = startupProgress('正在启动后台服务')
+    try {return await startPrepared(bindingIds, options)} finally {finish()}
+  }
+  async function startPrepared(bindingIds = [], { stopped = false } = {}) {
     const ids = [...new Set(bindingIds.map(String).filter(Boolean))]
     if (!ids.length) throw new Error('No selected bindings')
     if (workerPath.split(/[\\/]/).includes('_npx'))
       throw new Error(
         '请先 npm.cmd install --global 安装稳定版本，再启动后台服务',
       )
+    onProgress('正在检查现有后台服务状态...')
     const current = await status()
     const selected = await selectionSnapshot()
     if (current.ready && sameIds(ids, selected.bindingIds))
       return { ...current, alreadyRunning: true }
-    if (!stopped && (current.loaded || (await readJson(paths.ownerFile))))
+    if (!stopped && (current.loaded || (await readJson(paths.ownerFile)))) {
+      onProgress('正在停止旧后台实例，等待所属进程退出...')
       await stopUnlocked()
+    }
     const generation = randomUUID()
     const env = {}
     for (const [key, value] of Object.entries(environment)) {
@@ -310,6 +323,8 @@ export function createWindowsServiceManager({
     // Keep the foreground adapter install location when pinning the worker runtime.
     env.AAMP_TASK_AIME_ACP_HOME = environment.AAMP_TASK_AIME_ACP_HOME
       || path.join(environment.AAMP_TASK_RUNTIME_HOME || path.join(homedir(), '.aamp', 'feishu-task-agent'), 'aime-acp')
+    env.AAMP_TASK_CODEX_ACP_HOME = environment.AAMP_TASK_CODEX_ACP_HOME
+      || path.join(environment.AAMP_TASK_RUNTIME_HOME || path.join(homedir(), '.aamp', 'feishu-task-agent'), 'codex-acp')
     env.AAMP_TASK_RUNTIME_HOME = runtimeHome
     await writeJson(paths.selectionFile, {
       version: 1,
@@ -325,9 +340,27 @@ export function createWindowsServiceManager({
     })
     await fs.rm(paths.readinessFile, { force: true })
     await fs.rm(paths.stopFile, { force: true })
+    onProgress('正在创建并启动 Windows 后台任务...')
+    let logOffset=await fs.stat(paths.logFile).then(value=>value.size).catch(()=>0)
+    let pendingLog=''
+    const decoder=new StringDecoder('utf8')
     await scheduler('start', await config())
+    onProgress('后台进程已派发，正在等待智能体和飞书连接就绪...')
     for (let i = 0; i < startupAttempts; i++) {
       const s = await status()
+      // Forward only newly written stage lines; never replay historical logs or
+      // write waiting heartbeats to the worker's persistent log.
+      let log
+      try {
+        log=await fs.open(paths.logFile,'r')
+        const chunk=Buffer.alloc(65536)
+        const {bytesRead}=await log.read(chunk,0,chunk.length,logOffset)
+        logOffset+=bytesRead
+        pendingLog+=decoder.write(chunk.subarray(0,bytesRead))
+        const lines=pendingLog.split(/\r?\n/)
+        pendingLog=lines.pop().slice(-65536)
+        for(const line of lines) if(line.startsWith('[aamp-one-click]') || line.startsWith('🔴')) onProgress(line)
+      } catch(error) {if(error.code!=='ENOENT') onProgress('暂时无法读取后台进度日志')} finally {await log?.close()}
       if (s.ready) return { ...s, alreadyRunning: false }
       await wait(500)
     }

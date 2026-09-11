@@ -111,6 +111,7 @@ test('prepare codex returns a wrapper command without secrets', async () => {
       AAMP_LARK_CLI_CONFIG_DIR: path.join(root, 'lark'),
       AAMP_TASK_RUNTIME_HOME: path.join(root, 'runtime'),
     },
+    {ensureCodexAdapter:async()=>path.join(root,'adapter.mjs')},
   )
   assert.equal(result.agent_type, 'codex')
   assert.match(result.acp_command, /windows-agent-wrapper\.mjs/)
@@ -157,12 +158,13 @@ test('explicit Codex ACP override reaches the wrapper config', async () => {
       AAMP_TASK_RUNTIME_HOME: root,
       AAMP_TASK_CODEX_ACP_PKG: 'custom-codex-acp@2.0.0',
     },
+    {ensureCodexAdapter:async({spec})=>{assert.equal(spec,'custom-codex-acp@2.0.0');return path.join(root,'adapter.mjs')}},
   )
   assert.equal(
     JSON.parse(
       readFileSync(path.join(root, 'windows-codex-agent.json'), 'utf8'),
     ).args.at(-1),
-    'custom-codex-acp@2.0.0',
+    path.join(root,'adapter.mjs'),
   )
 })
 
