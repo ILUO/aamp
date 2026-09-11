@@ -16,6 +16,7 @@ import { createRequire } from 'node:module'
 import defaults from './task-agent-defaults.json' with { type: 'json' }
 import { resolveTaskAgentMetadata } from '../bin/agent-metadata.mjs'
 import {discoverWindowsAgents, prepareWindowsNativeAgent, ensureWindowsAgentLogin, ensureWindowsCodexUpdated} from './windows-agents.mjs'
+import {findUserCodexCli} from './windows-codex-discovery.mjs'
 import { registerFeishuApp, defaultOpenUrl } from './register-feishu-app.mjs'
 import { withWindowsOperationLock } from '../bin/windows-operation-lock.mjs'
 import {
@@ -368,6 +369,13 @@ export function versionAtLeast(actual, minimum) {
   return true
 }
 
+export async function resolveWindowsCodexCli(env, {findUserCodex = findUserCodexCli} = {}) {
+  const explicit = env.AAMP_CODEX_CLI_BIN || ''
+  const resolved = await nativeExecutable('codex', explicit, env)
+  if (resolved || explicit) return resolved
+  return findUserCodex(env)
+}
+
 async function resolveLarkCli(extraEnv, env, { install = false } = {}) {
   const explicit = envValue(extraEnv, 'AAMP_LARK_CLI_BIN')
   const runtime = envValue(
@@ -630,7 +638,7 @@ export async function runWindowsHelper(
     ),
   }
   if (action === '__discover-agents') {
-    return {agents: await discoverWindowsAgents(env, () => nativeExecutable('codex', envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'), env), run)}
+    return {agents: await discoverWindowsAgents(env, () => resolveWindowsCodexCli(env), run)}
   }
   if (action === '__register-binding') {
     if (envValue(extraEnv, 'AAMP_TASK_NON_INTERACTIVE') === 'true')
@@ -683,10 +691,10 @@ export async function runWindowsHelper(
     const runtime = envValue(extraEnv, 'AAMP_TASK_RUNTIME_HOME', path.join(homedir(), '.aamp', 'feishu-task-agent'))
     let config
     if (type === 'codex') {
-      let codex = await nativeExecutable('codex', envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'), env)
+      let codex = await resolveWindowsCodexCli(env)
       if (!codex) throw new Error('codex CLI is unavailable')
       await ensureWindowsCodexUpdated(codex, env, {run, npmLaunch, ...options})
-      codex = await nativeExecutable('codex', envValue(extraEnv, 'AAMP_CODEX_CLI_BIN'), env)
+      codex = await resolveWindowsCodexCli(env)
       if (!codex) throw new Error('升级后未找到 Codex CLI')
       await ensureWindowsAgentLogin(type, codex, env, run)
       const launcher = await npxLaunch(extraEnv)
