@@ -1,6 +1,7 @@
 import { withWindowsOperationLock } from './windows-operation-lock.mjs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -306,6 +307,9 @@ export function createWindowsServiceManager({
         env[key] = value
     }
     env.AAMP_TASK_NON_INTERACTIVE = 'true'
+    // Keep the foreground adapter install location when pinning the worker runtime.
+    env.AAMP_TASK_AIME_ACP_HOME = environment.AAMP_TASK_AIME_ACP_HOME
+      || path.join(environment.AAMP_TASK_RUNTIME_HOME || path.join(homedir(), '.aamp', 'feishu-task-agent'), 'aime-acp')
     env.AAMP_TASK_RUNTIME_HOME = runtimeHome
     await writeJson(paths.selectionFile, {
       version: 1,

@@ -7,7 +7,7 @@ import {spawn} from 'node:child_process'
 import {fileURLToPath} from 'node:url'
 import {runWindowsHelper} from '../bootstrap/windows-helper.mjs'
 import {createDraft} from '../bin/feishu-task-agent-controller.mjs'
-import {ensureWindowsCodexUpdated, ensureWindowsAgentLogin} from '../bootstrap/windows-agents.mjs'
+import {ensureWindowsCodexUpdated, ensureWindowsAgentLogin, prepareWindowsNativeAgent} from '../bootstrap/windows-agents.mjs'
 import {versionAtLeast} from '../bootstrap/windows-helper.mjs'
 
 async function fixture(t) {
@@ -17,6 +17,24 @@ async function fixture(t) {
   await writeFile(coco,`if(process.argv.includes('--help'))console.log('Usage: coco acp serve; Start the ACP server');else console.log(JSON.stringify({args:process.argv.slice(2),proxy:process.env.HTTPS_PROXY}));`)
   return {root,coco,env:{PATH:'',Path:'',AAMP_COCO_CLI_BIN:coco,AAMP_CODEX_CLI_BIN:process.execPath,AAMP_TASK_RUNTIME_HOME:root,AAMP_LARK_CLI_CONFIG_DIR:path.join(root,'lark'),CODEX_AUTO_UPDATE:'false',AAMP_TASK_SKIP_LOGIN_CHECK:'true',HTTPS_PROXY:'http://proxy.example.test:8080'}}
 }
+
+test('AIME background preparation reuses the foreground adapter installation',async t=>{
+  const {root,env}=await fixture(t)
+  const installHome=path.join(root,'foreground','aime-acp')
+  const file=path.join(installHome,'node_modules','@tengchengwei','aime-acp','dist','bin.js')
+  await mkdir(path.dirname(file),{recursive:true});await writeFile(file,'// fixture')
+  const result=await prepareWindowsNativeAgent('aime',{
+    ...env,AAMP_TASK_RUNTIME_HOME:path.join(root,'runtime-v1'),
+    AAMP_TASK_AIME_ACP_HOME:installHome,AAMP_TASK_NON_INTERACTIVE:'true',
+  },{
+    npmLaunch:async()=>assert.fail('must not reinstall'),
+    run:async(command,args)=>{
+      assert.deepEqual(command.argsPrefix,[file])
+      return {stdout:JSON.stringify({ok:true,status:'authenticated'}),stderr:''}
+    },
+  })
+  assert.equal(result.args[0],file)
+})
 
 test('scan offers installed Agents, user chooses Coco, and the wrapper actually executes Coco',async t=>{
   const {root,env}=await fixture(t)

@@ -113,4 +113,5 @@ test('background config preserves explicit preparation policies and proxies but 
   for(const [key,value] of Object.entries(expected))assert.equal(config.env[key],value,key)
   assert.equal(config.env.AAMP_TASK_NON_INTERACTIVE,'true')
   assert.equal(config.env.UNRELATED_SECRET,undefined)
+  assert.equal(config.env.AAMP_TASK_AIME_ACP_HOME,path.join(os.homedir(),'.aamp','feishu-task-agent','aime-acp'))
 })

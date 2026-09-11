@@ -117,7 +117,8 @@ export async function prepareWindowsNativeAgent(type, env, {run, npmLaunch, conf
   let command = await findWindowsAgent(type,env,run)
   if (type === 'aime' && !command) {
     // AIME is a tenant-gated remote Agent, not a local desktop installation.
-    const root = path.join(env.AAMP_TASK_RUNTIME_HOME || path.join(homedir(),'.aamp','feishu-task-agent'),'aime-acp')
+    const root = env.AAMP_TASK_AIME_ACP_HOME
+      || path.join(env.AAMP_TASK_RUNTIME_HOME || path.join(homedir(),'.aamp','feishu-task-agent'),'aime-acp')
     const file = path.join(root,'node_modules','@tengchengwei','aime-acp','dist','bin.js')
     command = await descriptor(file,env)
     if (!command) {
