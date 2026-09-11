@@ -132,6 +132,17 @@ if ($null -eq $process) {
   @{ found = $false } | ConvertTo-Json -Compress
   exit 0
 }
+# Recovery can encounter a protected process that reused an old journal PID.
+# Compare creation time before querying its owner; journal times have millisecond precision.
+if ($config.exitedBefore -and $null -ne $process.CreationDate) {
+  $createdTicks = $process.CreationDate.ToUniversalTime().Ticks
+  $createdMillis = $createdTicks - ($createdTicks % [TimeSpan]::TicksPerMillisecond)
+  $recordedTicks = [DateTimeOffset]::Parse($config.exitedBefore).UtcDateTime.Ticks
+  if ($createdMillis -gt $recordedTicks) {
+    @{ found = $false } | ConvertTo-Json -Compress
+    exit 0
+  }
+}
 $verified = Read-VerifiedSnapshot $process
 if ($null -eq $verified) {
   @{ found = $false } | ConvertTo-Json -Compress
@@ -291,10 +302,16 @@ export async function atomicReplaceWindows(temporaryPath, destinationPath, {
 export async function readWindowsProcessIdentity(pid, {
   platform = process.platform,
   runPowerShell = runFixedPowerShell,
+  exitedBefore,
 } = {}) {
   if (platform !== 'win32') throw new Error('Windows process identity requires Windows')
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('process pid must be a positive integer')
-  const value = await runPowerShell('read-process-identity', { pid })
+  if (exitedBefore !== undefined && !Number.isFinite(Date.parse(exitedBefore))) {
+    throw new Error('valid recorded process creation time is required')
+  }
+  const value = await runPowerShell('read-process-identity', {
+    pid, ...(exitedBefore === undefined ? {} : {exitedBefore:new Date(exitedBefore).toISOString()}),
+  })
   if (value?.found === false) return undefined
   const startedAt = new Date(value?.creationDate)
   if (value?.found !== true || value.pid !== pid || !Number.isFinite(startedAt.getTime())
@@ -493,7 +510,7 @@ export async function stopOwnedWindowsTree(identity, {
   if (currentSid.toLowerCase() !== identity.ownerSid.toLowerCase()) {
     throw new Error(`process ${identity.pid} belongs to another Windows user; refusing taskkill`)
   }
-  const current = await readIdentity(identity.pid)
+  const current = await readIdentity(identity.pid, allowExitedIdentity ? {exitedBefore:identity.startedAt} : {})
   if (!current) return
   if (!sameWindowsIdentity(identity, current)) {
     // Recovery journals retain exited descendants. A newer creation time for

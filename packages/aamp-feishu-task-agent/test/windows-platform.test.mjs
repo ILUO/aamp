@@ -471,6 +471,28 @@ setInterval(() => {}, 1_000)
 })
 
 
+test('journal recovery skips a reused PID before querying its inaccessible owner', {skip: process.platform !== 'win32'}, async () => {
+  const {__test} = await import('../bin/windows-platform.mjs')
+  const fixture = String.raw`
+function Get-CimInstance {
+  return [pscustomobject]@{ProcessId=10384; CreationDate=[datetime]::Parse('2026-09-11T01:00:00.123456Z')}
+}
+function Invoke-CimMethod { throw 'owner access denied: must not query a newer process' }
+`
+  const expected = {pid:10384,startedAt:'2026-09-10T01:00:00.000Z',executablePath:'C:\\node.exe',ownerSid:'S-1-5-21-1000'}
+  const readIdentity = (pid, options) => readWindowsProcessIdentity(pid, {
+    ...options, platform:'win32',
+    runPowerShell: (operation, config) => runWindowsPowerShell(fixture + __test.powershellScripts[operation], config),
+  })
+  await stopOwnedWindowsTree(expected, {
+    platform:'win32',getCurrentSid:async()=>expected.ownerSid,readIdentity,
+    allowExitedIdentity:true,runTaskkill:async()=>assert.fail('must not kill the successor'),
+  })
+  for (const startedAt of ['2026-09-11T01:00:00.123Z','2026-09-12T01:00:00.000Z']) {
+    await assert.rejects(readIdentity(expected.pid,{exitedBefore:startedAt}),/owner access denied/)
+  }
+})
+
 for (const operation of ['read-process-identity', 'list-process-tree']) {
   test(`native ${operation} verifies disappearance and PID reuse without suppressing live CIM failures`, {skip: process.platform !== 'win32' && 'requires native PowerShell race fixture'}, async () => {
     const {__test} = await import('../bin/windows-platform.mjs')
