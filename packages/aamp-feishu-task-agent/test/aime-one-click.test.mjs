@@ -1010,14 +1010,14 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
   assert.equal(acpResult.status, 0, acpResult.stderr)
   assert.deepEqual(JSON.parse(acpResult.stdout), {
     acp: acpTgz,
-    feishu: '@iluolyx/aamp-feishu-bridge@0.1.52-dev.5',
+    feishu: '@zhengqilin/aamp-feishu-bridge@0.1.52-dev.6',
     aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
   })
 
   const feishuResult = runOuter({ FEISHU_BRIDGE_PKG: `file:${feishuDir}` })
   assert.equal(feishuResult.status, 0, feishuResult.stderr)
   assert.deepEqual(JSON.parse(feishuResult.stdout), {
-    acp: '@luckyterry/aamp-acp-bridge@0.1.29-dev.0',
+    acp: '@zhengqilin/aamp-acp-bridge@0.1.29-dev.1',
     feishu: `file:${feishuDir}`,
     aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
   })

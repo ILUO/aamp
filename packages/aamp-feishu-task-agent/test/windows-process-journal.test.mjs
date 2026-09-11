@@ -106,3 +106,32 @@ for (const [name, live, error] of [
     assert.equal(await fsp.stat(journal.file).then(() => true, () => false), Boolean(error))
   })
 }
+
+for (const state of ['reused', 'live', 'inaccessible']) {
+  test(`controller recovery ${state} preserves process ownership boundaries`, async t => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-controller-recovery-'))
+    t.after(() => fsp.rm(root, {recursive:true,force:true}))
+    const journal = await createWindowsProcessJournal(root, controller, {
+      ensurePrivateDirectory: async () => {}, atomicReplace: fsp.rename,
+    })
+    await journal.record([child])
+    const stopped = []
+    const recovery = recoverWindowsProcessJournals(root, {
+      readIdentity: async (pid, options) => {
+        assert.equal(pid, controller.pid)
+        // A later generation can be excluded before its inaccessible owner is read.
+        if (state === 'reused' && options?.exitedBefore === controller.startedAt) return undefined
+        if (state === 'live') return controller
+        throw new Error('controller owner access denied')
+      },
+      stopTree: async (identity, options) => {
+        assert.deepEqual(options, {allowExitedIdentity:true})
+        stopped.push(identity)
+      },
+    })
+    if (state === 'inaccessible') await assert.rejects(recovery, /controller owner access denied/)
+    else await recovery
+    assert.deepEqual(stopped, state === 'reused' ? [child] : [])
+    assert.equal(await fsp.stat(journal.file).then(() => true, () => false), state !== 'reused')
+  })
+}

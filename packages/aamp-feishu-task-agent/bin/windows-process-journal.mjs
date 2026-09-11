@@ -69,7 +69,7 @@ export async function createWindowsProcessJournal(directory, controller, {
 }
 
 export async function recoverWindowsProcessJournals(directory, {
-  readIdentity = async (pid) => (await platform()).readWindowsProcessIdentity(pid),
+  readIdentity = async (pid, options) => (await platform()).readWindowsProcessIdentity(pid, options),
   stopTree = async (identity, options) => (await platform()).stopOwnedWindowsTree(identity, options),
 } = {}) {
   for (const file of await journalFiles(directory)) {
@@ -77,7 +77,7 @@ export async function recoverWindowsProcessJournals(directory, {
     if (journal?.version !== 1 || !journal.controller || !Array.isArray(journal.descendants)) {
       throw new Error(`invalid Windows process journal: ${file}`)
     }
-    const liveController = await readIdentity(journal.controller.pid)
+    const liveController = await readIdentity(journal.controller.pid, {exitedBefore:journal.controller.startedAt})
     if (sameIdentity(liveController, journal.controller)) continue
     for (const identity of [...journal.descendants].reverse()) {
       await stopTree(identity, { allowExitedIdentity: true })

@@ -488,6 +488,22 @@ function Invoke-CimMethod { throw 'owner access denied: must not query a newer p
     platform:'win32',getCurrentSid:async()=>expected.ownerSid,readIdentity,
     allowExitedIdentity:true,runTaskkill:async()=>assert.fail('must not kill the successor'),
   })
+  const {createWindowsProcessJournal, recoverWindowsProcessJournals} = await import('../bin/windows-process-journal.mjs')
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-native-controller-recovery-'))
+  try {
+    const journal = await createWindowsProcessJournal(root, expected, {
+      ensurePrivateDirectory: async () => {}, atomicReplace: fsp.rename,
+    })
+    const descendant = {...expected, pid:10385}
+    await journal.record([descendant])
+    const stopped = []
+    await recoverWindowsProcessJournals(root, {
+      readIdentity,
+      stopTree: async identity => stopped.push(identity),
+    })
+    assert.deepEqual(stopped, [descendant])
+    await assert.rejects(fsp.stat(journal.file), {code:'ENOENT'})
+  } finally { await fsp.rm(root, {recursive:true,force:true}) }
   for (const startedAt of ['2026-09-11T01:00:00.123Z','2026-09-12T01:00:00.000Z']) {
     await assert.rejects(readIdentity(expected.pid,{exitedBefore:startedAt}),/owner access denied/)
   }
