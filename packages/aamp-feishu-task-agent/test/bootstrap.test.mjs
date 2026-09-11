@@ -117,6 +117,63 @@ printf '%s|%s' "$AAMP_TASK_ACTION" "$AAMP_TASK_FOREGROUND"
   assert.equal(service.stdout, '__service-run|false')
 })
 
+test('bootstrap accepts add --no-start as an explicit save-only mode', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-add-no-start-'))
+  const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
+  writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+source "$BOOTSTRAP_LIB"
+agent_fail() { printf '%s\\n' "$*" >&2; exit 64; }
+parse_args "$@"
+printf '%s|%s' "$AAMP_TASK_ACTION" "$AAMP_TASK_NO_START"
+`, 'bash', 'add', '--no-start'], {
+    encoding: 'utf8',
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      BOOTSTRAP_LIB: bootstrapLib,
+      AAMP_TASK_AUTO_UPDATE: 'false',
+    },
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, 'add|true')
+
+  const help = execFileSync('bash', [bootstrap, '--help'], {
+    env: { ...process.env, HOME: root },
+    encoding: 'utf8',
+  })
+  assert.match(help, /add --no-start/)
+})
+
+test('an inherited no-start mode does not reject internal add helpers', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-inherited-no-start-'))
+  const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
+  writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+source "$BOOTSTRAP_LIB"
+agent_fail() { printf '%s\\n' "$*" >&2; exit 64; }
+parse_args "$@"
+printf '%s|%s' "$AAMP_TASK_ACTION" "$AAMP_TASK_NO_START"
+`, 'bash', '__register-binding'], {
+    encoding: 'utf8',
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      BOOTSTRAP_LIB: bootstrapLib,
+      AAMP_TASK_AUTO_UPDATE: 'false',
+      AAMP_TASK_NO_START: 'true',
+    },
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '__register-binding|true')
+})
+
 test('bootstrap accepts the legacy normal token passed by an older auto-updater', () => {
   const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-legacy-update-'))
   const result = spawnSync('bash', [bootstrap, 'normal', '--help'], {

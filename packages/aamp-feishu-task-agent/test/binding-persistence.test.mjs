@@ -199,6 +199,74 @@ test('upsertBindings atomically replaces the approved Bot in its original positi
   assert.equal('agent_target_email' in bindings[0], false)
 })
 
+test('failed add rollback restores replaced bindings while retaining new pending bindings', async () => {
+  assert.equal(typeof controller.restoreReplacedBindings, 'function')
+  const oldBinding = {
+    binding_id: 'old-binding',
+    agent_type: 'codex',
+    bot: { app_id: 'cli_replaced' },
+  }
+  const replacement = {
+    binding_id: 'replacement-binding',
+    agent_type: 'aime',
+    bot: { app_id: 'cli_replaced' },
+  }
+  const newBinding = {
+    binding_id: 'new-binding',
+    agent_type: 'cursor',
+    bot: { app_id: 'cli_new' },
+  }
+  const unrelated = {
+    binding_id: 'unrelated-binding',
+    agent_type: 'workbuddy',
+    bot: { app_id: 'cli_unrelated' },
+  }
+  let written
+
+  const restored = await controller.restoreReplacedBindings(
+    [oldBinding, unrelated],
+    [replacement, newBinding],
+    {
+      loadBindings: async () => [replacement, unrelated, newBinding],
+      writeBindings: async (next) => { written = next },
+    },
+  )
+
+  assert.deepEqual(restored, [oldBinding])
+  assert.deepEqual(written, [oldBinding, unrelated, newBinding])
+})
+
+test('failed add rollback does not overwrite a newer replacement of the same Bot', async () => {
+  const oldBinding = {
+    binding_id: 'old-binding',
+    agent_type: 'codex',
+    bot: { app_id: 'cli_replaced' },
+  }
+  const failedReplacement = {
+    binding_id: 'failed-replacement',
+    agent_type: 'aime',
+    bot: { app_id: 'cli_replaced' },
+  }
+  const newerReplacement = {
+    binding_id: 'newer-replacement',
+    agent_type: 'cursor',
+    bot: { app_id: 'cli_replaced' },
+  }
+  let writeCount = 0
+
+  const restored = await controller.restoreReplacedBindings(
+    [oldBinding],
+    [failedReplacement],
+    {
+      loadBindings: async () => [newerReplacement],
+      writeBindings: async () => { writeCount += 1 },
+    },
+  )
+
+  assert.deepEqual(restored, [])
+  assert.equal(writeCount, 0)
+})
+
 test('upsertBindings rejects a stale approval without partially writing the batch', async () => {
   const approved = readyBinding('11111111-1111-4111-8111-111111111111', 'cli_same')
   writeStore([approved])
@@ -390,18 +458,19 @@ test('install startup errors say the binding remains saved for retry', () => {
   assert.match(launcher, /finalizeDeferredLaunchResults\(launched, mode, operations\)/)
 })
 
-test('add accepts reused bindings without persisting or starting them', () => {
+test('add binding collection accepts reused bindings without starting inside the mutation lock', () => {
   const source = readFileSync(controllerPath, 'utf8')
   const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
   const addBranch = session.slice(
     session.indexOf("if (mode === 'add')"),
     session.indexOf("console.log('\\n=== 建立绑定并启动 ===')"),
   )
-  const runAdd = functionRange(source, 'async function runAdd()', 'async function runList()')
+  const runAdd = functionRange(source, 'async function runAdd(', 'async function runList()')
 
   assert.match(addBranch, /succeeded\.push\(\.\.\.acceptedBindings\)/)
   assert.doesNotMatch(addBranch, /setupAgentGroups|startBindingsWithGroups/)
   assert.match(runAdd, /if \(!result\.acceptedBindings\.length\)/)
+  assert.match(runAdd, /activate\(result\.acceptedBindings,/)
 })
 
 test('install completion distinguishes accepted bindings from newly saved bindings', async () => {

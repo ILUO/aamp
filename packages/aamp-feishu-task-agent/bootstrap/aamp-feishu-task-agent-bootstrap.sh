@@ -16,6 +16,7 @@ DEBUG_MODE="false"
 AAMP_TASK_START_MODE="install"
 AAMP_TASK_ACTION=""
 AAMP_TASK_FOREGROUND="${AAMP_TASK_FOREGROUND:-false}"
+AAMP_TASK_NO_START="${AAMP_TASK_NO_START:-false}"
 AAMP_TASK_ENTRY="${AAMP_TASK_ENTRY:-}"
 AAMP_TASK_INTERNAL="${AAMP_TASK_INTERNAL:-false}"
 AAMP_TASK_INTERNAL_RESULT_FD="${AAMP_TASK_INTERNAL_RESULT_FD:-3}"
@@ -115,7 +116,7 @@ AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.1-dev.6"
+AAMP_TASK_AGENT_VERSION="0.1.1-dev.7"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -190,7 +191,8 @@ Usage:
   feishu-task-agent restart         # restart the macOS background service
   feishu-task-agent logs            # show recent background service logs
   feishu-task-agent list            # list saved pairs
-  feishu-task-agent add             # bind and save more pairs without leaving bridges running
+  feishu-task-agent add             # bind, save, and start more pairs automatically
+  feishu-task-agent add --no-start  # bind and save without starting
   feishu-task-agent remove          # remove saved pairs without stopping running bridges
   feishu-task-agent update          # update the short command now
   feishu-task-agent help            # show this help
@@ -205,6 +207,7 @@ Options:
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
   --foreground               Keep install/start attached to the current terminal
+  --no-start                 Save add bindings without starting them
   -h, --help                 Show this help
 
 日志命令:
@@ -1609,6 +1612,7 @@ parse_args() {
   local restart_count=0
   local restart_index=0
   local restart_output_index=0
+  local no_start_arg="false"
 
   # Bash 3.2 with `set -u` treats an expanded empty array as unbound. Copy the
   # original positional parameters one by one so the no-argument help path
@@ -1661,6 +1665,11 @@ parse_args() {
         AAMP_TASK_FOREGROUND="true"
         shift
         ;;
+      --no-start)
+        AAMP_TASK_NO_START="true"
+        no_start_arg="true"
+        shift
+        ;;
       --mock-fail-stage)
         AAMP_ONE_CLICK_MOCK_FAIL_STAGE="${2:-}"
         shift 2
@@ -1677,6 +1686,9 @@ parse_args() {
 
   if [ -n "$AGENT" ]; then
     validate_agent_name "$AGENT"
+  fi
+  if [ "$no_start_arg" = "true" ] && [ "$AAMP_TASK_ACTION" != "add" ]; then
+    agent_fail "--no-start is only supported with add"
   fi
 
   if [ "${restart_source[0]:-}" = "normal" ]; then
@@ -5241,6 +5253,7 @@ run_task_agent_controller() {
   export AAMP_TASK_AAMP_HOST="$AAMP_HOST"
   export AAMP_TASK_DEBUG_MODE="$DEBUG_MODE"
   export AAMP_TASK_FOREGROUND
+  export AAMP_TASK_NO_START
   export AAMP_TASK_INSTALL_COMMAND="$install_command"
   export AAMP_TASK_NPM_REGISTRY="$NPM_REGISTRY"
   export AAMP_TASK_NPM_CACHE_DIR="$NPM_CACHE_DIR"

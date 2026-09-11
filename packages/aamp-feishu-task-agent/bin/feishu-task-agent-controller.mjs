@@ -57,6 +57,7 @@ const CONFIG_FILE = process.env.AAMP_TASK_CONFIG_FILE || path.join(STATE_HOME, '
 const RUNTIME_HOME = process.env.AAMP_TASK_RUNTIME_HOME || path.join(STATE_HOME, 'runtime-v1');
 const CONFIG_LOCK = path.join(STATE_HOME, 'bindings-v1.lock');
 const MUTATION_LOCK = path.join(STATE_HOME, 'bindings-v1-mutation.lock');
+const SERVICE_CONTROL_LOCK = path.join(STATE_HOME, 'service-v1-control.lock');
 const LEASES_HOME = path.join(RUNTIME_HOME, 'leases');
 const RUNTIME_SESSION_LOCK = path.join(LEASES_HOME, 'runtime-session.lock');
 const RUN_LOG_DIR = process.env.AAMP_RUN_LOG_DIR || path.join(HOME, '.aamp', 'logs', 'runs', `${Date.now()}-${process.pid}`);
@@ -78,6 +79,7 @@ const DEFAULT_AAMP_HOST = process.env.AAMP_TASK_AAMP_HOST || 'https://meshmail.a
 const DEBUG_MODE = process.env.AAMP_TASK_DEBUG_MODE === 'true';
 const READY_TIMEOUT_MS = Number(process.env.AAMP_TASK_READY_TIMEOUT_MS || 90_000);
 const FOREGROUND_MODE = process.env.AAMP_TASK_FOREGROUND === 'true';
+const NO_START_MODE = process.env.AAMP_TASK_NO_START === 'true';
 const SERVICE_BOOTSTRAP = BOOTSTRAP || path.join(HOME, '.aamp', 'bin', 'feishu-task-agent');
 const SERVICE_PATH = [...new Set([
   path.dirname(process.execPath),
@@ -689,6 +691,15 @@ async function withConfigLock(callback) {
 
 async function withMutationLock(label, callback) {
   const release = await acquireDirectoryLock(MUTATION_LOCK, label, 1_500);
+  try {
+    return await callback();
+  } finally {
+    await release();
+  }
+}
+
+async function withServiceControlLock(callback) {
+  const release = await acquireDirectoryLock(SERVICE_CONTROL_LOCK, '后台服务配置');
   try {
     return await callback();
   } finally {
@@ -3338,6 +3349,7 @@ async function runBindingSession(mode) {
   if (mode === 'add') {
     succeeded.push(...acceptedBindings);
     return {
+      previousBindings: store.bindings,
       groups: new Map(),
       saved,
       acceptedBindings,
@@ -3445,21 +3457,43 @@ async function runInstall() {
   });
 }
 
-async function runAdd() {
-  const result = await withMutationLock('add 绑定流程', async () => {
-    return runBindingSession('add');
+async function runAdd(operations = {}) {
+  const runSession = operations.runBindingSession || runBindingSession;
+  const activate = operations.activateAddedBindings || activateAddedBindings;
+  const mutate = operations.withMutationLock || withMutationLock;
+  const log = operations.log || console.log;
+  const noStart = operations.noStart ?? NO_START_MODE;
+  const result = await mutate('add 绑定流程', async () => {
+    return runSession('add');
   });
   if (!result.acceptedBindings.length) {
     if (result.cancelled.length && !result.selectionFailures.length) {
-      console.log(`已取消 ${result.cancelled.length} 个配置的绑定；现有配置保持不变。`);
+      log(`已取消 ${result.cancelled.length} 个配置的绑定；现有配置保持不变。`);
       return;
     }
     throw new Error('没有配置完成绑定');
   }
-  if (result.replacedCount > 0 && await hasActiveAgentLease()) {
-    console.log('当前已运行的 Bridge 不受影响；替换将在下一次 feishu-task-agent start 时生效。');
+  if (noStart) {
+    log('配置添加成功，未自动启动；运行 feishu-task-agent start 时生效');
+    return result;
   }
-  console.log('配置添加成功，运行 feishu-task-agent start 启动时生效');
+  log('配置添加成功，正在自动启动新增绑定...');
+  const restoreBindings = operations.restoreReplacedBindings || restoreReplacedBindings;
+  const activation = await activate(result.acceptedBindings, {
+    beforeRollback: async () => {
+      return restoreBindings(result.previousBindings || [], result.acceptedBindings);
+    },
+  });
+  if (activation?.mode === 'manual') {
+    if (activation.reason === 'foreground-running') {
+      log(`检测到旧版前台 Task Agent 正在运行${activation.pid ? `（PID ${activation.pid}）` : ''}；新增配置已保存。请先运行 feishu-task-agent stop，再运行 feishu-task-agent start 使其生效`);
+    } else {
+      log('当前平台不支持后台服务；请运行 feishu-task-agent start 启动新增绑定');
+    }
+  } else {
+    log(`🟢 新增绑定自动启动成功${activation?.pid ? `（后台服务 PID ${activation.pid}）` : ''}`);
+  }
+  return { ...result, activation };
 }
 
 async function runList() {
@@ -3494,6 +3528,100 @@ function selectServiceBindings(bindings, bindingIds) {
   return bindingIds.map((bindingId) => byId.get(bindingId)).filter(Boolean);
 }
 
+async function restoreReplacedBindings(previousBindings, acceptedBindings, operations = {}) {
+  const restore = async () => {
+    const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
+    const writeBindings = operations.writeBindings || (async (bindings) => {
+      await writeJsonAtomic(CONFIG_FILE, { ...emptyStore(), bindings });
+    });
+    const currentBindings = await loadBindings();
+    const acceptedByAppId = new Map(acceptedBindings
+      .filter((binding) => binding.bot?.app_id)
+      .map((binding) => [binding.bot.app_id, binding]));
+    const previousByAppId = new Map(previousBindings
+      .filter((binding) => acceptedByAppId.has(binding.bot?.app_id))
+      .map((binding) => [binding.bot.app_id, binding]));
+    const restored = [];
+    const nextBindings = currentBindings.map((binding) => {
+      const accepted = acceptedByAppId.get(binding.bot?.app_id);
+      const previous = previousByAppId.get(binding.bot?.app_id);
+      if (!accepted || binding.binding_id !== accepted.binding_id
+        || !previous || previous.binding_id === binding.binding_id) return binding;
+      restored.push(previous);
+      return previous;
+    });
+    if (restored.length) await writeBindings(nextBindings);
+    return restored;
+  };
+  if (operations.loadBindings || operations.writeBindings) return restore();
+  return withConfigLock(restore);
+}
+
+async function activateAddedBindings(addedBindings, operations = {}) {
+  const platform = operations.platform || process.platform;
+  const addedBindingIds = [...new Set(addedBindings.map((binding) => binding.binding_id))];
+  if (platform !== 'darwin') {
+    return { mode: 'manual', bindingIds: addedBindingIds, pid: null };
+  }
+  const withControlLock = operations.withControlLock || withServiceControlLock;
+  return withControlLock(async () => {
+    const getRuntimeStatus = operations.getRuntimeStatus || resolveManagedRuntimeStatus;
+    const runtimeStatus = await getRuntimeStatus();
+    const foregroundOwnerPids = (runtimeStatus.pids || [])
+      .filter((pid) => !runtimeStatus.pid || pid !== runtimeStatus.pid);
+    if (runtimeStatus.mode === 'foreground' || foregroundOwnerPids.length) {
+      return {
+        mode: 'manual',
+        reason: 'foreground-running',
+        bindingIds: addedBindingIds,
+        pid: runtimeStatus.mode === 'foreground'
+          ? runtimeStatus.pid || foregroundOwnerPids[0] || null
+          : foregroundOwnerPids[0] || null,
+      };
+    }
+    const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
+    const readSelection = operations.readSelection || (() => launchdService.selection());
+    const startService = operations.startService || ((bindingIds) => launchdService.start(bindingIds));
+    const stopService = operations.stopService || (() => launchdService.stop());
+    const beforeRollback = operations.beforeRollback || (async () => {});
+    const availableBindings = await loadBindings();
+    const availableIds = new Set(availableBindings.map((binding) => binding.binding_id));
+    const missingAddedBindingIds = addedBindingIds.filter((bindingId) => !availableIds.has(bindingId));
+    if (missingAddedBindingIds.length) {
+      throw new Error('新增绑定无法自动启动：配置已被其他命令修改，请重新运行 feishu-task-agent add');
+    }
+    const previousBindingIds = [...new Set((await readSelection()) || [])];
+    const retainedBindingIds = previousBindingIds.filter((bindingId) => availableIds.has(bindingId));
+    const bindingIds = [...new Set([
+      ...retainedBindingIds,
+      ...addedBindingIds.filter((bindingId) => availableIds.has(bindingId)),
+    ])];
+    try {
+      const service = await startService(bindingIds);
+      return { mode: 'background', bindingIds, pid: service.pid || null };
+    } catch (error) {
+      let rollbackError;
+      let restoredReplacements = [];
+      try {
+        const restored = await beforeRollback();
+        if (Array.isArray(restored)) restoredReplacements = restored;
+        if (previousBindingIds.length) await startService(previousBindingIds);
+        else await stopService();
+      } catch (caught) {
+        rollbackError = caught;
+      }
+      const reason = redact(error?.message || error);
+      const rollbackSuffix = rollbackError
+        ? `；恢复原后台绑定也失败：${redact(rollbackError?.message || rollbackError)}`
+        : '';
+      if (restoredReplacements.length) {
+        throw new Error(`替换绑定自动启动失败，已恢复原绑定；如需重试新绑定，请重新运行 feishu-task-agent add：${reason}${rollbackSuffix}`);
+      }
+      throw new Error(`新增绑定已保存，但自动启动失败：${reason}${rollbackSuffix}`);
+    }
+  });
+}
+
 function shouldUseBackgroundService(command, platform = process.platform, foreground = FOREGROUND_MODE) {
   return platform === 'darwin' && !foreground && (command === 'install' || command === 'start');
 }
@@ -3501,8 +3629,11 @@ function shouldUseBackgroundService(command, platform = process.platform, foregr
 async function handoffToBackground(bindings, operations = {}) {
   const cleanupRuntime = operations.cleanupRuntime || cleanupAll;
   const startService = operations.startService || ((bindingIds) => launchdService.start(bindingIds));
-  await cleanupRuntime();
-  return startService(bindings.map((binding) => binding.binding_id));
+  const withControlLock = operations.withControlLock || withServiceControlLock;
+  return withControlLock(async () => {
+    await cleanupRuntime();
+    return startService(bindings.map((binding) => binding.binding_id));
+  });
 }
 
 async function continueStartedRuntime(runtime, operations = {}) {
@@ -3599,7 +3730,8 @@ async function runServiceLifecycleCommand(command, operations = {}) {
   }
   if (command === 'stop') {
     const stopRuntime = operations.stopRuntime || stopManagedRuntime;
-    const result = await stopRuntime();
+    const withControlLock = operations.withControlLock || withServiceControlLock;
+    const result = await withControlLock(() => stopRuntime());
     log(result.launchd || result.stoppedPids.length
       ? '🟢 Task Agent 已停止。'
       : '⚪ Task Agent 当前未运行。');
@@ -3613,12 +3745,15 @@ async function runServiceLifecycleCommand(command, operations = {}) {
     const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
     const stopRuntime = operations.stopRuntime || stopManagedRuntime;
     const startService = operations.startService || ((bindingIds) => launchdService.start(bindingIds));
-    const savedBindingIds = await readSelection();
-    const bindingIds = selectServiceBindings(await loadBindings(), savedBindingIds)
-      .map((binding) => binding.binding_id);
-    if (!bindingIds.length) throw new Error('未找到已经绑定的智能体-Bot 配置，请先运行 install');
-    await stopRuntime();
-    const result = await startService(bindingIds);
+    const withControlLock = operations.withControlLock || withServiceControlLock;
+    const result = await withControlLock(async () => {
+      const savedBindingIds = await readSelection();
+      const bindingIds = selectServiceBindings(await loadBindings(), savedBindingIds)
+        .map((binding) => binding.binding_id);
+      if (!bindingIds.length) throw new Error('未找到已经绑定的智能体-Bot 配置，请先运行 install');
+      await stopRuntime();
+      return startService(bindingIds);
+    });
     log(`🟢 Task Agent 已重新启动${result.pid ? `（PID ${result.pid}）` : ''}。`);
     return result;
   }
@@ -3654,11 +3789,25 @@ async function runStart(operations = {}) {
       }
       const readSelection = operations.readSelection || (() => launchdService.selection());
       const resumeService = operations.resumeService || ((bindingIds) => launchdService.start(bindingIds));
-      const savedBindingIds = await readSelection();
-      const selectedIds = selectServiceBindings(availableBindings, savedBindingIds)
-        .map((binding) => binding.binding_id);
-      if (!selectedIds.length) throw new Error('后台服务选择的绑定配置已被移除，请运行 feishu-task-agent stop 后重新 start');
-      const resumed = await resumeService(selectedIds);
+      const withControlLock = operations.withControlLock || withServiceControlLock;
+      const resumed = await withControlLock(async () => {
+        const lockedStatus = await getStatus();
+        if (lockedStatus.mode === 'background' && lockedStatus.state === 'running' && lockedStatus.pid) {
+          return { ...lockedStatus, alreadyRunning: true };
+        }
+        if (lockedStatus.mode !== 'background') {
+          throw new Error('Task Agent 运行状态已变化，请重新执行 feishu-task-agent start');
+        }
+        const savedBindingIds = await readSelection();
+        const selectedIds = selectServiceBindings(availableBindings, savedBindingIds)
+          .map((binding) => binding.binding_id);
+        if (!selectedIds.length) throw new Error('后台服务选择的绑定配置已被移除，请运行 feishu-task-agent stop 后重新 start');
+        return resumeService(selectedIds);
+      });
+      if (resumed.alreadyRunning) {
+        log(`🟢 Task Agent 已经在后台运行（PID ${resumed.pid}），无需重复启动。`);
+        return resumed;
+      }
       log(`🟢 Task Agent 后台服务已启动${resumed.pid ? `（PID ${resumed.pid}）` : ''}。`);
       return resumed;
     }
@@ -3764,6 +3913,7 @@ if (isMainModule) {
 
 export {
   buildPendingBinding,
+  activateAddedBindings,
   createDraft,
   bindingExpectation,
   acpBridgeAgentPolicy,
@@ -3796,6 +3946,7 @@ export {
   recordStableAgentFailure,
   resolvePreparedAgentBindings,
   resolveManagedRuntimeStatus,
+  restoreReplacedBindings,
   orchestrateStartupBindings,
   runOverlappedStartup,
   runPreparedBindingStarts,
@@ -3805,6 +3956,7 @@ export {
   startManagedProcess,
   startSelectedBindings,
   runBootstrapHelper,
+  runAdd,
   runServiceLifecycleCommand,
   runServiceWorker,
   runStart,

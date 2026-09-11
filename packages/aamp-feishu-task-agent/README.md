@@ -123,6 +123,7 @@ feishu-task-agent restart
 feishu-task-agent logs
 feishu-task-agent list
 feishu-task-agent add
+feishu-task-agent add --no-start
 feishu-task-agent remove
 feishu-task-agent update
 feishu-task-agent help
@@ -145,12 +146,18 @@ feishu-task-agent help
   terminates verified Task Agent processes left by the older foreground flow.
 - `logs` prints the latest 100 lines from the persistent background log.
 - `list` prints saved Agent-Bot pairs and never prints App Secrets.
-- `add` uses the same confirmed atomic add/replace behavior and saves each pair
-  as pending. It does not acquire an Agent lease, perform ACP pairing, or start
-  any Bridge. When another Task Agent is already running, its Bridges are not
-  hot-switched or stopped; the saved configuration is used by the next `start`.
-  The first subsequent `start` completes pairing, creates runtime configuration,
-  and keeps the selected Bridges running.
+- `add` uses the same confirmed atomic add/replace behavior and initially saves
+  each pair as pending. On macOS it then merges the new pairs into the managed
+  background-service selection and restarts that service automatically. The
+  first service start completes ACP pairing, creates runtime configuration,
+  registers the Task Agent, and changes the pair to ready. Existing selected
+  pairs remain selected. If a newly added pair cannot start, its pending
+  configuration is kept for retry and the previous background selection is
+  restored. If a replacement cannot start, the replaced ready binding is
+  restored instead. A legacy foreground runtime is left untouched and the
+  command prints the explicit `stop` then `start` migration steps.
+  `add --no-start` keeps the save-only behavior; on platforms without the macOS
+  background service, run `feishu-task-agent start` after `add`.
 - `remove` multi-selects pairs, with a `全部` option. It only removes saved
   pairing records; Bridges that are already running are not stopped.
 - `update` refreshes the installed short command and package.
@@ -167,13 +174,17 @@ host reuse one ACP Bridge process. Independent invocations do not attach to an
 existing process; an Agent lease prevents competing runtimes from being
 started for the same Agent identity.
 
-Only `install`, `start`, `restart`, and the private service worker may launch
-Bridges. Before an interactive foreground startup begins, it acquires one
-global runtime-session lease and also checks for Agent leases left by an older
-Task Agent version. If another live runtime exists, use
-`feishu-task-agent status` and `feishu-task-agent stop`; the user never has to
-find the original terminal. `add`, `list`, and `remove` never acquire this
-runtime lease and never start a Bridge.
+Bridge processes are launched by `install`, `start`, or the private service
+worker. On macOS, `add` updates and restarts the managed service rather than
+starting a competing Bridge in the interactive process. Before an interactive
+foreground startup begins, it acquires one global runtime-session lease and
+also checks for Agent leases left by an older Task Agent version. If another
+live runtime exists, use `feishu-task-agent status` and
+`feishu-task-agent stop`; the user never has to find the original terminal.
+`list` and `remove` never acquire this runtime lease or start a Bridge.
+Service selection changes made by `add`, `start`, `stop`, and `restart` are
+serialized with a cross-process control lock so concurrent commands cannot
+overwrite one another's background selection.
 
 On macOS the service is registered as the current user, not as root:
 
@@ -212,10 +223,11 @@ be started again without asking for credentials. Treat this file as a local
 credential and do not share it. Bridge-specific derived configuration is kept
 inside the same protected new-flow runtime directory.
 
-Bindings saved by `add` use the `pending` state and do not contain Agent or
-Feishu Bridge runtime identities. After their first successful `start`, the
-same records are atomically updated to `ready` with the generated runtime
-metadata. Existing ready records without an explicit state remain compatible.
+Bindings saved by `add` first use the `pending` state and do not contain Agent
+or Feishu Bridge runtime identities. After automatic activation, or after a
+later manual `start` when `--no-start` was used, the same records are atomically
+updated to `ready` with the generated runtime metadata. Existing ready records
+without an explicit state remain compatible.
 
 Saved bindings whose environment is not Online are incompatible with this
 version. They remain visible to `list` and can be deleted with `remove`, but
