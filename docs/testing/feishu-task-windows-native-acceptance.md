@@ -702,3 +702,16 @@ TaskAgent 的 `latest` 保持 `0.1.0-dev.171`。两个 Bridge 是当前账号下
 | TaskAgent | `sha512-NbiPsU9Vy1qwFdoah1b81VOcH9XOIZjclMJbDj+4vix9We5/Q2UxvQoN+lE5CdAxsXTBbQoaKuH+501hR8+OWA==` |
 
 Windows 原生安装使用 `npm.cmd install --global @larktask/aamp-feishu-task-agent@0.1.1-dev.8`，再运行 `feishu-task-agent.cmd install`，保持扫描后用户手动选择 Agent。后续启动使用 `feishu-task-agent.cmd start`。
+
+## 2026-09-11 Controller PID 恢复入口补齐与 CI 修复
+
+产品提交 `f11a38fdd7cc7dbe5c2b4c7d792e77d7a76c91ba` 基于 `5bef7f7`，补齐历史 Controller PID 查询的 `exitedBefore` 创建时间条件，并在默认平台适配器中转发该参数。只有确认原 PID 已属于更新进程后，才继续清理日志记录的旧子进程；不会终止复用 PID 的新 Controller。原 Controller 仍存活时不清理；身份查询失败时保留日志并报错。显式停止与子进程归属校验保持原有行为。
+
+回归测试先复现 Controller owner access denied，再验证修复。新增三种恢复状态测试，并扩展原生 PowerShell PID 复用测试，覆盖实际 journal 恢复调用链。AIME/Trae 的两处既有测试同步三项旧发布引用断言，版本一致性检查保持有效；未改变产品依赖或 npm 版本。
+
+验证结果：
+
+- 本地 macOS / Node 26.7.0，TaskAgent 全量 502 项：489 通过、13 跳过、0 失败。
+- [CI run 34556332449](https://github.com/ILUO/aamp/actions/runs/34556332449) 精确对应上述产品提交：Windows/macOS/Ubuntu × Node 22/24 六组全部通过，含三包测试、Bridge 类型检查、实际打包和 Windows PowerShell 5.1 安装帮助入口。
+- 已回读 Windows Node 24 日志：PID 复用原生 PowerShell 用例与 Controller reused/live/inaccessible 三种边界用例均实际通过。
+- 本轮没有重跑 Win10/Win11 的真实飞书业务；没有合并分支或发布新 npm 版本。已发布 dev.8 不包含此后新增的 Agent 默认值修复和 PID 恢复修复，需要另行发布新版本才能交付 npm 用户。
