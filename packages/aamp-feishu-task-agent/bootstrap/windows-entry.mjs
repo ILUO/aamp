@@ -81,7 +81,8 @@ export async function runWindowsEntry(argv) {
   const npm=await resolveNativeCommand('npm',process.env);
   if (!npm) throw new Error('npm is unavailable; install Node.js with npm first');
   const env={...windowsNpmEnvironment(process.env),
-    AAMP_TASK_DEFAULT_AGENT:options.agent || process.env.AAMP_TASK_DEFAULT_AGENT || '',
+    // Match the macOS launcher: only --agent may bypass interactive selection.
+    AAMP_TASK_DEFAULT_AGENT:options.agent,
     AAMP_TASK_AAMP_HOST:options.host,
     AAMP_TASK_FOREGROUND:String(options.foreground || process.env.AAMP_TASK_FOREGROUND === 'true'),
     AAMP_TASK_DEBUG_MODE:String(options.debug || process.env.AAMP_TASK_DEBUG_MODE === 'true'),

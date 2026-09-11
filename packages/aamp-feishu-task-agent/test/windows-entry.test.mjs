@@ -32,6 +32,36 @@ test('Windows interactive installation refuses redirected stdin before doing wor
   assert.notEqual(result.status,0);
   assert.match(result.stderr,/终端|terminal/);
 });
+
+test('Windows entry uses only an explicit agent argument, matching the macOS launcher', async t => {
+  const {mkdir,copyFile,writeFile,rm} = await import('node:fs/promises');
+  const root = mkdtempSync(path.join(tmpdir(),'aamp-entry-agent-'));
+  try {
+    await mkdir(path.join(root,'bootstrap'));
+    await mkdir(path.join(root,'bin'));
+    await copyFile(moduleUrl,path.join(root,'bootstrap','windows-entry.mjs'));
+    await copyFile(new URL('../bootstrap/task-agent-defaults.json',import.meta.url),path.join(root,'bootstrap','task-agent-defaults.json'));
+    await writeFile(path.join(root,'package.json'),JSON.stringify({name:'entry-fixture',version:'0.0.0',type:'module'}));
+    await writeFile(path.join(root,'bin','windows-platform.mjs'),'export async function resolveNativeCommand(){return {command:process.execPath,argsPrefix:[]}}');
+    // Observe the real launcher's child environment before any update/install work.
+    await writeFile(path.join(root,'bootstrap','windows-update.mjs'),`export async function runWindowsUpdate({env}) {
+      console.log(JSON.stringify({agent:env.AAMP_TASK_DEFAULT_AGENT,parentAgent:process.env.AAMP_TASK_DEFAULT_AGENT}));
+      return {handled:true,code:0};
+    }`);
+    const {pathToFileURL} = await import('node:url');
+    const fixtureUrl = pathToFileURL(path.join(root,'bootstrap','windows-entry.mjs')).href;
+    for (const [argv,expected] of [[['install'],''],[['add'],''],[['install','--agent','coco'],'coco']]) {
+      await t.test(argv.join(' '),()=>{
+        const code = `Object.defineProperty(process.stdin,'isTTY',{value:true});Object.defineProperty(process.stdout,'isTTY',{value:true});const m=await import(${JSON.stringify(fixtureUrl)});await m.runWindowsEntry(${JSON.stringify(argv)});`;
+        const result = spawnSync(process.execPath,['--input-type=module','-e',code],{
+          env:{...process.env,AAMP_TASK_DEFAULT_AGENT:'traex'},encoding:'utf8',timeout:10000,
+        });
+        assert.equal(result.status,0,result.stderr);
+        assert.deepEqual(JSON.parse(result.stdout),{agent:expected,parentAgent:'traex'});
+      });
+    }
+  } finally {await rm(root,{recursive:true,force:true});}
+});
 test('Windows update refuses a legacy Bash-only published package',async()=>{
   assert.equal(typeof entry.validateWindowsUpdatePackage,'function');
   const {mkdir,writeFile,rm}=await import('node:fs/promises');
