@@ -152,14 +152,21 @@ export async function prepareWindowsNativeAgent(type, env, {run, npmLaunch, conf
     }
   }
   if (type === 'aime') {
-    const result = await run(command,['auth','status','--site','cn','--json'],{env,timeout:10000,allowedExitCodes:[0,1]})
+    const probe = async (args, options = {}) => {
+      try { return await run(command,args,{env,timeout:60000,...options}) }
+      catch (error) {
+        if(error.code === 'ETIMEDOUT') throw Object.assign(new Error(`AIME ${args[0]} 检查超时（60000ms），请检查网络后重试。`),{code:'ETIMEDOUT'})
+        throw error
+      }
+    }
+    const result = await probe(['auth','status','--site','cn','--json'],{allowedExitCodes:[0,1]})
     const status = JSON.parse(result.stdout)
     if (!status.ok || !['authenticated','unauthenticated'].includes(status.status)) throw new Error('AIME 认证状态检查失败')
     if (status.status === 'unauthenticated') {
       interactive(env)
       await run(command,['auth','login','--site','cn'],{env,stdio:'inherit'})
     }
-    await run(command,['doctor','--site','cn','--json'],{env,timeout:10000})
+    await probe(['doctor','--site','cn','--json'])
   }
   return {command:command.command,args:[...(command.argsPrefix || []),...definition.args],
     ...(definition.config ? {env:{CODEBUDDY_CONFIG_DIR:path.join(homedir(),definition.config),CODEBUDDY_SKIP_BUILTIN_MARKETPLACE:'1'}} : {})}

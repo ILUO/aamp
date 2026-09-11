@@ -28,12 +28,23 @@ test('AIME background preparation reuses the foreground adapter installation',as
     AAMP_TASK_AIME_ACP_HOME:installHome,AAMP_TASK_NON_INTERACTIVE:'true',
   },{
     npmLaunch:async()=>assert.fail('must not reinstall'),
-    run:async(command,args)=>{
+    run:async(command,args,options)=>{
       assert.deepEqual(command.argsPrefix,[file])
+      if(options.timeout < 45000) throw Object.assign(new Error('slow remote probe'),{code:'ETIMEDOUT'})
       return {stdout:JSON.stringify({ok:true,status:'authenticated'}),stderr:''}
     },
   })
   assert.equal(result.args[0],file)
+  for(const step of ['auth','doctor']) {
+    await assert.rejects(prepareWindowsNativeAgent('aime',{
+      ...env,AAMP_TASK_AIME_ACP_HOME:installHome,
+    },{
+      run:async(command,args)=>{
+        if(args[0]===step)throw Object.assign(new Error('command timed out'),{code:'ETIMEDOUT'})
+        return {stdout:JSON.stringify({ok:true,status:'authenticated'}),stderr:''}
+      },
+    }),new RegExp(`AIME ${step}.*60000`))
+  }
 })
 
 test('scan offers installed Agents, user chooses Coco, and the wrapper actually executes Coco',async t=>{
