@@ -10,6 +10,7 @@ import {resolveNativeCommand, atomicReplaceWindows} from '../bin/windows-platfor
 import {taskAgentVersionIsNewer} from './windows-update.mjs'
 import {withWindowsOperationLock} from '../bin/windows-operation-lock.mjs'
 import {parseTraeCodeDoctor, supportsTraeCodeAcpHelp} from '../bin/traecode-readiness.mjs'
+import {warnInvalidAgentPath} from './windows-agent-path-warning.mjs'
 
 const agents = {
   cursor: {names:['cursor-agent','agent'], variables:['AAMP_CURSOR_CLI_BIN'], args:['acp']},
@@ -42,21 +43,44 @@ async function descriptor(candidate, env) {
 export async function findWindowsAgent(type, env, run) {
   const definition = agents[type]
   if (!definition) return undefined
+  let rejectionReason
   const resolveCandidate = async candidate => {
     const found = await descriptor(candidate, env)
     if (!found || type !== 'cursor' || path.basename(candidate).replace(/\.(exe|com|cmd|mjs|cjs|js)$/i,'').toLowerCase() !== 'agent') return found
     // The generic name may belong to another product; match the macOS identity probe.
     try {
       const result = await run(found, ['login','--help'], {env,timeout:10000})
-      return `${result.stdout}\n${result.stderr}`.includes('Authenticate with Cursor') ? found : undefined
-    } catch {return undefined}
+      if (`${result.stdout}\n${result.stderr}`.includes('Authenticate with Cursor')) return found
+      rejectionReason = '通用 agent 命令未通过 Cursor 身份检查'
+      return undefined
+    } catch (error) {
+      rejectionReason = error.code === 'ETIMEDOUT' ? 'Cursor 身份检查超时' : 'Cursor 身份检查执行失败'
+      return undefined
+    }
   }
   for (const key of definition.variables) {
     const value = env[key]
     if (!value) continue
     // Legacy TRAE_CLI_BIN is shared; do not advertise another binary as Coco.
     if (['AAMP_TRAE_CLI_BIN','TRAE_CLI_BIN'].includes(key) && path.basename(value).replace(/\.(exe|cmd|mjs|cjs|js)$/i,'') !== type) continue
-    return resolveCandidate(value)
+    const found = await resolveCandidate(value)
+    if (!found) await warnInvalidAgentPath(key,value,{reason:rejectionReason,fallback:type === 'aime'})
+    return found
+  }
+  if (type === 'cursor') {
+    const dedicated = await resolveCandidate('cursor-agent')
+    if (dedicated) return dedicated
+    const localAppData = env.LOCALAPPDATA || Object.entries(env)
+      .find(([key, value]) => key.toLowerCase() === 'localappdata' && value)?.[1]
+    // Mirror macOS: dedicated PATH command, official user installation, then
+    // the generic PATH alias. Keep the existing strict explicit-path behavior.
+    if (typeof localAppData === 'string' && path.isAbsolute(localAppData)) {
+      for (const name of ['cursor-agent.exe', 'cursor-agent.cmd', 'agent.exe', 'agent.cmd']) {
+        const found = await resolveCandidate(path.join(localAppData, 'cursor-agent', name))
+        if (found) return found
+      }
+    }
+    return resolveCandidate('agent')
   }
   for (const name of definition.names) {
     const found = await resolveCandidate(name)

@@ -16,6 +16,7 @@ import { createRequire } from 'node:module'
 import defaults from './task-agent-defaults.json' with { type: 'json' }
 import { resolveTaskAgentMetadata } from '../bin/agent-metadata.mjs'
 import {discoverWindowsAgents, prepareWindowsNativeAgent, ensureWindowsAgentLogin, ensureWindowsCodexUpdated} from './windows-agents.mjs'
+import {warnInvalidAgentPath} from './windows-agent-path-warning.mjs'
 import {findUserCodexCli} from './windows-codex-discovery.mjs'
 import {ensureCodexAdapter} from './windows-codex-adapter.mjs'
 import {startupProgress} from '../bin/startup-progress.mjs'
@@ -374,6 +375,7 @@ export function versionAtLeast(actual, minimum) {
 export async function resolveWindowsCodexCli(env, {findUserCodex = findUserCodexCli} = {}) {
   const explicit = env.AAMP_CODEX_CLI_BIN || ''
   const resolved = await nativeExecutable('codex', explicit, env)
+  if (explicit && !resolved) await warnInvalidAgentPath('AAMP_CODEX_CLI_BIN',explicit)
   if (resolved || explicit) return resolved
   return findUserCodex(env)
 }
