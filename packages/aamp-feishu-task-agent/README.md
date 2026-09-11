@@ -3,7 +3,124 @@
 One-click manager for binding local Codex/Cursor/Trae/WorkBuddy agents to
 user-owned Feishu Bots and running the corresponding Task bridges.
 
-## Install and bind
+## Native Windows development preview
+
+The Windows implementation is under development on
+`feat/feishu-task-windows-native`. It has **not passed Windows 11 desktop or
+the full Feishu Task acceptance matrix**, and the existing registry `@dev` release is
+not evidence of Windows support. See the
+[acceptance record](../../docs/testing/feishu-task-windows-native-acceptance.md).
+
+The target is Windows 11 x64, Windows PowerShell 5.1, and Node.js 22/24.
+Use PowerShell's explicit `.cmd` commands. WSL, Git Bash, administrator
+permissions, and a system Windows Service are not prerequisites.
+Windows scans installed native Agent entries and asks the user to choose; it does
+not restrict the list to Codex. An explicit `--agent` still selects a detected
+Agent. Selecting Coco uses that installation's `coco acp serve` and does not switch
+to Codex or Traex. A CLI without the required ACP capability reports a preparation
+error or offers its existing update flow; discovery alone is not a real-machine
+support claim. The existing AIME tenant restriction remains in effect.
+
+If a desktop CLI is not on PATH, use `AAMP_CODEX_CLI_BIN`,
+`AAMP_CURSOR_CLI_BIN`, `AAMP_COCO_CLI_BIN`, `AAMP_TRAEX_CLI_BIN`,
+`AAMP_TRAECODE_CLI_BIN`, `AAMP_WORKBUDDY_CLI_BIN`, or
+`AAMP_WORKBUDDY_AI_CLI_BIN` to specify its executable or npm-generated Node shim.
+Opaque batch/PowerShell wrappers are not advertised as native executables.
+Windows retains proxy environment variables. Existing Feishu scope/event,
+CLI/SDK version, npm registry/cache and user-authorization overrides are preserved
+when preparing bindings and handing them to the background worker.
+
+Automatic Task Agent update checks retain `AAMP_TASK_AUTO_UPDATE` and cache
+settings; set `AAMP_TASK_AUTO_UPDATE=false` when testing an unreleased local
+artifact. Manual updates stage and validate the package before replacing it,
+prevent version downgrades and restore the previously running background binding
+selection. If installation or restoration fails, the command reports the failure;
+it does not promise a transactional package rollback.
+
+For development, build the **three modified packages** using `npm.cmd pack`
+and retain each exact returned `.tgz` path. Install the Task Agent artifact
+with `npm.cmd install --global <task-agent-tgz>`. In the same PowerShell
+session, opt into the existing local-package override mechanism:
+
+```powershell
+$env:AAMP_TASK_ALLOW_PACKAGE_OVERRIDES = 'true'
+$env:AAMP_TASK_ACP_BRIDGE_PKG = '<absolute-acp-bridge-tgz-path>'
+$env:AAMP_TASK_FEISHU_BRIDGE_PKG = '<absolute-feishu-bridge-tgz-path>'
+feishu-task-agent.cmd help
+feishu-task-agent.cmd install
+feishu-task-agent.cmd status
+feishu-task-agent.cmd start --foreground
+feishu-task-agent.cmd stop
+feishu-task-agent.cmd start
+feishu-task-agent.cmd restart
+feishu-task-agent.cmd logs
+aamp-logs.cmd tail -f
+```
+
+Replace all three artifact placeholders with actual local build paths;
+otherwise the released Bridge pins still select older registry code. `install`
+and `add` need an interactive console. `add` saves a pending binding; its next
+`start` performs startup. `update` validates a downloaded release's Windows
+entry before stopping the current runtime; it is not a way to publish this
+checkout or update unpublished local Bridge artifacts.
+
+Background operation uses the current user's
+`AAMP-FeishuTask-<SID>` scheduled task, an interactive login trigger, and normal
+permissions. Closing the terminal is supported by this design; running after
+logout is outside its scope. A scheduler state alone does not count as ready:
+the Controller also verifies the selected binding generation and live process
+identities. `stop` disables login activation until the next explicit `start`.
+On unexpected Controller exit, the Windows worker cleans its recorded process
+identities and retries at most three times, with 60 seconds between attempts.
+A stop request or changed generation interrupts the retry wait. After retries
+are exhausted, inspect `logs` and explicitly restart after resolving the cause.
+Enterprise policies can prevent PowerShell or task registration; use explicit
+foreground mode after addressing the reported prerequisites.
+
+Windows OpenSSH foreground sessions need separate validation. On the tested
+Win10 host with Codex 0.153.4, Session 0 failed even a standalone sandbox
+command with `timed out after 15000ms connecting runner pipe-in`; the same
+sandbox in the user's active Session 1 succeeded. The CLI's DPAPI-backed
+credentials were also readable in Session 1 while SSH reported them missing.
+Do not treat a successful model-only calculation as proof of file execution,
+or immediately reauthorize when only the SSH session cannot read credentials.
+
+With an existing authorized binding and the same user already logged in,
+`feishu-task-agent.cmd restart` starts the existing interactive background
+worker, including its credential checks, in that user's session. Preserve the
+same state/runtime directory and any development package overrides. `start`
+can still run credential preparation in the calling SSH session before handing
+off; `start --foreground` stays in that session. This does not provide execution
+after logout or make a headless Session 0 equivalent to a desktop login. See the
+acceptance record for the observed boundaries and business results.
+
+Windows runtime state is under the existing product runtime directory in
+`windows-service-v1`; its log is `service.log`. Private state uses Windows ACLs.
+`aamp-logs` follows files with Node and uses Windows `tar.exe` for archives,
+resolving the Desktop Known Folder (including redirected desktops).
+
+To uninstall, stop successfully first, then remove only this user's product
+task and npm package. These steps preserve bindings and remote applications:
+
+```powershell
+feishu-task-agent.cmd stop
+if ($LASTEXITCODE -ne 0) { throw 'Stop failed; resolve it before uninstalling' }
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$taskName = "AAMP-FeishuTask-$sid"
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($task) {
+  $owner = $task.Principal.UserId
+  $ownerSid = if ($owner -match '^S-1-') { $owner } else {
+    (New-Object System.Security.Principal.NTAccount($owner)).Translate(
+      [System.Security.Principal.SecurityIdentifier]).Value
+  }
+  if ($ownerSid -ne $sid) { throw 'Task owner mismatch' }
+  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+}
+npm.cmd uninstall --global @larktask/aamp-feishu-task-agent
+```
+
+## Install and bind (macOS / Linux)
 
 Run the standalone one-click command. The launcher checks for Node.js and npm
 before setup. When either is unavailable, it stops before authorization and
@@ -147,7 +264,7 @@ feishu-task-agent help
 - `logs` prints the latest 100 lines from the persistent background log.
 - `list` prints saved Agent-Bot pairs and never prints App Secrets.
 - `add` uses the same confirmed atomic add/replace behavior and initially saves
-  each pair as pending. On macOS it then merges the new pairs into the managed
+  each pair as pending. On macOS and Windows it then merges the new pairs into the managed
   background-service selection and restarts that service automatically. The
   first service start completes ACP pairing, creates runtime configuration,
   registers the Task Agent, and changes the pair to ready. Existing selected
@@ -156,7 +273,7 @@ feishu-task-agent help
   restored. If a replacement cannot start, the replaced ready binding is
   restored instead. A legacy foreground runtime is left untouched and the
   command prints the explicit `stop` then `start` migration steps.
-  `add --no-start` keeps the save-only behavior; on platforms without the macOS
+  `add --no-start` keeps the save-only behavior; on platforms without a supported
   background service, run `feishu-task-agent start` after `add`.
 - `remove` multi-selects pairs, with a `全部` option. It only removes saved
   pairing records; Bridges that are already running are not stopped.
@@ -175,7 +292,7 @@ existing process; an Agent lease prevents competing runtimes from being
 started for the same Agent identity.
 
 Bridge processes are launched by `install`, `start`, or the private service
-worker. On macOS, `add` updates and restarts the managed service rather than
+worker. On macOS and Windows, `add` updates and restarts the managed service rather than
 starting a competing Bridge in the interactive process. Before an interactive
 foreground startup begins, it acquires one global runtime-session lease and
 also checks for Agent leases left by an older Task Agent version. If another
@@ -197,9 +314,9 @@ On macOS the service is registered as the current user, not as root:
 
 The plist contains the installed launcher path and a deterministic `PATH`, but
 no App Secret or OAuth token. `launchd` starts it at login and restarts it after
-an unexpected exit. `feishu-task-agent stop` unloads it. On non-macOS systems,
-`install` and `start` remain foreground operations and `restart` reports that
-the managed background service is unsupported.
+an unexpected exit. `feishu-task-agent stop` unloads it. On Linux, `install` and `start` remain foreground operations and `restart`
+reports that the managed background service is unsupported. Windows development
+behavior is described above.
 
 ## Configuration and compatibility
 
@@ -217,8 +334,8 @@ are isolated under:
 ~/.aamp/feishu-task-agent/runtime-v1/
 ```
 
-The configuration directory is mode `0700` and `bindings-v1.json` is mode
-`0600`. The App Secret is intentionally stored as plaintext so a saved pair can
+On POSIX, the configuration directory is mode `0700` and `bindings-v1.json`
+is mode `0600`. Windows uses verified current-user ACLs instead. The App Secret is intentionally stored as plaintext so a saved pair can
 be started again without asking for credentials. Treat this file as a local
 credential and do not share it. Bridge-specific derived configuration is kept
 inside the same protected new-flow runtime directory.
@@ -293,6 +410,26 @@ The manifest and terminal output never include App Secrets. Component output is
 redacted before it is written by the Controller. Verbose Feishu registration
 details (SDK metadata, scopes, events, and raw SDK output) are written to a
 private per-run registration log instead of flooding the interactive terminal.
+
+On Windows, scheduled background runs use the packaged Windows Script Host
+launcher to start the worker hidden and return its exit status to Task Scheduler.
+Windows Script Host must be enabled. After upgrading local code, restart the
+managed service to register the new launch action. The launcher does not detach
+Task Scheduler from the worker's lifetime.
+
+Windows Codex preparation installs the ACP adapter before connecting the Bridge.
+Only complete installations are reused; incomplete installations are rebuilt
+under a process lock. The adapter runs directly from its managed installation,
+without relying on an existing npx executable cache. A missing Codex session-ready
+event is reported as a startup failure.
+
+Interactive waiting indicators refresh one terminal line and are cleared when
+the operation ends. Redirected output contains stage changes without periodic
+waiting messages. The Windows service directory additionally contains
+`worker-diagnostic.jsonl` and `controller-diagnostic.jsonl`; each has a 512 KiB
+limit and one rotated copy. These limits apply to the new lifecycle diagnostics,
+not the existing service or component logs. Hard process termination may prevent
+the final lifecycle event from being written.
 
 Useful diagnostics commands:
 

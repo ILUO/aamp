@@ -6,8 +6,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { ReadStream, WriteStream } from 'node:tty';
 import { emitKeypressEvents } from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, fork } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import {startupProgress} from './startup-progress.mjs';
+import {appendLifecycleDiagnostic} from './windows-lifecycle-diagnostics.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   TASK_AGENT_TYPES,
@@ -21,10 +23,12 @@ import {
 import {
   createPackageExecutableLauncher,
   npmExecutableResolverArgs,
+  npmExecutableResolverCommand,
   parseResolvedPackageExecutable,
 } from './runtime-package-executable.mjs';
 import {
   agentStartRetryError,
+  codexSessionFailure,
   agentStartFailureMessage,
   bridgeAuthenticationRetryError,
   classifyNetworkError,
@@ -41,9 +45,14 @@ import {
 import {
   createLaunchdServiceManager,
   findOwnedControllerPids,
-  readProcessIdentity,
+  readProcessIdentity as readPosixProcessIdentity,
   stopOwnedControllerProcesses,
 } from './launchd-service.mjs';
+
+import { createWindowsServiceManager } from './windows-service.mjs';
+import { ensurePrivateWindowsDirectory, readWindowsProcessIdentity, getCurrentWindowsSid, stopOwnedWindowsTree, openWindowsTerminal, atomicReplaceWindows, snapshotOwnedWindowsTree } from './windows-platform.mjs';
+import { createWindowsProcessJournal, recoverWindowsProcessJournals, requestWindowsControllerStop } from './windows-process-journal.mjs';
+const readProcessIdentity = process.platform === 'win32' ? readWindowsProcessIdentity : readPosixProcessIdentity;
 
 process.umask(0o077);
 
@@ -59,6 +68,7 @@ const CONFIG_LOCK = path.join(STATE_HOME, 'bindings-v1.lock');
 const MUTATION_LOCK = path.join(STATE_HOME, 'bindings-v1-mutation.lock');
 const SERVICE_CONTROL_LOCK = path.join(STATE_HOME, 'service-v1-control.lock');
 const LEASES_HOME = path.join(RUNTIME_HOME, 'leases');
+const WINDOWS_PROCESS_JOURNAL_HOME = path.join(RUNTIME_HOME, 'windows-process-journals-v1');
 const RUNTIME_SESSION_LOCK = path.join(LEASES_HOME, 'runtime-session.lock');
 const RUN_LOG_DIR = process.env.AAMP_RUN_LOG_DIR || path.join(HOME, '.aamp', 'logs', 'runs', `${Date.now()}-${process.pid}`);
 const RUN_ID = process.env.AAMP_RUN_ID || path.basename(RUN_LOG_DIR);
@@ -67,11 +77,14 @@ const MANIFEST_FILE = path.join(RUN_LOG_DIR, 'manifest.json');
 const ERRORS_LOG = process.env.ERRORS_LOG || path.join(RUN_LOG_DIR, 'errors.jsonl');
 const BOOTSTRAP = process.env.AAMP_TASK_BOOTSTRAP_PATH || '';
 const NPM_BIN = process.env.AAMP_TASK_NPM_BIN || 'npm';
+const NPM_ARGS_PREFIX = process.platform === 'win32' ? JSON.parse(process.env.AAMP_TASK_NPM_ARGS_PREFIX || '[]') : [];
+if (!Array.isArray(NPM_ARGS_PREFIX) || NPM_ARGS_PREFIX.some(value => typeof value !== 'string')) throw new Error('Invalid npm argument prefix');
 const NPM_REGISTRY = process.env.AAMP_TASK_NPM_REGISTRY || 'https://registry.npmjs.org/';
 const FEISHU_API_PROBE_URL = 'https://open.feishu.cn/';
 const NPM_CACHE_DIR = process.env.AAMP_TASK_NPM_CACHE_DIR || path.join(os.tmpdir(), 'aamp-one-click-npm-cache');
-const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@luckyterry/aamp-acp-bridge@0.1.29-dev.0';
-const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || '@iluolyx/aamp-feishu-bridge@0.1.52-dev.5';
+const TASK_DEFAULTS = JSON.parse(fs.readFileSync(new URL('../bootstrap/task-agent-defaults.json', import.meta.url), 'utf8'));
+const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || TASK_DEFAULTS.packages.acpBridge;
+const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || TASK_DEFAULTS.packages.feishuBridge;
 const INSTALL_COMMAND = process.env.AAMP_TASK_INSTALL_COMMAND
   || 'npx -y --package @larktask/aamp-feishu-task-agent@dev feishu-task-agent install';
 const DEFAULT_AGENT = process.env.AAMP_TASK_DEFAULT_AGENT || '';
@@ -92,7 +105,12 @@ const SERVICE_PATH = [...new Set([
   '/usr/sbin',
   '/sbin',
 ].filter(Boolean))].join(path.delimiter);
-const launchdService = createLaunchdServiceManager({
+const launchdService = process.platform === 'win32'
+  ? createWindowsServiceManager({runtimeHome: RUNTIME_HOME, controllerPath: CONTROLLER_PATH, onProgress:message=>{
+    if (process.stderr.isTTY) process.stderr.write('\r\x1b[2K');
+    console.log(redact(message).startsWith('[aamp-one-click]') ? redact(message) : `[aamp-one-click] ${redact(message)}`);
+  }})
+  : createLaunchdServiceManager({
   home: HOME,
   uid: typeof process.getuid === 'function' ? process.getuid() : 0,
   platform: process.platform,
@@ -138,6 +156,7 @@ const manifestWriter = createSerializedRunner(async () => {
   });
 });
 let stopRequested = false;
+let windowsProcessJournal;
 let stopSignal = '';
 let terminal;
 let processStartedAtPromise;
@@ -182,6 +201,7 @@ async function currentProcessStartedAt() {
 
 function terminalStreams() {
   if (terminal) return terminal;
+  if (process.platform === 'win32') return (terminal = openWindowsTerminal());
   let inputFd;
   let outputFd;
   try {
@@ -315,6 +335,9 @@ function projectTrustedLocalAgentEvent(document, options = {}) {
   if (!document || typeof document !== 'object' || Array.isArray(document)) return undefined;
   const type = typeof document.type === 'string' ? document.type : '';
   const agent = trustedAgentIdentity(document.agent, options, 'local');
+  if (agent === 'codex' && ['agent.session.deferred', 'agent.session.ready'].includes(type)) {
+    return {type, agent, ...(type === 'agent.session.deferred' ? {message:redact(document.message || '适配器未就绪')} : {})};
+  }
   if (!agent || !['agent.starting', 'agent.started', 'agent.identity', 'agent.failed'].includes(type)) {
     return undefined;
   }
@@ -473,6 +496,7 @@ function resolveRemoteEventPath(value, record, eventPathRoot) {
 }
 
 async function ensurePrivateDir(dir) {
+  if (process.platform === 'win32') return ensurePrivateWindowsDirectory(dir);
   await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
   await fsp.chmod(dir, 0o700).catch(() => {});
 }
@@ -608,7 +632,8 @@ async function writeJsonAtomic(file, value) {
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await fsp.rename(temp, file);
+    if (process.platform === 'win32') await atomicReplaceWindows(temp, file);
+    else await fsp.rename(temp, file);
     renamed = true;
     await fsp.chmod(file, 0o600);
     const parentHandle = await fsp.open(parent, 'r').catch(() => undefined);
@@ -637,8 +662,10 @@ function pidAlive(pid) {
 }
 
 async function acquireDirectoryLock(lockDir, label, timeoutMs = 10_000) {
-  const started = Date.now();
+  let started = Date.now();
   await ensurePrivateDir(path.dirname(lockDir));
+  // Windows ACL initialization is prerequisite work, not lock contention.
+  if (process.platform === 'win32') started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
       await fsp.mkdir(lockDir, { mode: 0o700 });
@@ -1331,6 +1358,7 @@ function helperArgs(action, bindingOrAgent) {
 }
 
 async function runBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
+  if (process.platform === 'win32') return runWindowsBootstrapHelper(action, bindingOrAgent, extraEnv);
   if (!BOOTSTRAP) throw new Error('Bootstrap path is unavailable');
   throwIfStopping();
   const helperAgent = typeof bindingOrAgent === 'object'
@@ -1413,6 +1441,33 @@ async function runBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
   }
 }
 
+async function runWindowsBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
+  throwIfStopping();
+  const env = {...process.env, ...extraEnv};
+  const rawBinding = env.AAMP_TASK_INTERNAL_BINDING_JSON;
+  delete env.AAMP_TASK_INTERNAL_BINDING_JSON;
+  const payload = rawBinding ? JSON.parse(rawBinding) : bindingOrAgent;
+  const nonInteractive = NON_INTERACTIVE || env.AAMP_TASK_NON_INTERACTIVE === 'true';
+  if (nonInteractive) env.AAMP_TASK_NON_INTERACTIVE = 'true';
+  const child = fork(fileURLToPath(new URL('../bootstrap/windows-helper.mjs', import.meta.url)), [], {
+    env, stdio: [nonInteractive ? 'ignore' : terminalStreams().input, 'inherit', 'inherit', 'ipc'],
+  });
+  const record = trackTransientProcess(child, `Windows helper ${action}`, false);
+  let response;
+  child.on('message', message => {
+    if (response || !['result', 'error'].includes(message?.kind)) return;
+    response = message;
+  });
+  child.send({kind:'request', action, payload});
+  const stage = {'__prepare-agent':'智能体准备（版本、登录与适配器）','__ensure-profile':'飞书配置及授权检查','__probe-profile':'飞书授权状态检查','__register-binding':'创建飞书绑定','__discover-agents':'扫描可用智能体'}[action] || action;
+  const finishProgress = action === '__prepare-agent' ? () => {} : startupProgress(stage);
+  let exit;
+  try {exit = await record.exitPromise;} finally {finishProgress();}
+  throwIfStopping();
+  if (exit.code !== 0 || response?.kind !== 'result') throw new Error(response?.message || exit.error?.message || `Windows helper ${action} did not return a result`);
+  return response.payload;
+}
+
 function npmExecArgs(packageSpec, executable, args) {
   return [
     'exec', '--yes', '--registry', NPM_REGISTRY, '--cache', NPM_CACHE_DIR,
@@ -1422,7 +1477,7 @@ function npmExecArgs(packageSpec, executable, args) {
 
 async function runNpmExecCapture(packageSpec, executable, args, options = {}) {
   throwIfStopping();
-  const child = spawn(NPM_BIN, npmExecArgs(packageSpec, executable, args), {
+  const child = spawn(NPM_BIN, [...NPM_ARGS_PREFIX, ...npmExecArgs(packageSpec, executable, args)], {
     env: options.env || process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
@@ -1456,7 +1511,7 @@ const packageExecutableLauncher = createPackageExecutableLauncher({
   materialize: async (packageSpec, executable, options = {}) => {
     const result = await runNpmExecCapture(
       packageSpec,
-      process.execPath,
+      npmExecutableResolverCommand(),
       npmExecutableResolverArgs(executable),
       options,
     );
@@ -1521,10 +1576,11 @@ function trackTransientProcess(child, label, processGroup) {
     child.once('close', (code, signal) => {
       record.exited = true;
       record.exit = { code: code ?? 1, signal, ...(spawnError ? { error: spawnError } : {}) };
-      transientProcesses.delete(record);
+      if (process.platform !== 'win32') transientProcesses.delete(record);
       resolve(record.exit);
     });
   });
+  if (process.platform === 'win32' && child.pid) trackWindowsProcess(record);
   transientProcesses.add(record);
   return record;
 }
@@ -1614,6 +1670,7 @@ async function startManagedProcess({
     logWriter,
     logWriteError: undefined,
   };
+  if (process.platform === 'win32' && child.pid) trackWindowsProcess(record);
   managedProcesses.add(record);
   const outputOptions = {
     executionLocation,
@@ -1696,11 +1753,62 @@ async function startManagedProcess({
     child.once('error', (error) => { void finish({ code: 1, error }); });
     child.once('close', (code, signal) => { void finish({ code: code ?? 1, signal }); });
   });
+  if (record.windowsSampleReady) await record.windowsSampleReady;
   if (stopRequested) {
     await stopManagedProcess(record);
     throwIfStopping();
   }
   return record;
+}
+
+function windowsProcessJournalMode(command) {
+  if (['install', 'start', 'restart', '__service-run'].includes(command)) return {recover: true, create: true};
+  if (command === 'add') return {recover: false, create: true};
+  return {recover: false, create: false};
+}
+
+async function sampleWindowsProcessTree(record, journal = windowsProcessJournal, operations = {}) {
+  const snapshotTree = operations.snapshotTree || snapshotOwnedWindowsTree;
+  const identity = await record.windowsIdentity;
+  if (!identity) {
+    if (record.exited) return;
+    throw record.windowsIdentityError || new Error(`Cannot verify Windows process ${record.child.pid}; refusing sampling`);
+  }
+  await journal?.record([identity]);
+  for (const item of await snapshotTree(identity)) record.windowsDescendants.set(item.pid, item);
+  await journal?.record(record.windowsDescendants.values());
+}
+
+function trackWindowsProcess(record) {
+  record.windowsDescendants = new Map();
+  record.windowsIdentity = readWindowsProcessIdentity(record.child.pid).catch((error) => {
+    record.windowsIdentityError = error;
+    return undefined;
+  });
+  let sampling = false;
+  const sample = async () => {
+    if (sampling) return;
+    sampling = true;
+    try {
+      await sampleWindowsProcessTree(record);
+    } finally { sampling = false; }
+  };
+  const handleJournalFailure = (error) => {
+    if (stopRequested) return;
+    stopRequested = true;
+    stopSignal = 'Windows process journal failure';
+    process.exitCode = 1;
+    const reason = redact(error?.message || error);
+    void recordError('windows-process-journal', reason).catch(() => {});
+    console.error(`\n🔴 Windows 进程记录失败：${reason}`);
+    void cleanupAll().catch(() => {});
+  };
+  record.sampleWindowsTree = sample;
+  record.windowsSampleTimer = setInterval(() => {void sample().catch(handleJournalFailure);}, 1000);
+  record.windowsSampleTimer.unref();
+  record.child.once('exit', () => clearInterval(record.windowsSampleTimer));
+  record.windowsSampleReady = sample();
+  void record.windowsSampleReady.catch(handleJournalFailure);
 }
 
 function signalProcess(record, signal) {
@@ -1714,8 +1822,19 @@ function signalProcess(record, signal) {
 }
 
 async function stopManagedProcess(record) {
-  if (!record || record.exited) return;
+  if (!record || (record.exited && process.platform !== 'win32')) return;
   record.expectedStop = true;
+  if (process.platform === 'win32') {
+    clearInterval(record.windowsSampleTimer);
+    await record.sampleWindowsTree?.().catch(() => {});
+    const identity = await record.windowsIdentity;
+    if (!identity && !record.exited) throw new Error(`Cannot verify Windows process ${record.child.pid}; refusing cleanup`);
+    const known = [...(record.windowsDescendants?.values() || [])].reverse();
+    if (identity && !known.some(item => item.pid === identity.pid)) known.push(identity);
+    for (const owned of known) await stopOwnedWindowsTree(owned);
+    await Promise.race([record.exitPromise, delay(2_000)]);
+    return;
+  }
   signalProcess(record, 'SIGTERM');
   await Promise.race([record.exitPromise, delay(5_000)]);
   if (!record.exited) {
@@ -2062,14 +2181,17 @@ async function startAgentGroups(groups) {
       throwIfStopping();
       const running = started.running;
       throwIfStopping();
-      for (const agent of running.agents || []) group.availableAgents.add(agent.name);
+      const codexFailure = codexSessionFailure(group.process.events);
+      for (const agent of running.agents || []) {
+        if (agent.name !== 'codex' || !codexFailure) group.availableAgents.add(agent.name);
+      }
       for (const agent of agents) {
         if (!group.availableAgents.has(agent.name)) {
           const failed = group.process.events.find((event) => event.type === 'agent.failed' && event.agent === agent.name);
           recordStableAgentFailure(
             group,
             agent.name,
-            failed?.message || `${agent.name} Agent Bridge 启动失败`,
+            (agent.name === 'codex' && codexFailure) || failed?.message || `${agent.name} Agent Bridge 启动失败`,
           );
           await releaseLease(group.leases.get(agent.name));
           group.leases.delete(agent.name);
@@ -3560,7 +3682,7 @@ async function restoreReplacedBindings(previousBindings, acceptedBindings, opera
 async function activateAddedBindings(addedBindings, operations = {}) {
   const platform = operations.platform || process.platform;
   const addedBindingIds = [...new Set(addedBindings.map((binding) => binding.binding_id))];
-  if (platform !== 'darwin') {
+  if (!['darwin', 'win32'].includes(platform)) {
     return { mode: 'manual', bindingIds: addedBindingIds, pid: null };
   }
   const withControlLock = operations.withControlLock || withServiceControlLock;
@@ -3623,7 +3745,7 @@ async function activateAddedBindings(addedBindings, operations = {}) {
 }
 
 function shouldUseBackgroundService(command, platform = process.platform, foreground = FOREGROUND_MODE) {
-  return platform === 'darwin' && !foreground && (command === 'install' || command === 'start');
+  return (platform === 'darwin' || platform === 'win32') && !foreground && (command === 'install' || command === 'start');
 }
 
 async function handoffToBackground(bindings, operations = {}) {
@@ -3656,13 +3778,14 @@ async function continueStartedRuntime(runtime, operations = {}) {
 }
 
 async function resolveManagedRuntimeStatus(operations = {}) {
-  const launchdStatus = operations.launchdStatus || (process.platform === 'darwin'
+  const launchdStatus = operations.launchdStatus || (['darwin','win32'].includes(process.platform)
     ? () => launchdService.status()
     : async () => ({ loaded: false, state: 'stopped', pid: null }));
   const foregroundPids = operations.foregroundPids || (() => findOwnedControllerPids({
     leasesHome: LEASES_HOME,
     expectedControllerPath: CONTROLLER_PATH,
     expectedRuntimeHome: RUNTIME_HOME,
+    readProcessIdentity,
   }));
   const service = await launchdStatus();
   const pids = await foregroundPids();
@@ -3686,16 +3809,19 @@ async function resolveManagedRuntimeStatus(operations = {}) {
 }
 
 async function stopManagedRuntime(operations = {}) {
-  const stopLaunchd = operations.stopLaunchd || (process.platform === 'darwin'
+  const stopLaunchd = operations.stopLaunchd || (['darwin','win32'].includes(process.platform)
     ? () => launchdService.stop()
     : async () => ({ stopped: true, wasLoaded: false }));
   const discoverOwnedControllerPids = () => findOwnedControllerPids({
     leasesHome: LEASES_HOME,
     expectedControllerPath: CONTROLLER_PATH,
     expectedRuntimeHome: RUNTIME_HOME,
+    readProcessIdentity,
   });
   const foregroundPids = operations.foregroundPids || discoverOwnedControllerPids;
-  const stopForeground = operations.stopForeground || ((pids) => stopOwnedControllerProcesses({
+  const stopForeground = operations.stopForeground || (process.platform === 'win32'
+    ? (pids) => stopWindowsForegroundControllers(pids, {discoverOwnedControllerPids})
+    : (pids) => stopOwnedControllerProcesses({
     pids,
     validateProcess: async (pid) => (await discoverOwnedControllerPids()).includes(pid),
   }));
@@ -3708,6 +3834,39 @@ async function stopManagedRuntime(operations = {}) {
     throw new Error(`以下 Task Agent 进程未能停止：${foreground.remaining.join(', ')}`);
   }
   return { launchd: launchd.wasLoaded, stoppedPids: foreground.stopped };
+}
+
+async function stopWindowsForegroundControllers(pids, operations = {}) {
+  const discover = operations.discoverOwnedControllerPids || (async () => pids);
+  const readIdentity = operations.readIdentity || readWindowsProcessIdentity;
+  const currentSid = operations.currentSid || getCurrentWindowsSid;
+  const requestStop = operations.requestStop || ((pid) => requestWindowsControllerStop(WINDOWS_PROCESS_JOURNAL_HOME, pid));
+  const stopTree = operations.stopTree || stopOwnedWindowsTree;
+  const wait = operations.wait || delay;
+  const attempts = operations.attempts ?? 100;
+  const stopped = [];
+  const sid = await currentSid();
+  for (const pid of pids) {
+    if (!(await discover()).includes(pid)) throw new Error('Windows Controller identity changed');
+    const identity = await readIdentity(pid);
+    if (!identity || identity.ownerSid.toLowerCase() !== sid.toLowerCase()) throw new Error('Windows Controller owner mismatch');
+    if (!await requestStop(pid)) throw new Error(`Windows Controller ${pid} has no verified stop journal`);
+    let live = identity;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await wait(100);
+      live = await readIdentity(pid);
+      if (!live || live.startedAt !== identity.startedAt) break;
+    }
+    if (live && live.startedAt === identity.startedAt) await stopTree(identity);
+    const remaining = await readIdentity(pid);
+    if (remaining && remaining.startedAt === identity.startedAt) throw new Error(`Windows Controller ${pid} did not stop`);
+    stopped.push(pid);
+  }
+  return {stopped, remaining:[]};
+}
+
+function createWindowsRestartService(serviceManager = launchdService) {
+  return (bindingIds, options) => serviceManager.restart(bindingIds, options);
 }
 
 async function runServiceLifecycleCommand(command, operations = {}) {
@@ -3738,8 +3897,8 @@ async function runServiceLifecycleCommand(command, operations = {}) {
     return result;
   }
   if (command === 'restart') {
-    if (process.platform !== 'darwin' && !operations.startService) {
-      throw new Error('后台服务当前仅支持 macOS；请使用 start --foreground');
+    if (!['darwin','win32'].includes(process.platform) && !operations.startService) {
+      throw new Error('后台服务当前仅支持 macOS/Windows；请使用 start --foreground');
     }
     const readSelection = operations.readSelection || (() => launchdService.selection());
     const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
@@ -3751,8 +3910,15 @@ async function runServiceLifecycleCommand(command, operations = {}) {
       const bindingIds = selectServiceBindings(await loadBindings(), savedBindingIds)
         .map((binding) => binding.binding_id);
       if (!bindingIds.length) throw new Error('未找到已经绑定的智能体-Bot 配置，请先运行 install');
-      await stopRuntime();
-      return startService(bindingIds);
+      const restartService = operations.restartService
+        || (process.platform === 'win32' && !operations.stopRuntime && !operations.startService
+          ? createWindowsRestartService()
+          : (async (ids) => { await stopRuntime(); return startService(ids); }));
+      return restartService(bindingIds, {
+        beforeStart: () => stopRuntime({
+          stopLaunchd: async () => ({stopped: true, wasLoaded: false}),
+        }),
+      });
     });
     log(`🟢 Task Agent 已重新启动${result.pid ? `（PID ${result.pid}）` : ''}。`);
     return result;
@@ -3861,10 +4027,40 @@ async function dispatchControllerCommand(command, operations = {}) {
   throw new Error(`unknown controller command: ${command}`);
 }
 
+async function pollWindowsStopRequest() {
+  if (process.platform !== 'win32' || stopRequested) return;
+  let requested = await windowsProcessJournal?.stopRequested();
+  if (!requested && process.env.AAMP_WINDOWS_SERVICE_GENERATION) {
+    const file = process.env.AAMP_WINDOWS_SERVICE_STOP_FILE;
+    const request = file ? await readJson(file).catch(() => undefined) : undefined;
+    requested = request?.generation === process.env.AAMP_WINDOWS_SERVICE_GENERATION;
+  }
+  if (!requested) return;
+  stopRequested = true;
+  stopSignal = 'stop';
+  promptInterrupter.interrupt(new Error('已收到停止请求'));
+  await cleanupAll();
+}
+
 async function main() {
+  if (process.platform === 'win32' && COMMAND === '__service-run') {
+    const diagnosticFile=path.join(RUNTIME_HOME,'windows-service-v1','controller-diagnostic.jsonl');
+    appendLifecycleDiagnostic(diagnosticFile,{event:'controller.started'});
+    process.once('exit',code=>appendLifecycleDiagnostic(diagnosticFile,{event:'controller.exit',code}));
+    process.on('uncaughtExceptionMonitor',error=>appendLifecycleDiagnostic(diagnosticFile,{event:'controller.uncaught',errorCode:error.code || error.name}));
+  }
   await ensurePrivateDir(STATE_HOME);
   await assertNoSymlinkPath(RUNTIME_HOME, RUNTIME_HOME);
   await ensurePrivateDir(RUNTIME_HOME);
+  if (process.platform === 'win32') {
+    const journalMode = windowsProcessJournalMode(COMMAND);
+    if (journalMode.recover) await recoverWindowsProcessJournals(WINDOWS_PROCESS_JOURNAL_HOME);
+    if (journalMode.create) {
+      const identity = await readWindowsProcessIdentity(process.pid);
+      if (!identity) throw new Error('Cannot verify Windows Controller identity');
+      windowsProcessJournal = await createWindowsProcessJournal(WINDOWS_PROCESS_JOURNAL_HOME, identity);
+    }
+  }
   await ensurePrivateDir(RUN_LOG_DIR);
   await fsp.writeFile(ERRORS_LOG, '', { mode: 0o600, flag: 'a' });
   await writeManifest();
@@ -3873,6 +4069,7 @@ async function main() {
 
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
+    if (process.platform === 'win32') appendLifecycleDiagnostic(path.join(RUNTIME_HOME,'windows-service-v1','controller-diagnostic.jsonl'),{event:'controller.signal',signal});
     if (stopRequested) return;
     stopRequested = true;
     stopSignal = signal;
@@ -3895,6 +4092,8 @@ if (process.argv[1]) {
 }
 
 if (isMainModule) {
+  const stopPoll = process.platform === 'win32' ? setInterval(() => {void pollWindowsStopRequest().catch(() => {});}, 250) : undefined;
+  stopPoll?.unref();
   main()
     .catch(async (error) => {
       if (!stopRequested) {
@@ -3906,12 +4105,14 @@ if (isMainModule) {
       }
     })
     .finally(async () => {
+      if (stopPoll) clearInterval(stopPoll);
       await cleanupAll();
       if (stopRequested && stopSignal) console.log(`\n已收到 ${stopSignal}，本次启动的 Bridge 已停止。`);
     });
 }
 
 export {
+  acquireDirectoryLock,
   buildPendingBinding,
   activateAddedBindings,
   createDraft,
@@ -3965,6 +4166,10 @@ export {
   shouldUseBackgroundService,
   startupSummaryLines,
   stopManagedRuntime,
+  stopWindowsForegroundControllers,
+  createWindowsRestartService,
+  sampleWindowsProcessTree,
+  windowsProcessJournalMode,
   cleanupAll,
   upsertBindings,
   writeFeishuRuntimeProfile,

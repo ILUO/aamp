@@ -33,7 +33,7 @@ test('global Task Agent installation requires the TraeCode readiness helper', ()
 test('task agent source keeps canonical package metadata and records the last successful release pins', () => {
   const canonicalPackage = '@larktask/aamp-feishu-task-agent'
   const releasedTaskAgent = '@larktask/aamp-feishu-task-agent'
-  const releasedAcpBridge = '@luckyterry/aamp-acp-bridge@0.1.29-dev.0'
+  const releasedAcpBridge = '@zhengqilin/aamp-acp-bridge@0.1.29-dev.1'
   const source = readFileSync(bootstrap, 'utf8')
   const controller = readFileSync(path.resolve(__dirname, '../bin/feishu-task-agent-controller.mjs'), 'utf8')
   const readme = readFileSync(path.resolve(__dirname, '../README.md'), 'utf8')
@@ -43,7 +43,9 @@ test('task agent source keeps canonical package metadata and records the last su
   assert.equal(packageLock.name, canonicalPackage)
   assert.equal(packageLock.packages[''].name, canonicalPackage)
   assert.match(source, new RegExp(`ACP_BRIDGE_PKG=\"\\$\\{ACP_BRIDGE_PKG:-${releasedAcpBridge.replace('/', '\\/')}\\}\"`))
-  assert.match(controller, new RegExp(`'${releasedAcpBridge.replace('/', '\\/')}'`))
+  const defaults = JSON.parse(readFileSync(path.resolve(__dirname, '../bootstrap/task-agent-defaults.json'), 'utf8'))
+  assert.equal(defaults.packages.acpBridge, releasedAcpBridge)
+  assert.match(controller, /process\.env\.AAMP_TASK_ACP_BRIDGE_PKG \|\| TASK_DEFAULTS\.packages\.acpBridge/)
   assert.match(source, new RegExp(`AAMP_TASK_AGENT_NAME=\"\\$\\{AAMP_TASK_AGENT_NAME:-${releasedTaskAgent.replace('/', '\\/')}\\}\"`))
   assert.match(controller, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@dev feishu-task-agent install`))
   assert.match(readme, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@dev`))

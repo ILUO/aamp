@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { test, type TestContext } from 'node:test'
 import {
   AampClient,
@@ -27,6 +27,8 @@ import {
 } from './agent-bridge.js'
 import type { AcpPromptHandlers, AcpResult } from './acpx-client.js'
 import { UserFacingBridgeError } from './errors.js'
+
+const homeEnvironmentKey = process.platform === 'win32' ? 'USERPROFILE' : 'HOME'
 
 type StoredHandler = (...args: never[]) => unknown
 
@@ -298,10 +300,10 @@ class FakeAcpxClient {
     this.prompts.push(_text)
     this.promptStarted.resolve()
     for (const line of _text.split('\n')) {
-      const pathSeparator = line.lastIndexOf(': /')
+      const pathSeparator = line.lastIndexOf(': ')
       if (pathSeparator < 0) continue
       const path = line.slice(pathSeparator + 2)
-      this.promptLocalPaths.push({ path, existed: existsSync(path) })
+      if (isAbsolute(path)) this.promptLocalPaths.push({ path, existed: existsSync(path) })
     }
     if (this.gatePrompt) return this.promptGate.promise
     if (this.promptFailure) throw this.promptFailure
@@ -342,12 +344,12 @@ test('formatDebugPromptLog emits prompt diagnostics without prompt content', () 
 })
 
 test('remote Agent result files are rejected without exposing remote artifact paths', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-remote-artifact-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -389,12 +391,12 @@ test('remote Agent result files are rejected without exposing remote artifact pa
 })
 
 test('remote structured result attachments are rejected before filesystem diagnostics', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-remote-structured-artifact-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -446,12 +448,12 @@ test('remote structured result attachments are rejected before filesystem diagno
 })
 
 test('remote structured result file references fail closed before a successful terminal result', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-remote-structured-file-ref-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -558,12 +560,12 @@ test('remote structured result file references fail closed before a successful t
 })
 
 test('remote structured results preserve non-file values and credential-free HTTP(S) links', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-remote-structured-safe-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -623,12 +625,12 @@ test('remote structured results preserve non-file values and credential-free HTT
 })
 
 test('local Agents retain structured attachment-field behavior', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-local-structured-file-ref-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -744,12 +746,12 @@ test('remote task error formatting treats UserFacingBridgeError text as untruste
 })
 
 test('remote Agent identity event exposes only structural command configuration', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-remote-identity-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -787,12 +789,12 @@ test('remote Agent identity event exposes only structural command configuration'
 })
 
 test('remote runtime error events use fixed safe messages without raw ACP or transport details', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-remote-runtime-events-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -1010,12 +1012,12 @@ test('omitted task dispatch concurrency leaves the AAMP client default unchanged
 })
 
 test('injected bridge harness awaits a text task through the resolved ACP session', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-harness-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -1179,12 +1181,12 @@ async function cancellationHarness(
     senderPolicies?: Array<{ sender: string }>
   } = {},
 ) {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), `aamp-acp-bridge-cancel-${taskId}-`))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -2250,12 +2252,12 @@ test('stop during ensureSession prevents an acquired lifecycle from entering pro
 })
 
 test('stop suppresses startup ready after a gated ensure succeeds late and closes once', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-startup-stop-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -2318,12 +2320,12 @@ test('stop suppresses startup ready after a gated ensure succeeds late and close
 })
 
 test('stop suppresses startup deferred after a gated ensure fails late without closing', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-startup-failure-stop-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -2553,12 +2555,12 @@ test('cancel forwarding failure is caught while the cancelled task still drops i
 })
 
 test('reject attachment policy awaits one help response before any lock, stream, download, or ACP call', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-reject-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -2643,12 +2645,12 @@ test('reject attachment policy awaits one help response before any lock, stream,
 })
 
 test('failed ensureSession is not tracked as a closable task session', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-ensure-failure-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -2685,12 +2687,12 @@ test('failed ensureSession is not tracked as a closable task session', async (co
 })
 
 test('reject attachment policy is hidden from unauthorized senders', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-unauthorized-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     rmSync(testHome, { recursive: true, force: true })
   })
 
@@ -2714,13 +2716,13 @@ test('reject attachment policy is hidden from unauthorized senders', async (cont
 })
 
 test('omitted attachment policy defaults to allow, downloads once, and cleans its temporary file path', async (context) => {
-  const originalHome = process.env.HOME
+  const originalHome = process.env[homeEnvironmentKey]
   const testHome = mkdtempSync(join(tmpdir(), 'aamp-acp-bridge-allow-'))
-  process.env.HOME = testHome
+  process.env[homeEnvironmentKey] = testHome
   let materializedDirectory: string | undefined
   context.after(() => {
-    if (originalHome === undefined) delete process.env.HOME
-    else process.env.HOME = originalHome
+    if (originalHome === undefined) delete process.env[homeEnvironmentKey]
+    else process.env[homeEnvironmentKey] = originalHome
     if (materializedDirectory) rmSync(materializedDirectory, { recursive: true, force: true })
     rmSync(testHome, { recursive: true, force: true })
   })

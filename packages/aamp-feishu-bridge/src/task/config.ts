@@ -1,6 +1,7 @@
+import { renameAtomic } from '../rename-atomic.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
@@ -49,7 +50,7 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
   await mkdir(parentDir, { recursive: true })
   const tempPath = path.join(parentDir, `.${path.basename(filePath)}.${randomUUID()}.tmp`)
   await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-  await rename(tempPath, filePath)
+  await renameAtomic(tempPath, filePath)
 }
 
 export async function loadBridgeConfig(customDir?: string): Promise<BridgeConfig | null> {

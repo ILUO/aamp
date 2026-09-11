@@ -282,7 +282,11 @@ test('endpoint probe records DNS, proxy presence, HTTP status, and retries', asy
   ])
 })
 
-test('endpoint probe bounds DNS diagnostics and releases response bodies', { timeout: 500 }, async () => {
+test('endpoint probe bounds DNS diagnostics and releases response bodies', { timeout: 500 }, async (t) => {
+  // A pending real DNS request owns a referenced handle. The never-resolving
+  // Promise mock needs one too, because detached diagnostic timers are unref'd.
+  const pendingLookupHandle = setTimeout(() => {}, 1000)
+  t.after(() => clearTimeout(pendingLookupHandle))
   assert.equal(typeof runtimeNetwork?.probeEndpoint, 'function')
 
   await assert.rejects(
