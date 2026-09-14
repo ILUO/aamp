@@ -1,11 +1,11 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {mkdtemp,mkdir,writeFile,chmod,rm} from 'node:fs/promises'
+import {mkdtemp,mkdir,writeFile,chmod,rm,realpath} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import path from 'node:path'
 import {findWindowsAgent} from '../bootstrap/windows-agents.mjs'
 async function fixture(t){
- const root=await mkdtemp(path.join(tmpdir(),'aamp-cursor-'))
+ const root=await realpath(await mkdtemp(path.join(tmpdir(),'aamp-cursor-')))
  t.after(()=>rm(root,{recursive:true,force:true}))
  const local=path.join(root,'local'),bin=path.join(root,'bin'),official=path.join(local,'cursor-agent')
  await mkdir(official,{recursive:true});await mkdir(bin)

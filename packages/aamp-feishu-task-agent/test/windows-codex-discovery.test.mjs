@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import {test} from 'node:test'
-import {mkdtemp,mkdir,writeFile,rm,chmod} from 'node:fs/promises'
+import {mkdtemp,mkdir,writeFile,rm,chmod,realpath} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import path from 'node:path'
 import {findUserCodexCli} from '../bootstrap/windows-codex-discovery.mjs'
@@ -57,7 +57,7 @@ test('Codex resolution keeps explicit and PATH priority and falls back only when
   const env={PATH:path.dirname(pathCli),PATHEXT:'.exe',AAMP_WINDOWS_TEST_PLATFORM:'win32'}
   const forbidden={findUserCodex:async()=>assert.fail('must preserve higher-priority selection')}
   assert.equal(await resolveWindowsCodexCli({...env,AAMP_CODEX_CLI_BIN:explicit},forbidden),explicit)
-  assert.equal(await resolveWindowsCodexCli(env,forbidden),pathCli)
+  assert.equal(await resolveWindowsCodexCli(env,forbidden),await realpath(pathCli))
   assert.equal(await resolveWindowsCodexCli({...env,AAMP_CODEX_CLI_BIN:path.join(root,'missing.exe')},forbidden),'')
   let called=0
   assert.equal(await resolveWindowsCodexCli({...env,PATH:''},{findUserCodex:async received=>{

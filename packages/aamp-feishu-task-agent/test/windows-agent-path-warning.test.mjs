@@ -29,7 +29,7 @@ test('warnings distinguish unsupported wrappers and Cursor identity failures and
   const warnings=[]
   t.mock.method(console,'error',message=>warnings.push(message))
   const wrapper=path.join(root,'coco.bat'),alias=path.join(root,'agent.exe')
-  await writeFile(wrapper,'echo fixture');await writeFile(alias,'')
+  await writeFile(wrapper,'echo fixture');await writeFile(alias,'',{mode:0o755})
   assert.equal(await findWindowsAgent('coco',{AAMP_COCO_CLI_BIN:wrapper},async()=>{}),undefined)
   assert.match(warnings.pop(),/不支持/)
   assert.equal(await findWindowsAgent('cursor',{AAMP_CURSOR_CLI_BIN:alias},async()=>({stdout:'other product',stderr:''})),undefined)
