@@ -21,12 +21,15 @@ to Codex or Traex. A CLI without the required ACP capability reports a preparati
 error or offers its existing update flow; discovery alone is not a real-machine
 support claim. The existing AIME tenant restriction remains in effect.
 
-Windows background `start` performs interactive installation/login and binding
-configuration checks in the terminal, then starts the Agent and Feishu bridges
-only in the background worker. The terminal follows background progress and
-reports final success only after worker readiness is confirmed. The worker still
-rechecks prerequisites non-interactively. `start --foreground`, initial
-installation/binding, and macOS keep their existing lifecycle.
+Windows background `install`, `start`, and automatic `add` activation share
+interactive installation/login and binding configuration preparation in the
+terminal. Agent and Feishu bridges start only in the background worker, which
+also completes pending pairing. Final startup success requires worker readiness;
+the worker still rechecks prerequisites non-interactively. `add` prepares before
+restarting the merged background selection and retains its activation rollback.
+Preparation failure leaves the previous service running and restores replaced
+bindings. `add --no-start`, foreground install/start, and macOS retain their
+existing lifecycle.
 
 If a desktop CLI is not on PATH, use `AAMP_CODEX_CLI_BIN`,
 `AAMP_CURSOR_CLI_BIN`, `AAMP_COCO_CLI_BIN`, `AAMP_TRAEX_CLI_BIN`,

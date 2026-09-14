@@ -57,6 +57,7 @@ for (const platform of ['darwin', 'win32']) {
     const calls = []
     const result = await controller.activateAddedBindings([bindings[1], bindings[2]], {
       platform,
+      prepareBackground: async selected => ({prepared:selected,failed:[],cancelled:[]}),
       withControlLock: async (action) => action(),
       getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2468 }),
       loadBindings: async () => bindings,
@@ -81,6 +82,7 @@ for (const platform of ['darwin', 'win32']) {
     await assert.rejects(
       controller.activateAddedBindings([bindings[1]], {
         platform,
+      prepareBackground: async selected => ({prepared:selected,failed:[],cancelled:[]}),
         withControlLock: async (action) => action(),
         getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2468 }),
         loadBindings: async () => bindings,
@@ -107,6 +109,7 @@ for (const platform of ['darwin', 'win32']) {
     await assert.rejects(
       controller.activateAddedBindings([replacement], {
         platform,
+      prepareBackground: async selected => ({prepared:selected,failed:[],cancelled:[]}),
         withControlLock: async (action) => action(),
         getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2471 }),
         loadBindings: async () => [replacement],
@@ -136,6 +139,7 @@ for (const platform of ['darwin', 'win32']) {
         { binding_id: 'binding-new', agent_type: 'codex' },
       ], {
         platform,
+      prepareBackground: async selected => ({prepared:selected,failed:[],cancelled:[]}),
         withControlLock: async (action) => action(),
         getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2472 }),
         loadBindings: async () => [{ binding_id: 'binding-new', agent_type: 'codex' }],
@@ -154,6 +158,7 @@ for (const platform of ['darwin', 'win32']) {
     const calls = []
     const result = await controller.activateAddedBindings([bindings[1]], {
       platform,
+      prepareBackground: async selected => ({prepared:selected,failed:[],cancelled:[]}),
       withControlLock: async (action) => action(),
       getRuntimeStatus: async () => ({ mode: 'foreground', state: 'running', pid: 2473 }),
       loadBindings: async () => bindings,
@@ -175,6 +180,7 @@ for (const platform of ['darwin', 'win32']) {
     const calls = []
     const result = await controller.activateAddedBindings([bindings[1]], {
       platform,
+      prepareBackground: async selected => ({prepared:selected,failed:[],cancelled:[]}),
       withControlLock: async (action) => action(),
       getRuntimeStatus: async () => ({
         mode: 'background',
@@ -203,6 +209,7 @@ for (const platform of ['darwin', 'win32']) {
     await assert.rejects(
       controller.activateAddedBindings([bindings[1]], {
         platform,
+      prepareBackground: async selected => ({prepared:selected,failed:[],cancelled:[]}),
         withControlLock: async (action) => action(),
         getRuntimeStatus: async () => ({ mode: 'stopped', state: 'stopped', pid: null, pids: [] }),
         loadBindings: async () => bindings,
@@ -231,6 +238,7 @@ for (const platform of ['darwin', 'win32']) {
     }
     const operations = {
       platform,
+      prepareBackground: async selected => ({prepared:selected,failed:[],cancelled:[]}),
       getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2474 }),
       loadBindings: async () => bindings,
       readSelection: async () => {
@@ -260,6 +268,7 @@ for (const platform of ['darwin', 'win32']) {
     await assert.rejects(
       controller.activateAddedBindings([bindings[1]], {
         platform,
+      prepareBackground: async selected => ({prepared:selected,failed:[],cancelled:[]}),
         withControlLock: async (action) => action(),
         getRuntimeStatus: async () => ({ mode: 'background', state: 'running', pid: 2475 }),
         loadBindings: async () => [bindings[0]],

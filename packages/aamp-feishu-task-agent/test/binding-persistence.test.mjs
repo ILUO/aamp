@@ -462,7 +462,7 @@ test('add binding collection accepts reused bindings without starting inside the
   const source = readFileSync(controllerPath, 'utf8')
   const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
   const addBranch = session.slice(
-    session.indexOf("if (mode === 'add')"),
+    session.indexOf("if (mode === 'add' || options.deferLaunch)"),
     session.indexOf("console.log('\\n=== 建立绑定并启动 ===')"),
   )
   const runAdd = functionRange(source, 'async function runAdd(', 'async function runList()')

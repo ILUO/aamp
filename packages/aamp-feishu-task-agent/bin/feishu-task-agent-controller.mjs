@@ -3208,8 +3208,9 @@ async function startSelectedBindings(bindings, existingGroups, options = {}) {
     const handoff = options.runtimeOperations?.handoff || handoffToBackground;
     const service = await handoff(result.prepared);
     if (!service.ready) throw new Error('后台服务尚未确认就绪，请执行 logs 查看原因');
-    printStartupSummary({ title: '已成功启动', plannedCount: bindings.length,
-      running: result.prepared.map(binding => ({ binding })), failed: result.failed, cancelled: result.cancelled });
+    printStartupSummary({ title: '已成功启动', plannedCount: options.plannedCount ?? bindings.length,
+      running: result.prepared.map(binding => ({ binding })), failed: result.failed,
+      cancelled: orderStartupItems(options.selectedBindings || bindings, [...(options.initialCancelled || []), ...result.cancelled]) });
     console.log(`🟢 后台服务已启动${service.pid ? `（PID ${service.pid}）` : ''}，现在可以关闭终端。`);
     return;
   }
@@ -3445,7 +3446,7 @@ async function createDraft(selectedAppIds, overrides = {}) {
   );
 }
 
-async function runBindingSession(mode) {
+async function runBindingSession(mode, options = {}) {
   const store = await loadStore();
   throwIfStopping();
   const existingByAppId = new Map(store.bindings.map((binding) => [binding.bot.app_id, binding]));
@@ -3534,7 +3535,7 @@ async function runBindingSession(mode) {
   }
   const saved = persisted.bindings;
 
-  if (mode === 'add') {
+  if (mode === 'add' || options.deferLaunch) {
     succeeded.push(...acceptedBindings);
     return {
       previousBindings: store.bindings,
@@ -3624,10 +3625,16 @@ async function finalizeInstallRuntime(result, options = {}) {
   });
 }
 
-async function runInstall() {
-  const result = await withMutationLock('install 绑定流程', async () => {
-    const bound = await runBindingSession('install');
+async function runInstall(operations = {}) {
+  const platform = operations.platform || process.platform;
+  const background = operations.background ?? shouldUseBackgroundService('install', platform);
+  const deferLaunch = platform === 'win32' && background;
+  const mutate = operations.withMutationLock || withMutationLock;
+  const runSession = operations.runBindingSession || runBindingSession;
+  const result = await mutate('install 绑定流程', async () => {
+    const bound = await runSession('install', { deferLaunch });
     throwIfStopping();
+    if (deferLaunch) return bound;
     const composed = await reconcileStartupResults(bound.selectedBindings, {
       running: bound.running,
       failed: bound.failed,
@@ -3640,9 +3647,21 @@ async function runInstall() {
     bound.disposition = composed.disposition;
     return bound;
   });
-  await finalizeInstallRuntime(result, {
-    background: shouldUseBackgroundService('install'),
-  });
+  if (deferLaunch && result.acceptedBindings.length) {
+    const startBindings = operations.startBindings || startSelectedBindings;
+    // The worker handles pending pairing using the same path as a later start.
+    try {
+      return await startBindings(result.acceptedBindings, undefined, {
+        background: true, platform,
+        plannedCount: result.selectedCount,
+        initialCancelled: result.cancelled,
+        selectedBindings: result.selectedBindings,
+      });
+    } catch (error) {
+      throw new Error(`绑定配置已保存，但启动未完成；可稍后运行 feishu-task-agent start 重试：${redact(error.message || error)}`);
+    }
+  }
+  await finalizeInstallRuntime(result, { background });
 }
 
 async function runAdd(operations = {}) {
@@ -3784,7 +3803,18 @@ async function activateAddedBindings(addedBindings, operations = {}) {
       ...retainedBindingIds,
       ...addedBindingIds.filter((bindingId) => availableIds.has(bindingId)),
     ])];
+    let serviceAttempted = false;
     try {
+      if (platform === 'win32') {
+        const prepare = operations.prepareBackground || prepareWindowsBackgroundBindings;
+        const added = availableBindings.filter(binding => addedBindingIds.includes(binding.binding_id));
+        const prepared = await prepare(added);
+        if (prepared.prepared.length !== added.length || prepared.failed.length || prepared.cancelled.length) {
+          const reasons = [...prepared.failed, ...prepared.cancelled].map(item => item.reason).filter(Boolean);
+          throw new Error(`新增绑定未完成前台准备${reasons.length ? `：${reasons.join('；')}` : ''}`);
+        }
+      }
+      serviceAttempted = true;
       const service = await startService(bindingIds);
       return { mode: 'background', bindingIds, pid: service.pid || null };
     } catch (error) {
@@ -3793,8 +3823,10 @@ async function activateAddedBindings(addedBindings, operations = {}) {
       try {
         const restored = await beforeRollback();
         if (Array.isArray(restored)) restoredReplacements = restored;
-        if (previousBindingIds.length) await startService(previousBindingIds);
-        else await stopService();
+        if (serviceAttempted) {
+          if (previousBindingIds.length) await startService(previousBindingIds);
+          else await stopService();
+        }
       } catch (caught) {
         rollbackError = caught;
       }
@@ -4225,6 +4257,7 @@ export {
   startSelectedBindings,
   runBootstrapHelper,
   runAdd,
+  runInstall,
   runServiceLifecycleCommand,
   runServiceWorker,
   runStart,
