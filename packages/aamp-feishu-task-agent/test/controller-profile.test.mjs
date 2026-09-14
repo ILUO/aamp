@@ -3,7 +3,6 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { pathToFileURL } from 'node:url'
 
 test('controller writes Task-only runtime profiles', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-controller-task-profile-'))
@@ -13,7 +12,7 @@ test('controller writes Task-only runtime profiles', async () => {
 
   const controllerUrl = new URL('../bin/feishu-task-agent-controller.mjs', import.meta.url)
   controllerUrl.searchParams.set('test', String(Date.now()))
-  const controller = await import(pathToFileURL(controllerUrl.pathname).href + controllerUrl.search)
+  const controller = await import(controllerUrl.href)
   assert.equal(typeof controller.writeFeishuRuntimeProfile, 'function')
 
   const feishuConfigDir = path.join(root, 'bindings', 'binding-1', 'feishu')

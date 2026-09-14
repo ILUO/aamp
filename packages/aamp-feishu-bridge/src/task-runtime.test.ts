@@ -1,3 +1,4 @@
+import { assertPrivateFile } from './private-json-test-support.js'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
@@ -225,7 +226,7 @@ test('normalizeTaskRuntimeBotForExecution converts saved lark-cli selection with
   })
 })
 
-test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark-cli and with mode 0600', async () => {
+test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark-cli and with private permissions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'aamp-feishu-runtime-'))
   const agentEmail = 'aime@meshmail.test'
   const appId = 'cli_remote'
@@ -268,8 +269,8 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
     const savedTaskConfig = JSON.parse(await readFile(join(second.taskDir, 'config.json'), 'utf8'))
     const savedImConfig = JSON.parse(await readFile(join(second.imDir, 'config.json'), 'utf8'))
 
-    assert.equal((await stat(join(first.taskDir, 'config.json'))).mode & 0o777, 0o600)
-    assert.equal((await stat(join(first.imDir, 'config.json'))).mode & 0o777, 0o600)
+    await assertPrivateFile(join(first.taskDir, 'config.json'))
+    await assertPrivateFile(join(first.imDir, 'config.json'))
     assert.deepEqual(savedTaskConfig.agent, { type: 'aime', executionLocation: 'remote' })
     assert.equal(savedTaskConfig.feishu.authMode, 'app-secret')
     assert.equal(savedTaskConfig.feishu.cliProfile, undefined)
@@ -282,7 +283,7 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
   }
 })
 
-test('saveTaskRuntimeBots persists app-secret profiles with mode 0600 after replacement', async () => {
+test('saveTaskRuntimeBots persists app-secret profiles with private permissions after replacement', async () => {
   const root = await mkdtemp(join(tmpdir(), 'aamp-feishu-runtime-profiles-'))
   const target = join(root, 'task-runtime', 'task-profiles-v2.json')
   try {
@@ -297,7 +298,7 @@ test('saveTaskRuntimeBots persists app-secret profiles with mode 0600 after repl
       auth_mode: 'app-secret',
     })], root)
 
-    assert.equal((await stat(target)).mode & 0o777, 0o600)
+    await assertPrivateFile(target)
     const saved = JSON.parse(await readFile(target, 'utf8'))
     assert.equal(saved.profiles[0].app_secret, 'second-secret')
     assert.equal(saved.profiles[0].auth_mode, 'app-secret')

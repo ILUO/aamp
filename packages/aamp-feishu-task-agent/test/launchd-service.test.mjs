@@ -49,7 +49,7 @@ test('launchctl status parser distinguishes running, loaded, and stopped jobs', 
 })
 
 test('process identity reader returns a parseable start time and full command on macOS', async (context) => {
-  if (process.platform !== 'darwin') context.skip('macOS ps format')
+  if (process.platform !== 'darwin') return context.skip('macOS ps format')
   const identity = await launchdService.readProcessIdentity(process.pid)
   assert.ok(identity)
   assert.equal(Number.isFinite(Date.parse(identity.startedAt)), true)

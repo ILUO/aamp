@@ -452,7 +452,7 @@ test('install startup errors say the binding remains saved for retry', () => {
   const finalizer = functionRange(source, 'async function finalizeDeferredLaunchResults(', 'async function startBindingsWithGroups(')
   const launcher = functionRange(source, 'async function startBindingsWithGroups(', 'function startupDisposition(')
   assert.match(reporter, /🔴 启动失败：\$\{bindingLabel\(binding, runtimeAgentType\)\}/)
-  assert.match(reporter, /绑定配置已保存，可稍后运行 feishu-task-agent start 重试/)
+  assert.match(reporter, /绑定配置已保存，可稍后运行 \$\{taskCommand\('start'\)\} 重试/)
   assert.match(finalizer, /operations\.reportBindingFailure\([\s\S]*item\.runtimeAgentType,[\s\S]*item\.reason,[\s\S]*mode/)
   assert.match(finalizer, /setBindingStatus\(item\.binding, 'start', 'failed', item\.reason\)/)
   assert.match(launcher, /finalizeDeferredLaunchResults\(launched, mode, operations\)/)
@@ -462,7 +462,7 @@ test('add binding collection accepts reused bindings without starting inside the
   const source = readFileSync(controllerPath, 'utf8')
   const session = functionRange(source, 'async function runBindingSession(', 'async function runInstall(')
   const addBranch = session.slice(
-    session.indexOf("if (mode === 'add')"),
+    session.indexOf("if (mode === 'add' || options.deferLaunch)"),
     session.indexOf("console.log('\\n=== 建立绑定并启动 ===')"),
   )
   const runAdd = functionRange(source, 'async function runAdd(', 'async function runList()')
@@ -505,4 +505,12 @@ test('saved binding output does not use the ready-state green icon', () => {
 
   assert.match(source, /console\.log\(`已保存：\$\{bindingLabel\(binding\)\}`\)/)
   assert.doesNotMatch(source, /🟢 已保存：/)
+})
+
+
+test('native Windows lock wait budget starts after private directory ACL setup', {skip: process.platform !== 'win32'}, async () => {
+  const lock = path.join(stateHome, 'acl-budget.lock')
+  const release = await controller.acquireDirectoryLock(lock, 'ACL budget fixture', 100)
+  assert.equal(JSON.parse(readFileSync(path.join(lock, 'owner.json'), 'utf8')).pid, process.pid)
+  await release()
 })

@@ -1,6 +1,8 @@
+import { bridgeCommand } from '../platform-hints.js'
+import { renameAtomic } from '../rename-atomic.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
@@ -49,7 +51,7 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
   await mkdir(parentDir, { recursive: true })
   const tempPath = path.join(parentDir, `.${path.basename(filePath)}.${randomUUID()}.tmp`)
   await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-  await rename(tempPath, filePath)
+  await renameAtomic(tempPath, filePath)
 }
 
 export async function loadBridgeConfig(customDir?: string): Promise<BridgeConfig | null> {
@@ -243,7 +245,7 @@ export function normalizeBridgeConfig(
   fallbackAgentType = 'agent',
 ): BridgeConfig {
   if (!config.aampHost || !config.targetAgentEmail || !config.slug || !config.feishu || !config.mailbox) {
-    throw new Error('Bridge config is incomplete. Run "aamp-feishu-bridge start --enable-task" again.')
+    throw new Error(`Bridge config is incomplete. Run "${bridgeCommand()} start --enable-task" again.`)
   }
   const executionLocation = config.agent?.executionLocation ?? 'local'
   if (executionLocation !== 'local' && executionLocation !== 'remote') {

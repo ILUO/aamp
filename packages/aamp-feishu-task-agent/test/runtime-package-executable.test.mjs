@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process'
 import {
   createPackageExecutableLauncher,
   npmExecutableResolverArgs,
+  npmExecutableResolverCommand,
   parseResolvedPackageExecutable,
 } from '../bin/runtime-package-executable.mjs'
 
@@ -89,11 +90,18 @@ function collectOutput(child) {
   return async () => ({ ...await waitForExit(child), stdout, stderr })
 }
 
+async function npmRun(args, options = {}) {
+  if (process.platform !== 'win32') return execFileAsync('npm', args, options)
+  const { resolveNativeCommand } = await import('../bin/windows-platform.mjs')
+  const npm = await resolveNativeCommand('npm', options.env || process.env)
+  return execFileAsync(npm.command, [...npm.argsPrefix, ...args], options)
+}
+
 async function npmMaterialize(packageSpec, executable, cacheDir, environment = process.env) {
-  const { stdout } = await execFileAsync('npm', [
+  const { stdout } = await npmRun([
     'exec', '--yes', '--offline', '--cache', cacheDir,
     '--package', packageSpec, '--',
-    process.execPath, ...npmExecutableResolverArgs(executable),
+    npmExecutableResolverCommand(), ...npmExecutableResolverArgs(executable),
   ], {
     env: { ...environment, npm_config_offline: 'true' },
     timeout: 15_000,
@@ -162,10 +170,10 @@ test('same package materializes once before four real business processes overlap
       await delay(40)
       if (activeMaterializations > 1) throw new Error('shared package tree was materialized concurrently')
       activeMaterializations -= 1
-      return directDescriptor(worker)
+      return directDescriptor(process.execPath)
     },
     spawnProcess(command, args, options) {
-      launched.push(args[0])
+      launched.push(args[1])
       return spawn(command, args, options)
     },
   })
@@ -175,7 +183,7 @@ test('same package materializes once before four real business processes overlap
       launcher.launch({
         packageSpec: 'fixture-package@1.0.0',
         executable: 'fixture-bridge',
-        args: [id, eventsFile, releaseFile],
+        args: [worker, id, eventsFile, releaseFile],
         spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
       })
     ))))
@@ -285,7 +293,7 @@ test('one business startup failure stays isolated after shared preparation', asy
   const launcher = createPackageExecutableLauncher({
     async materialize() {
       materializations += 1
-      return directDescriptor(worker)
+      return directDescriptor(process.execPath)
     },
   })
   const children = []
@@ -293,11 +301,11 @@ test('one business startup failure stays isolated after shared preparation', asy
     children.push(...await Promise.all([
       launcher.launch({
         packageSpec: 'fixture-package@1.0.0', executable: 'fixture-bridge',
-        args: ['bad', eventsFile, releaseFile, 'fail'], spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
+        args: [worker, 'bad', eventsFile, releaseFile, 'fail'], spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
       }),
       launcher.launch({
         packageSpec: 'fixture-package@1.0.0', executable: 'fixture-bridge',
-        args: ['good', eventsFile, releaseFile], spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
+        args: [worker, 'good', eventsFile, releaseFile], spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] },
       }),
     ]))
     const badExit = await waitForExit(children[0])
@@ -317,13 +325,13 @@ test('prepared direct-launch children remain independently stoppable', async () 
   const worker = await createWorkerFixture(root)
   const eventsFile = path.join(root, 'events.log')
   const releaseFile = path.join(root, 'never-release')
-  const launcher = createPackageExecutableLauncher({ materialize: async () => directDescriptor(worker) })
+  const launcher = createPackageExecutableLauncher({ materialize: async () => directDescriptor(process.execPath) })
   const children = []
   try {
     children.push(...await Promise.all(['one', 'two'].map((id) => launcher.launch({
       packageSpec: 'fixture-package@1.0.0',
       executable: 'fixture-bridge',
-      args: [id, eventsFile, releaseFile],
+      args: [worker, id, eventsFile, releaseFile],
       spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' },
     }))))
     await until(async () => {
@@ -339,13 +347,31 @@ test('prepared direct-launch children remain independently stoppable', async () 
   }
 })
 
+test('Windows npm resolver transports fixed source as a single-line data module', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-resolver-transport-'))
+  try {
+    const executable = process.platform === 'win32' ? 'transport-fixture.exe' : 'transport-fixture'
+    const native = path.join(root, executable)
+    await fsp.copyFile(process.execPath, native)
+    await fsp.chmod(native, 0o755)
+    const args = npmExecutableResolverArgs(executable, {platform: 'win32'})
+    assert.equal(args[0], '--input-type=module')
+    assert.equal(args[1], '--eval')
+    assert.match(args[2], /^import\('data:text\/javascript;base64,[A-Za-z0-9+/=]+'\)$/)
+    assert.equal(args[3], executable)
+    assert.match(npmExecutableResolverArgs(executable, {platform: 'linux'})[2], /\nimport fs/)
+    const {stdout} = await execFileAsync(process.execPath, args, {env: withoutNpmExecContext({...process.env, PATH: root}), timeout: 5000})
+    assert.equal(parseResolvedPackageExecutable(stdout, executable).command, native)
+  } finally {await fsp.rm(root, {recursive: true, force: true})}
+})
+
 test('resolver captures the executable shim and exact npm PATH without shell lookup', async () => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-package-resolver-'))
   try {
     const binDir = path.join(root, 'node_modules', '.bin')
     await fsp.mkdir(binDir, { recursive: true })
-    const shim = path.join(binDir, 'fixture-bridge')
-    await fsp.writeFile(shim, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    const shim = path.join(binDir, process.platform === 'win32' ? 'fixture-bridge.exe' : 'fixture-bridge')
+    await fsp.copyFile(process.execPath, shim)
     await fsp.chmod(shim, 0o755)
 
     for (const env of [
@@ -435,7 +461,7 @@ test('real npm shim keeps requested-bin precedence, shell semantics, and package
       'requested.sh': '#!/bin/sh -e\ncase "$-" in *e*) ;; *) exit 9;; esac\nprintf "%s\\n" requested-shell\nfixture-helper\n',
       'helper.sh': '#!/bin/sh\nprintf "%s\\n" package-local-helper\n',
     })
-    const packed = JSON.parse((await execFileAsync('npm', [
+    const packed = JSON.parse((await npmRun([
       'pack', '--json', '--pack-destination', root, requestedRoot,
     ], { timeout: 10_000 })).stdout)
     const packageSpec = path.join(root, packed[0].filename)
@@ -511,7 +537,7 @@ process.stdout.write(JSON.stringify({
 `,
     })
 
-    const baselineResult = await execFileAsync('npm', [
+    const baselineResult = await npmRun([
       'exec', '--yes', '--offline', '--cache', cacheDir,
       '--package', packageRoot, '--', 'fixture-context-bridge',
     ], { env: safeEnvironment, timeout: 15_000 })
@@ -681,4 +707,25 @@ test('controller resolver resists a package-local node bin and managed cleanup r
     else process.env.AAMP_TASK_NPM_CACHE_DIR = previousCache
     await fsp.rm(root, { recursive: true, force: true })
   }
+})
+
+
+test('native Windows npm package shim preserves argv stdin and exit code', {skip: process.platform !== 'win32' && 'requires native Windows cmd.exe'}, async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-windows-argv-'))
+  try {
+    const pkg = path.join(root, '中文 package')
+    await fsp.mkdir(pkg, {recursive:true})
+    await fsp.writeFile(path.join(pkg,'package.json'), JSON.stringify({name:'aamp-windows-argv-fixture',version:'1.0.0',type:'module',bin:{'argv-fixture':'argv.mjs'}}))
+    await fsp.copyFile(new URL('./fixtures/windows-argv.mjs',import.meta.url),path.join(pkg,'argv.mjs'))
+    const packed = JSON.parse((await npmRun(['pack','--json','--pack-destination',root,pkg],{timeout:30000})).stdout)
+    const packageSpec=path.join(root,packed[0].filename)
+    const launcher=createPackageExecutableLauncher({materialize:(spec,bin)=>npmMaterialize(spec,bin,path.join(root,'cache'))})
+    const args=['中文 空格','a&b','(item)','x%PATH%','a!b',"a'b",'a"b','C:\\space dir\\']
+    const child=await launcher.launch({packageSpec,executable:'argv-fixture',args,spawnOptions:{stdio:['pipe','pipe','pipe']}})
+    const output=collectOutput(child)
+    child.stdin.end('中文\r\nsecond line')
+    const result=await output()
+    assert.equal(result.code,7,result.stderr)
+    assert.deepEqual(JSON.parse(result.stdout),{args,input:'中文\r\nsecond line'})
+  } finally {await fsp.rm(root,{recursive:true,force:true})}
 })

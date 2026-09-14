@@ -1384,9 +1384,8 @@ test('runtime completes and comments briefly when agent result violates the fina
     await waitFor(() => {
       assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_bad_contract'])
       assert.equal(fakeFeishu.comments.length, 1)
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
     })
-
-    assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
     assert.match(fakeFeishu.comments[0]?.content ?? '', /^智能体返回的结果格式不符合任务协议，本次处理已结束。任务将流转为已完成。原因：/)
     assert.match(fakeFeishu.comments[0]?.content ?? '', /未按 FEISHU_TASK_RESULT_JSON 协议收尾/)
     assert.match(fakeFeishu.comments[0]?.content ?? '', /Task ID: feishu-task-task_guid_bad_contract-evt_bad_contract/)
@@ -1465,7 +1464,7 @@ test('runtime keeps lark-cli profile out of dispatch context and puts it in prom
 
     assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_lark_cli_profile, undefined)
     assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /Feishu lark-cli profile rules:/)
-    assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /--profile custom-feishu-profile/)
+    assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', process.platform === 'win32' ? /--profile 'custom-feishu-profile'/ : /--profile custom-feishu-profile/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -2239,3 +2238,49 @@ test('runtime rejects an unsafe link before writing a Task delivery', async () =
     await rm(configDir, { recursive: true, force: true })
   }
 })
+
+for (const size of [50 * 1024 * 1024 - 1, 50 * 1024 * 1024, 50 * 1024 * 1024 + 1]) {
+  test(`native Windows file delivery enforces 50 MiB boundary at ${size} bytes`, {
+    skip: process.platform !== 'win32' && 'requires native Windows filesystem',
+  }, async () => {
+    const { open, mkdir } = await import('node:fs/promises')
+    const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-delivery-boundary-'))
+    const fakeAamp = new FakeAampClient()
+    const fakeFeishu = new FakeFeishuTaskClient()
+    const taskGuid = `boundary_${size}`
+    const eventId = `boundary_event_${size}`
+    const directory = path.join(configDir, '验收 产物')
+    await mkdir(directory)
+    const filePath = path.join(directory, '结果 report.csv')
+    const file = await open(filePath, 'w')
+    await file.truncate(size)
+    await file.close()
+    fakeFeishu.tasks[taskGuid] = {
+      guid: taskGuid, summary: 'Windows delivery boundary', status: 'todo', agentTaskStatus: 3,
+      comments: [{ id: eventId, authorType: 'user', authorId: 'ou_human', content: 'Deliver the generated file', createdAt: '1775793266100' }],
+    }
+    const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+      configDir, aampClient: fakeAamp, feishuClient: fakeFeishu,
+      logger: { log: () => {}, error: () => {} },
+    })
+    try {
+      await runtime.start()
+      await fakeFeishu.emit({eventId, taskGuid, eventTypes: ['task_comment_create'], timestamp: '1775793266155'})
+      assert.equal(fakeAamp.sentTasks.length, 1)
+      fakeAamp.emitResult(`feishu-task-${taskGuid}-${eventId}`, {
+        output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({schema: 'feishu_task_result.v2', status: 'succeeded', outputs: [{kind: 'file_delivery', path: filePath}]})}`,
+      })
+      if (size <= 50 * 1024 * 1024) {
+        await waitFor(() => assert.deepEqual(fakeFeishu.completedTaskGuids, [taskGuid]), 10000)
+        assert.deepEqual(fakeFeishu.uploadedDeliveries, [{taskGuid, filePath}])
+        assert.equal(fakeFeishu.uploadedDeliveryContents[0].length, size)
+      } else {
+        await waitFor(() => assert.ok(fakeFeishu.comments.some(comment => /exceeds 50 MB/.test(comment.content))), 10000)
+        assert.equal(fakeFeishu.uploadedDeliveries.length, 0)
+      }
+    } finally {
+      await runtime.stop()
+      await rm(configDir, {recursive: true, force: true})
+    }
+  })
+}
