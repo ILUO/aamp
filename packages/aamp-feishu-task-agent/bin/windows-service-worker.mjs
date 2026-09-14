@@ -58,8 +58,8 @@ async function runWindowsServiceWorkerOnce(config) {
 export async function runWindowsServiceWorker(config, {
   runOnce=runWindowsServiceWorkerOnce,
   wait=ms=>new Promise(resolve=>setTimeout(resolve,ms)),
-  maxRestarts=3,
-  restartDelayMs=60000,
+  maxRestarts=Infinity,
+  restartDelayMs=10000,
 }={}) {
   const cancelled=async()=>{
     const selected=JSON.parse(await fs.readFile(config.paths.selectionFile,'utf8'));
@@ -73,7 +73,8 @@ export async function runWindowsServiceWorker(config, {
     const code=await runOnce(config);
     if(code===0 || attempt>=maxRestarts) return code;
     diagnostic(config,{event:'controller.retry',code,attempt:attempt+1});
-    await fs.appendFile(config.paths.logFile,`[windows-service] controller exited ${code}; retry ${attempt+1}/${maxRestarts} after ${restartDelayMs}ms\n`);
+    const retryLimit=Number.isFinite(maxRestarts)?`/${maxRestarts}`:'';
+    await fs.appendFile(config.paths.logFile,`[windows-service] controller exited ${code}; retry ${attempt+1}${retryLimit} after ${restartDelayMs}ms\n`);
     for(let elapsed=0;elapsed<restartDelayMs;) {
       if(await cancelled()) return 0;
       const duration=Math.min(200,restartDelayMs-elapsed);

@@ -74,11 +74,38 @@ test('worker does not restart after stop is requested during recovery delay',asy
  assert.equal(result,0);assert.equal(attempts,1);
 });
 
-test('worker exhausts three retries and returns the last failure without an endless loop',async t=>{
+test('worker keeps an explicit retry limit for bounded callers',async t=>{
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-worker-retry-limit-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  const selectionFile=path.join(root,'selection.json'),stopFile=path.join(root,'stop.json');
  await fs.writeFile(selectionFile,JSON.stringify({generation:'retry'}));
  let attempts=0;
- const code=await worker.runWindowsServiceWorker({version:1,generation:'retry',paths:{selectionFile,stopFile,logFile:path.join(root,'log')}},{runOnce:async()=>{attempts++;return 23;},restartDelayMs:0});
+ const code=await worker.runWindowsServiceWorker({version:1,generation:'retry',paths:{selectionFile,stopFile,logFile:path.join(root,'log')}},{runOnce:async()=>{attempts++;return 23;},restartDelayMs:0,maxRestarts:3});
  assert.equal(code,23);assert.equal(attempts,4);
+});
+
+test('default recovery survives more than three failures with ten-second delays and ends on success',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-worker-persistent-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const selectionFile=path.join(root,'selection.json'),stopFile=path.join(root,'stop.json'),logFile=path.join(root,'log');
+ await fs.writeFile(selectionFile,JSON.stringify({generation:'retry'}));
+ let attempts=0,waited=0;
+ const code=await worker.runWindowsServiceWorker({version:1,generation:'retry',paths:{selectionFile,stopFile,logFile}},{
+   runOnce:async()=>++attempts<=5?23:0,
+   wait:async ms=>{waited+=ms},
+ });
+ assert.equal(code,0);assert.equal(attempts,6);assert.equal(waited,50000);
+ const logs=await fs.readFile(logFile,'utf8');
+ assert.match(logs,/retry 5 after 10000ms/);
+ assert.doesNotMatch(logs,/Infinity/);
+});
+
+test('default recovery stops promptly during its ten-second delay',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-worker-default-stop-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const selectionFile=path.join(root,'selection.json'),stopFile=path.join(root,'stop.json');
+ await fs.writeFile(selectionFile,JSON.stringify({generation:'retry'}));
+ let attempts=0,waited=0;
+ const code=await worker.runWindowsServiceWorker({version:1,generation:'retry',paths:{selectionFile,stopFile,logFile:path.join(root,'log')}},{
+   runOnce:async()=>{attempts++;return 23},
+   wait:async ms=>{waited+=ms;await fs.writeFile(stopFile,JSON.stringify({generation:'retry'}))},
+ });
+ assert.equal(code,0);assert.equal(attempts,1);assert.equal(waited,200);
 });
