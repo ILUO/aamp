@@ -448,6 +448,7 @@ test('selected binding startup hands off only the bindings that actually became 
   console.log = () => {}
   try {
     await controller.startSelectedBindings(bindings.slice(0, 2), undefined, {
+      platform: 'darwin',
       background: true,
       orchestrate: async () => ({
         groups: new Map(),

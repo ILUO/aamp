@@ -3146,7 +3146,73 @@ async function dispatchStartupResult(result, operations) {
   return operations.allFailed();
 }
 
+async function prepareWindowsBackgroundBindings(bindings, operations = {}) {
+  const validate = operations.validate || assertOnlineBinding;
+  const checkStopping = operations.checkStopping || throwIfStopping;
+  const prepareAgent = operations.prepareAgent || (async binding => {
+    console.log(`[aamp-one-click] 正在准备 ${agentSelectionDisplayName(binding.agent_type)}（安装与登录检查）...`);
+    return runBootstrapHelper('__prepare-agent', binding);
+  });
+  const prepareBinding = operations.prepareBinding || (async (binding, prepared) => {
+    if (!bindingNeedsInitialStart(binding)) await validateSavedRuntime(binding);
+    console.log(`[aamp-one-click] 正在检查飞书配置：${bindingLabel(binding)}...`);
+    await prepareFeishuProcess(binding, 'start', prepared.agent_type || binding.agent_type);
+  });
+  const recordFailure = operations.recordFailure || (async (binding, reason) => {
+    await setBindingStatus(binding, 'start', 'failed', reason);
+    reportBindingFailure(binding, binding.agent_type, reason, 'start');
+  });
+  const recordCancellation = operations.recordCancellation || (async (binding, reason) => {
+    await setBindingStatus(binding, 'start', 'cancelled', reason);
+    printBindingCancelled(binding, reason);
+  });
+  const agents = new Map();
+  const result = { prepared: [], failed: [], cancelled: [] };
+  for (const binding of bindings) {
+    checkStopping();
+    try {
+      validate(binding);
+      const key = JSON.stringify([binding.aamp_host, binding.agent_type]);
+      if (!agents.has(key)) agents.set(key, Promise.resolve().then(() => prepareAgent(binding)));
+      const prepared = await agents.get(key);
+      checkStopping();
+      if (prepared.cancelled) {
+        const reason = safeBindingFailureReason(binding, prepared.reason || '用户取消了 Agent 准备流程');
+        await recordCancellation(binding, reason);
+        result.cancelled.push({ binding, reason });
+        continue;
+      }
+      await prepareBinding(binding, prepared);
+      checkStopping();
+      result.prepared.push(binding);
+    } catch (error) {
+      checkStopping();
+      const reason = safeBindingFailureReason(binding, error.message || error);
+      await recordFailure(binding, reason);
+      result.failed.push({ binding, reason });
+    }
+  }
+  return result;
+}
+
 async function startSelectedBindings(bindings, existingGroups, options = {}) {
+  if ((options.platform || process.platform) === 'win32' && options.background && !options.serviceWorker) {
+    const prepare = options.prepareBackground || prepareWindowsBackgroundBindings;
+    const result = await prepare(bindings);
+    if (!result.prepared.length) {
+      await (options.cleanup || cleanupAll)();
+      if (result.failed.length) throw new Error('全部配置均未完成启动准备');
+      return;
+    }
+    console.log('[aamp-one-click] 前台准备完成，正在交由后台启动智能体和飞书连接...');
+    const handoff = options.runtimeOperations?.handoff || handoffToBackground;
+    const service = await handoff(result.prepared);
+    if (!service.ready) throw new Error('后台服务尚未确认就绪，请执行 logs 查看原因');
+    printStartupSummary({ title: '已成功启动', plannedCount: bindings.length,
+      running: result.prepared.map(binding => ({ binding })), failed: result.failed, cancelled: result.cancelled });
+    console.log(`🟢 后台服务已启动${service.pid ? `（PID ${service.pid}）` : ''}，现在可以关闭终端。`);
+    return;
+  }
   const orchestrate = options.orchestrate || orchestrateStartupBindings;
   const result = await orchestrate(
     bindings,
@@ -4131,6 +4197,7 @@ export {
   initializeAgentGroups,
   orderStartupItems,
   prepareBindingStart,
+  prepareWindowsBackgroundBindings,
   prepareFeishuProcess,
   readInitialRuntimeMetadata,
   resolveConfiguredPendingPairingFile,
