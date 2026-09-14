@@ -1,5 +1,5 @@
 // Native launch descriptors preserve the Agent selected by the user.
-import {access, readFile, mkdir, writeFile} from 'node:fs/promises'
+import {access, readFile, mkdir, writeFile, realpath} from 'node:fs/promises'
 import {constants} from 'node:fs'
 import path from 'node:path'
 import {homedir} from 'node:os'
@@ -46,6 +46,21 @@ export async function findWindowsAgent(type, env, run) {
   let rejectionReason
   const resolveCandidate = async candidate => {
     const found = await descriptor(candidate, env)
+    if (found && type === 'traecli') {
+      const coco = await findWindowsAgent('coco', env, run)
+      if (coco) {
+        // npm shims share node.exe; their JavaScript entry is the CLI identity.
+        const entry = command => command.argsPrefix?.[0] || command.command
+        const [traePath, cocoPath] = await Promise.all([
+          realpath(entry(found)).catch(() => undefined),
+          realpath(entry(coco)).catch(() => undefined),
+        ])
+        if (traePath && traePath === cocoPath) {
+          rejectionReason = 'TraeCode CLI 与 Coco 指向同一实际入口，不能作为 TraeCode 使用'
+          return undefined
+        }
+      }
+    }
     if (!found || type !== 'cursor' || path.basename(candidate).replace(/\.(exe|com|cmd|mjs|cjs|js)$/i,'').toLowerCase() !== 'agent') return found
     // The generic name may belong to another product; match the macOS identity probe.
     try {
@@ -63,6 +78,10 @@ export async function findWindowsAgent(type, env, run) {
     if (!value) continue
     // Legacy TRAE_CLI_BIN is shared; do not advertise another binary as Coco.
     if (['AAMP_TRAE_CLI_BIN','TRAE_CLI_BIN'].includes(key) && path.basename(value).replace(/\.(exe|cmd|mjs|cjs|js)$/i,'') !== type) continue
+    if (type === 'traecli' && /^(coco|traex)$/i.test(path.basename(value).replace(/\.(exe|com|cmd|bat|ps1|mjs|cjs|js)$/i,''))) {
+      await warnInvalidAgentPath(key,value,{reason:'TraeCode CLI 路径不能指向 coco 或 traex；请指定 traecli 的启动入口'})
+      return undefined
+    }
     const found = await resolveCandidate(value)
     if (!found) await warnInvalidAgentPath(key,value,{reason:rejectionReason,fallback:type === 'aime'})
     return found
@@ -85,6 +104,7 @@ export async function findWindowsAgent(type, env, run) {
   for (const name of definition.names) {
     const found = await resolveCandidate(name)
     if (found) return found
+    if (type === 'traecli' && rejectionReason) console.error(`[aamp-one-click] ${rejectionReason}。请检查 traecli 的安装入口或配置 AAMP_TRAECODE_CLI_BIN。`)
   }
 }
 
