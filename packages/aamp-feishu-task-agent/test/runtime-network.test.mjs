@@ -1,3 +1,4 @@
+import {existingRuntimeHint} from '../bin/platform-hints.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -371,8 +372,13 @@ test('duplicate runtime guidance uses lifecycle commands instead of requiring th
   const acquireStart = controller.indexOf('async function acquireRuntimeSessionLease(action)')
   const acquireEnd = controller.indexOf('\nfunction emptyStore()', acquireStart)
   const acquireBlock = controller.slice(acquireStart, acquireEnd)
-  assert.match(acquireBlock, /feishu-task-agent status/)
-  assert.match(acquireBlock, /feishu-task-agent stop/)
+  assert.match(acquireBlock, /existingRuntimeHint\(action\)/)
+  assert.match(acquireBlock, /includes\('正在被另一个 feishu-task-agent 进程使用'\)/)
+  for (const platform of ['darwin', 'win32']) {
+    const hint = existingRuntimeHint('install', platform)
+    assert.match(hint, /feishu-task-agent(?:\.cmd)? status/)
+    assert.match(hint, /feishu-task-agent(?:\.cmd)? stop/)
+  }
   assert.doesNotMatch(acquireBlock, /回到之前启动的终端|Ctrl\+C/)
 })
 

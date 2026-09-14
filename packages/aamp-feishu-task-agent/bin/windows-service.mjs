@@ -1,3 +1,4 @@
+import {taskCommand, globalInstallHint} from './platform-hints.mjs'
 import { withWindowsOperationLock } from './windows-operation-lock.mjs'
 import {startupProgress} from './startup-progress.mjs'
 import {StringDecoder} from 'node:string_decoder'
@@ -255,7 +256,7 @@ export function createWindowsServiceManager({
       const state = await scheduler('status', c)
       if (String(state.state).toLowerCase() === 'running')
         throw new Error(
-          'Windows worker has not acknowledged stop; retry before updating',
+          `后台进程尚未确认停止；请执行 ${taskCommand('status', 'win32')} 检查状态后重试。`,
         )
     }
     if (owner?.generation === selected.generation) {
@@ -284,7 +285,7 @@ export function createWindowsServiceManager({
     }
     if (String(after.state).toLowerCase() === 'running')
       throw new Error(
-        'Windows worker has not acknowledged stop; retry before updating',
+        `后台进程尚未确认停止；请执行 ${taskCommand('status', 'win32')} 检查状态后重试。`,
       )
     await fs.rm(paths.readinessFile, { force: true })
     return { stopped: true, wasLoaded: Boolean(task.loaded) }
@@ -298,7 +299,7 @@ export function createWindowsServiceManager({
     if (!ids.length) throw new Error('No selected bindings')
     if (workerPath.split(/[\\/]/).includes('_npx'))
       throw new Error(
-        '请先 npm.cmd install --global 安装稳定版本，再启动后台服务',
+        `请先执行 ${globalInstallHint({platform:'win32'})}，再执行 ${taskCommand('install', 'win32')}。`,
       )
     onProgress('正在检查现有后台服务状态...')
     const current = await status()
@@ -364,7 +365,7 @@ export function createWindowsServiceManager({
       if (s.ready) return { ...s, alreadyRunning: false }
       await wait(500)
     }
-    throw new Error('后台进程尚未就绪，请执行 logs 查看原因')
+    throw new Error(`后台进程尚未就绪，请执行 ${taskCommand('logs', 'win32')} 查看原因`)
   }
   async function recentLogs(count = 100) {
     try {

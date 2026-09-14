@@ -40,6 +40,7 @@ test('Windows entry uses only an explicit agent argument, matching the macOS lau
     await mkdir(path.join(root,'bootstrap'));
     await mkdir(path.join(root,'bin'));
     await copyFile(moduleUrl,path.join(root,'bootstrap','windows-entry.mjs'));
+    await copyFile(new URL('../bin/platform-hints.mjs',import.meta.url),path.join(root,'bin','platform-hints.mjs'));
     await copyFile(new URL('../bootstrap/task-agent-defaults.json',import.meta.url),path.join(root,'bootstrap','task-agent-defaults.json'));
     await writeFile(path.join(root,'package.json'),JSON.stringify({name:'entry-fixture',version:'0.0.0',type:'module'}));
     await writeFile(path.join(root,'bin','windows-platform.mjs'),'export async function resolveNativeCommand(){return {command:process.execPath,argsPrefix:[]}}');

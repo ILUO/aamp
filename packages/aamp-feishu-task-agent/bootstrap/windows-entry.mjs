@@ -1,3 +1,4 @@
+import {taskCommand} from '../bin/platform-hints.mjs'
 import {spawn} from 'node:child_process';
 import {readFileSync} from 'node:fs';
 import {readFile,access} from 'node:fs/promises';
@@ -70,11 +71,11 @@ export function windowsNpmEnvironment(source = process.env) {
 export async function runWindowsEntry(argv) {
   const options=parseWindowsArguments(argv,windowsEntryKind(process.argv[1]));
   if (options.command === 'help') {
-    console.log('feishu-task-agent <install|start|status|stop|restart|logs|list|add|remove|update>\n  --agent <name>  --aamp-host <url>  --foreground  --debug  --no-start');
+    console.log(`${taskCommand('', 'win32')} <install|start|status|stop|restart|logs|list|add|remove|update>\n  --agent <name>  --aamp-host <url>  --foreground  --debug  --no-start`);
     return;
   }
   if (['install','add','remove'].includes(options.command) && (!process.stdin.isTTY || !process.stdout.isTTY)) {
-    throw new Error('交互操作需要终端，请在 PowerShell 直接执行 feishu-task-agent.cmd');
+    throw new Error(`交互操作需要终端，请在 PowerShell 直接执行 ${taskCommand(options.command, 'win32')}`);
   }
   const defaults=JSON.parse(readFileSync(new URL('./task-agent-defaults.json',import.meta.url),'utf8'));
   const metadata=JSON.parse(readFileSync(path.join(packageDir,'package.json'),'utf8'));

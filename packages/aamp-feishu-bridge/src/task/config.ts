@@ -1,3 +1,4 @@
+import { bridgeCommand } from '../platform-hints.js'
 import { renameAtomic } from '../rename-atomic.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -244,7 +245,7 @@ export function normalizeBridgeConfig(
   fallbackAgentType = 'agent',
 ): BridgeConfig {
   if (!config.aampHost || !config.targetAgentEmail || !config.slug || !config.feishu || !config.mailbox) {
-    throw new Error('Bridge config is incomplete. Run "aamp-feishu-bridge start --enable-task" again.')
+    throw new Error(`Bridge config is incomplete. Run "${bridgeCommand()} start --enable-task" again.`)
   }
   const executionLocation = config.agent?.executionLocation ?? 'local'
   if (executionLocation !== 'local' && executionLocation !== 'remote') {

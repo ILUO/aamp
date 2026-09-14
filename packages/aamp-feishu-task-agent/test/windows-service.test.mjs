@@ -45,14 +45,14 @@ test('Windows start refuses an empty selection without launching a task',async t
 test('Windows stop cannot report success while a starting worker has not published its identity',async t=>{
  const {manager}=await fixture(t);
  await fs.rm(manager.paths.ownerFile);
- await assert.rejects(manager.stop(),/not acknowledged stop/);
+ await assert.rejects(manager.stop(),/后台进程尚未确认停止/);
 });
 
 test('Windows stop waits for a restarted worker even when a stale owner has the same generation',async t=>{
  const {manager,identities}=await fixture(t);
  identities.delete(101);identities.delete(102);
  identities.set(103,{pid:103,startedAt:'2026-09-07T02:00:00.000Z',ownerSid:'S-1-5-21-1',executablePath:process.execPath});
- await assert.rejects(manager.stop(),/not acknowledged stop/);
+ await assert.rejects(manager.stop(),/后台进程尚未确认停止/);
  assert.equal(identities.has(103),true);
 });
 

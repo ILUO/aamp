@@ -1,3 +1,4 @@
+import {taskCommand} from '../bin/platform-hints.mjs'
 // Native launch descriptors preserve the Agent selected by the user.
 import {access, readFile, mkdir, writeFile, realpath} from 'node:fs/promises'
 import {constants} from 'node:fs'
@@ -137,7 +138,7 @@ export async function confirmWindowsAgentAction(question) {
 }
 
 function interactive(env) {
-  if (env.AAMP_TASK_NON_INTERACTIVE === 'true') throw new Error('后台服务无法完成交互式准备；请在终端执行 feishu-task-agent start 完成登录或升级。')
+  if (env.AAMP_TASK_NON_INTERACTIVE === 'true') throw new Error(`后台服务无法完成交互式准备；请在终端执行 ${taskCommand('start', 'win32')} 完成登录或升级。`)
 }
 
 export async function ensureWindowsAgentLogin(type, command, env, run) {

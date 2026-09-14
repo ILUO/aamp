@@ -1,3 +1,4 @@
+import {taskCommand} from '../bin/platform-hints.mjs'
 import {
   access,
   mkdir,
@@ -431,7 +432,7 @@ async function resolveLarkCli(extraEnv, env, { install = false } = {}) {
   if (!install) return undefined
   if (envValue(extraEnv, 'AAMP_TASK_NON_INTERACTIVE') === 'true')
     throw new Error(
-      '后台服务无法安装缺失的 lark-cli；请在终端执行 feishu-task-agent start 完成准备。',
+      `后台服务无法安装缺失的 lark-cli；请在终端执行 ${taskCommand('start', 'win32')} 完成准备。`,
     )
   if (explicit)
     throw new Error(
@@ -481,7 +482,7 @@ async function materializeRegisterSdk(extraEnv) {
     )
   } catch {}
   if (envValue(extraEnv, 'AAMP_TASK_NON_INTERACTIVE') === 'true')
-    throw new Error('后台服务无法安装注册 SDK；请在终端完成准备。')
+    throw new Error(`后台服务无法安装注册 SDK；请在终端执行 ${taskCommand('start', 'win32')} 完成准备。`)
   await mkdir(prefix, { recursive: true })
   const launcher = await npmLaunch(extraEnv)
   await run(
@@ -524,7 +525,7 @@ async function readRequiredTenantKey(cli, profile, env) {
   } catch {}
   if (envValue(env, 'AAMP_TASK_NON_INTERACTIVE') === 'true')
     throw new Error(
-      "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent start' 完成登录后重试。",
+      `后台服务无法完成交互式准备。请在终端执行 ${taskCommand('start', 'win32')} 完成登录后重试。`,
     )
   const auth = authSettings(env)
   const loginArgs = [
@@ -646,7 +647,7 @@ export async function runWindowsHelper(
   }
   if (action === '__register-binding') {
     if (envValue(extraEnv, 'AAMP_TASK_NON_INTERACTIVE') === 'true')
-      throw new Error('后台服务无法注册绑定；请在终端完成准备。')
+      throw new Error(`后台服务无法注册绑定；请在终端执行 ${taskCommand('start', 'win32')} 完成准备。`)
     const sdk = await materializeRegisterSdk(extraEnv)
     const registered = await registerFeishuApp({
       sdk,
@@ -800,7 +801,7 @@ export async function runWindowsHelper(
       ) {
         if (envValue(extraEnv, 'AAMP_TASK_NON_INTERACTIVE') === 'true')
           throw new Error(
-            "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent start' 完成授权后重试。",
+            `后台服务无法完成交互式准备。请在终端执行 ${taskCommand('start', 'win32')} 完成授权后重试。`,
           )
         const loginArgs = [
           '--profile',

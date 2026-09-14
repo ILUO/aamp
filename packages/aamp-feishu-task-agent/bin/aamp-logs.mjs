@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {cliName} from './platform-hints.mjs'
 import { followWindowsLogFiles } from './windows-log-tail.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import {
@@ -38,19 +39,19 @@ const FEISHU_TASK_ID_PREFIX = 'feishu-task-'
 function usage(exitCode = 0) {
   const stream = exitCode === 0 ? process.stdout : process.stderr
   stream.write(`Usage:
-  aamp-logs --version
-  aamp-logs collect --task-id <task-id>
-  aamp-logs collect --task-guid <task-guid>
-  aamp-logs collect --run-dir <run-dir>
-  aamp-logs collect --latest
-  aamp-logs collect --since <duration>
-  aamp-logs list-runs
-  aamp-logs tail --task-id <task-id>
-  aamp-logs tail --task-guid <task-guid>
-  aamp-logs tail -f [--task-id <task-id>|--task-guid <task-guid>|<task-id>]
+  ${cliName('aamp-logs')} --version
+  ${cliName('aamp-logs')} collect --task-id <task-id>
+  ${cliName('aamp-logs')} collect --task-guid <task-guid>
+  ${cliName('aamp-logs')} collect --run-dir <run-dir>
+  ${cliName('aamp-logs')} collect --latest
+  ${cliName('aamp-logs')} collect --since <duration>
+  ${cliName('aamp-logs')} list-runs
+  ${cliName('aamp-logs')} tail --task-id <task-id>
+  ${cliName('aamp-logs')} tail --task-guid <task-guid>
+  ${cliName('aamp-logs')} tail -f [--task-id <task-id>|--task-guid <task-guid>|<task-id>]
 
 Options:
-  --log-dir <dir>          Override AAMP log root. Defaults to AAMP_LOG_DIR or ~/.aamp/logs.
+  --log-dir <dir>          Override AAMP log root. Defaults to AAMP_LOG_DIR or ${process.platform === 'win32' ? path.join(os.homedir(), '.aamp', 'logs') : '~/.aamp/logs'}.
   --include-content        Include full matching run logs instead of matching fragments only.
   -f, --follow             Follow new log lines in real time. Without a selector, follows the latest run.
   -h, --help               Show this help.

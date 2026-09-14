@@ -452,7 +452,7 @@ test('install startup errors say the binding remains saved for retry', () => {
   const finalizer = functionRange(source, 'async function finalizeDeferredLaunchResults(', 'async function startBindingsWithGroups(')
   const launcher = functionRange(source, 'async function startBindingsWithGroups(', 'function startupDisposition(')
   assert.match(reporter, /🔴 启动失败：\$\{bindingLabel\(binding, runtimeAgentType\)\}/)
-  assert.match(reporter, /绑定配置已保存，可稍后运行 feishu-task-agent start 重试/)
+  assert.match(reporter, /绑定配置已保存，可稍后运行 \$\{taskCommand\('start'\)\} 重试/)
   assert.match(finalizer, /operations\.reportBindingFailure\([\s\S]*item\.runtimeAgentType,[\s\S]*item\.reason,[\s\S]*mode/)
   assert.match(finalizer, /setBindingStatus\(item\.binding, 'start', 'failed', item\.reason\)/)
   assert.match(launcher, /finalizeDeferredLaunchResults\(launched, mode, operations\)/)
