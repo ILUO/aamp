@@ -28,6 +28,7 @@ const PACKAGED_RUNTIME_FILES = [
   'bootstrap/register-feishu-app.mjs',
   'bootstrap/task-agent-defaults.json',
   'bootstrap/windows-entry.mjs',
+  'bootstrap/windows-auth-login.mjs',
   'bootstrap/windows-helper.mjs',
   'scripts/sync-bootstrap-defaults.mjs',
 ]

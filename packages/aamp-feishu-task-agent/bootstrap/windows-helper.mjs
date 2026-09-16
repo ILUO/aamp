@@ -1,4 +1,5 @@
 import {taskCommand} from '../bin/platform-hints.mjs'
+import {runWindowsAuthLogin} from './windows-auth-login.mjs'
 import {
   access,
   mkdir,
@@ -537,7 +538,7 @@ async function readRequiredTenantKey(cli, profile, env) {
     auth.requested,
   ]
   if (auth.excludes) loginArgs.push('--exclude', auth.excludes)
-  await run(cli, loginArgs, { env, stdio: 'inherit' })
+  await runWindowsAuthLogin(cli, loginArgs, { env: mergeHelperEnvironment(env) })
   return parse((await run(cli, args, { env })).stdout)
 }
 async function withProfileLock(env, operation) {
@@ -812,7 +813,7 @@ export async function runWindowsHelper(
           auth.requested,
         ]
         if (auth.excludes) loginArgs.push('--exclude', auth.excludes)
-        await run(cli, loginArgs, { env, stdio: 'inherit' })
+        await runWindowsAuthLogin(cli, loginArgs, { env: mergeHelperEnvironment(env) })
         if (
           !(await profileReady(cli, bot.lark_cli_profile, {
             ...env,
