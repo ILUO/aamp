@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 
+import {taskCommand, displayAction, logCommand, existingRuntimeHint} from './platform-hints.mjs';
 import fs, { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ReadStream, WriteStream } from 'node:tty';
 import { emitKeypressEvents } from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, fork } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import {startupProgress} from './startup-progress.mjs';
+import {appendLifecycleDiagnostic} from './windows-lifecycle-diagnostics.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   TASK_AGENT_TYPES,
@@ -21,10 +24,12 @@ import {
 import {
   createPackageExecutableLauncher,
   npmExecutableResolverArgs,
+  npmExecutableResolverCommand,
   parseResolvedPackageExecutable,
 } from './runtime-package-executable.mjs';
 import {
   agentStartRetryError,
+  codexSessionFailure,
   agentStartFailureMessage,
   bridgeAuthenticationRetryError,
   classifyNetworkError,
@@ -41,9 +46,14 @@ import {
 import {
   createLaunchdServiceManager,
   findOwnedControllerPids,
-  readProcessIdentity,
+  readProcessIdentity as readPosixProcessIdentity,
   stopOwnedControllerProcesses,
 } from './launchd-service.mjs';
+
+import { createWindowsServiceManager } from './windows-service.mjs';
+import { ensurePrivateWindowsDirectory, readWindowsProcessIdentity, getCurrentWindowsSid, stopOwnedWindowsTree, openWindowsTerminal, atomicReplaceWindows, snapshotOwnedWindowsTree } from './windows-platform.mjs';
+import { createWindowsProcessJournal, recoverWindowsProcessJournals, requestWindowsControllerStop } from './windows-process-journal.mjs';
+const readProcessIdentity = process.platform === 'win32' ? readWindowsProcessIdentity : readPosixProcessIdentity;
 
 process.umask(0o077);
 
@@ -59,6 +69,7 @@ const CONFIG_LOCK = path.join(STATE_HOME, 'bindings-v1.lock');
 const MUTATION_LOCK = path.join(STATE_HOME, 'bindings-v1-mutation.lock');
 const SERVICE_CONTROL_LOCK = path.join(STATE_HOME, 'service-v1-control.lock');
 const LEASES_HOME = path.join(RUNTIME_HOME, 'leases');
+const WINDOWS_PROCESS_JOURNAL_HOME = path.join(RUNTIME_HOME, 'windows-process-journals-v1');
 const RUNTIME_SESSION_LOCK = path.join(LEASES_HOME, 'runtime-session.lock');
 const RUN_LOG_DIR = process.env.AAMP_RUN_LOG_DIR || path.join(HOME, '.aamp', 'logs', 'runs', `${Date.now()}-${process.pid}`);
 const RUN_ID = process.env.AAMP_RUN_ID || path.basename(RUN_LOG_DIR);
@@ -67,13 +78,16 @@ const MANIFEST_FILE = path.join(RUN_LOG_DIR, 'manifest.json');
 const ERRORS_LOG = process.env.ERRORS_LOG || path.join(RUN_LOG_DIR, 'errors.jsonl');
 const BOOTSTRAP = process.env.AAMP_TASK_BOOTSTRAP_PATH || '';
 const NPM_BIN = process.env.AAMP_TASK_NPM_BIN || 'npm';
+const NPM_ARGS_PREFIX = process.platform === 'win32' ? JSON.parse(process.env.AAMP_TASK_NPM_ARGS_PREFIX || '[]') : [];
+if (!Array.isArray(NPM_ARGS_PREFIX) || NPM_ARGS_PREFIX.some(value => typeof value !== 'string')) throw new Error('Invalid npm argument prefix');
 const NPM_REGISTRY = process.env.AAMP_TASK_NPM_REGISTRY || 'https://registry.npmjs.org/';
 const FEISHU_API_PROBE_URL = 'https://open.feishu.cn/';
 const NPM_CACHE_DIR = process.env.AAMP_TASK_NPM_CACHE_DIR || path.join(os.tmpdir(), 'aamp-one-click-npm-cache');
-const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@luckyterry/aamp-acp-bridge@0.1.29-dev.0';
-const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || '@iluolyx/aamp-feishu-bridge@0.1.52-dev.5';
+const TASK_DEFAULTS = JSON.parse(fs.readFileSync(new URL('../bootstrap/task-agent-defaults.json', import.meta.url), 'utf8'));
+const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || TASK_DEFAULTS.packages.acpBridge;
+const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || TASK_DEFAULTS.packages.feishuBridge;
 const INSTALL_COMMAND = process.env.AAMP_TASK_INSTALL_COMMAND
-  || 'npx -y --package @larktask/aamp-feishu-task-agent@dev feishu-task-agent install';
+  || (process.platform === 'win32' ? taskCommand('install') : 'npx -y --package @larktask/aamp-feishu-task-agent@dev feishu-task-agent install');
 const DEFAULT_AGENT = process.env.AAMP_TASK_DEFAULT_AGENT || '';
 const DEFAULT_AAMP_HOST = process.env.AAMP_TASK_AAMP_HOST || 'https://meshmail.ai';
 const DEBUG_MODE = process.env.AAMP_TASK_DEBUG_MODE === 'true';
@@ -92,7 +106,12 @@ const SERVICE_PATH = [...new Set([
   '/usr/sbin',
   '/sbin',
 ].filter(Boolean))].join(path.delimiter);
-const launchdService = createLaunchdServiceManager({
+const launchdService = process.platform === 'win32'
+  ? createWindowsServiceManager({runtimeHome: RUNTIME_HOME, controllerPath: CONTROLLER_PATH, onProgress:message=>{
+    if (process.stderr.isTTY) process.stderr.write('\r\x1b[2K');
+    console.log(redact(message).startsWith('[aamp-one-click]') ? redact(message) : `[aamp-one-click] ${redact(message)}`);
+  }})
+  : createLaunchdServiceManager({
   home: HOME,
   uid: typeof process.getuid === 'function' ? process.getuid() : 0,
   platform: process.platform,
@@ -138,6 +157,7 @@ const manifestWriter = createSerializedRunner(async () => {
   });
 });
 let stopRequested = false;
+let windowsProcessJournal;
 let stopSignal = '';
 let terminal;
 let processStartedAtPromise;
@@ -182,6 +202,7 @@ async function currentProcessStartedAt() {
 
 function terminalStreams() {
   if (terminal) return terminal;
+  if (process.platform === 'win32') return (terminal = openWindowsTerminal());
   let inputFd;
   let outputFd;
   try {
@@ -315,6 +336,9 @@ function projectTrustedLocalAgentEvent(document, options = {}) {
   if (!document || typeof document !== 'object' || Array.isArray(document)) return undefined;
   const type = typeof document.type === 'string' ? document.type : '';
   const agent = trustedAgentIdentity(document.agent, options, 'local');
+  if (agent === 'codex' && ['agent.session.deferred', 'agent.session.ready'].includes(type)) {
+    return {type, agent, ...(type === 'agent.session.deferred' ? {message:redact(document.message || '适配器未就绪')} : {})};
+  }
   if (!agent || !['agent.starting', 'agent.started', 'agent.identity', 'agent.failed'].includes(type)) {
     return undefined;
   }
@@ -473,6 +497,7 @@ function resolveRemoteEventPath(value, record, eventPathRoot) {
 }
 
 async function ensurePrivateDir(dir) {
+  if (process.platform === 'win32') return ensurePrivateWindowsDirectory(dir);
   await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
   await fsp.chmod(dir, 0o700).catch(() => {});
 }
@@ -608,7 +633,8 @@ async function writeJsonAtomic(file, value) {
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await fsp.rename(temp, file);
+    if (process.platform === 'win32') await atomicReplaceWindows(temp, file);
+    else await fsp.rename(temp, file);
     renamed = true;
     await fsp.chmod(file, 0o600);
     const parentHandle = await fsp.open(parent, 'r').catch(() => undefined);
@@ -637,8 +663,10 @@ function pidAlive(pid) {
 }
 
 async function acquireDirectoryLock(lockDir, label, timeoutMs = 10_000) {
-  const started = Date.now();
+  let started = Date.now();
   await ensurePrivateDir(path.dirname(lockDir));
+  // Windows ACL initialization is prerequisite work, not lock contention.
+  if (process.platform === 'win32') started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
       await fsp.mkdir(lockDir, { mode: 0o700 });
@@ -729,14 +757,14 @@ async function hasActiveAgentLease() {
 
 async function acquireRuntimeSessionLease(action) {
   if (await hasActiveAgentLease()) {
-    throw new Error(`检测到已有 feishu-task-agent 正在运行。请先执行 feishu-task-agent status 查看状态；如需重启，执行 feishu-task-agent stop 后再运行 feishu-task-agent ${action}`);
+    throw new Error(existingRuntimeHint(action));
   }
   let release;
   try {
     release = await acquireDirectoryLock(RUNTIME_SESSION_LOCK, 'Bridge 启动流程', 1_500);
   } catch (error) {
     if (String(error?.message || error).includes('正在被另一个 feishu-task-agent 进程使用')) {
-      throw new Error(`检测到已有 feishu-task-agent 正在运行。请先执行 feishu-task-agent status 查看状态；如需重启，执行 feishu-task-agent stop 后再运行 feishu-task-agent ${action}`);
+      throw new Error(existingRuntimeHint(action));
     }
     throw error;
   }
@@ -1331,6 +1359,7 @@ function helperArgs(action, bindingOrAgent) {
 }
 
 async function runBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
+  if (process.platform === 'win32') return runWindowsBootstrapHelper(action, bindingOrAgent, extraEnv);
   if (!BOOTSTRAP) throw new Error('Bootstrap path is unavailable');
   throwIfStopping();
   const helperAgent = typeof bindingOrAgent === 'object'
@@ -1413,6 +1442,33 @@ async function runBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
   }
 }
 
+async function runWindowsBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
+  throwIfStopping();
+  const env = {...process.env, ...extraEnv};
+  const rawBinding = env.AAMP_TASK_INTERNAL_BINDING_JSON;
+  delete env.AAMP_TASK_INTERNAL_BINDING_JSON;
+  const payload = rawBinding ? JSON.parse(rawBinding) : bindingOrAgent;
+  const nonInteractive = NON_INTERACTIVE || env.AAMP_TASK_NON_INTERACTIVE === 'true';
+  if (nonInteractive) env.AAMP_TASK_NON_INTERACTIVE = 'true';
+  const child = fork(fileURLToPath(new URL('../bootstrap/windows-helper.mjs', import.meta.url)), [], {
+    env, stdio: [nonInteractive ? 'ignore' : terminalStreams().input, 'inherit', 'inherit', 'ipc'],
+  });
+  const record = trackTransientProcess(child, `Windows helper ${action}`, false);
+  let response;
+  child.on('message', message => {
+    if (response || !['result', 'error'].includes(message?.kind)) return;
+    response = message;
+  });
+  child.send({kind:'request', action, payload});
+  const stage = {'__prepare-agent':'智能体准备（版本、登录与适配器）','__ensure-profile':'飞书配置及授权检查','__probe-profile':'飞书授权状态检查','__register-binding':'创建飞书绑定','__discover-agents':'扫描可用智能体'}[action] || action;
+  const finishProgress = action === '__prepare-agent' ? () => {} : startupProgress(stage);
+  let exit;
+  try {exit = await record.exitPromise;} finally {finishProgress();}
+  throwIfStopping();
+  if (exit.code !== 0 || response?.kind !== 'result') throw new Error(response?.message || exit.error?.message || `Windows helper ${action} did not return a result`);
+  return response.payload;
+}
+
 function npmExecArgs(packageSpec, executable, args) {
   return [
     'exec', '--yes', '--registry', NPM_REGISTRY, '--cache', NPM_CACHE_DIR,
@@ -1422,7 +1478,7 @@ function npmExecArgs(packageSpec, executable, args) {
 
 async function runNpmExecCapture(packageSpec, executable, args, options = {}) {
   throwIfStopping();
-  const child = spawn(NPM_BIN, npmExecArgs(packageSpec, executable, args), {
+  const child = spawn(NPM_BIN, [...NPM_ARGS_PREFIX, ...npmExecArgs(packageSpec, executable, args)], {
     env: options.env || process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
@@ -1456,7 +1512,7 @@ const packageExecutableLauncher = createPackageExecutableLauncher({
   materialize: async (packageSpec, executable, options = {}) => {
     const result = await runNpmExecCapture(
       packageSpec,
-      process.execPath,
+      npmExecutableResolverCommand(),
       npmExecutableResolverArgs(executable),
       options,
     );
@@ -1521,10 +1577,11 @@ function trackTransientProcess(child, label, processGroup) {
     child.once('close', (code, signal) => {
       record.exited = true;
       record.exit = { code: code ?? 1, signal, ...(spawnError ? { error: spawnError } : {}) };
-      transientProcesses.delete(record);
+      if (process.platform !== 'win32') transientProcesses.delete(record);
       resolve(record.exit);
     });
   });
+  if (process.platform === 'win32' && child.pid) trackWindowsProcess(record);
   transientProcesses.add(record);
   return record;
 }
@@ -1614,6 +1671,7 @@ async function startManagedProcess({
     logWriter,
     logWriteError: undefined,
   };
+  if (process.platform === 'win32' && child.pid) trackWindowsProcess(record);
   managedProcesses.add(record);
   const outputOptions = {
     executionLocation,
@@ -1696,11 +1754,62 @@ async function startManagedProcess({
     child.once('error', (error) => { void finish({ code: 1, error }); });
     child.once('close', (code, signal) => { void finish({ code: code ?? 1, signal }); });
   });
+  if (record.windowsSampleReady) await record.windowsSampleReady;
   if (stopRequested) {
     await stopManagedProcess(record);
     throwIfStopping();
   }
   return record;
+}
+
+function windowsProcessJournalMode(command) {
+  if (['install', 'start', 'restart', '__service-run'].includes(command)) return {recover: true, create: true};
+  if (command === 'add') return {recover: false, create: true};
+  return {recover: false, create: false};
+}
+
+async function sampleWindowsProcessTree(record, journal = windowsProcessJournal, operations = {}) {
+  const snapshotTree = operations.snapshotTree || snapshotOwnedWindowsTree;
+  const identity = await record.windowsIdentity;
+  if (!identity) {
+    if (record.exited) return;
+    throw record.windowsIdentityError || new Error(`Cannot verify Windows process ${record.child.pid}; refusing sampling`);
+  }
+  await journal?.record([identity]);
+  for (const item of await snapshotTree(identity)) record.windowsDescendants.set(item.pid, item);
+  await journal?.record(record.windowsDescendants.values());
+}
+
+function trackWindowsProcess(record) {
+  record.windowsDescendants = new Map();
+  record.windowsIdentity = readWindowsProcessIdentity(record.child.pid).catch((error) => {
+    record.windowsIdentityError = error;
+    return undefined;
+  });
+  let sampling = false;
+  const sample = async () => {
+    if (sampling) return;
+    sampling = true;
+    try {
+      await sampleWindowsProcessTree(record);
+    } finally { sampling = false; }
+  };
+  const handleJournalFailure = (error) => {
+    if (stopRequested) return;
+    stopRequested = true;
+    stopSignal = 'Windows process journal failure';
+    process.exitCode = 1;
+    const reason = redact(error?.message || error);
+    void recordError('windows-process-journal', reason).catch(() => {});
+    console.error(`\n🔴 Windows 进程记录失败：${reason}`);
+    void cleanupAll().catch(() => {});
+  };
+  record.sampleWindowsTree = sample;
+  record.windowsSampleTimer = setInterval(() => {void sample().catch(handleJournalFailure);}, 1000);
+  record.windowsSampleTimer.unref();
+  record.child.once('exit', () => clearInterval(record.windowsSampleTimer));
+  record.windowsSampleReady = sample();
+  void record.windowsSampleReady.catch(handleJournalFailure);
 }
 
 function signalProcess(record, signal) {
@@ -1714,8 +1823,19 @@ function signalProcess(record, signal) {
 }
 
 async function stopManagedProcess(record) {
-  if (!record || record.exited) return;
+  if (!record || (record.exited && process.platform !== 'win32')) return;
   record.expectedStop = true;
+  if (process.platform === 'win32') {
+    clearInterval(record.windowsSampleTimer);
+    await record.sampleWindowsTree?.().catch(() => {});
+    const identity = await record.windowsIdentity;
+    if (!identity && !record.exited) throw new Error(`Cannot verify Windows process ${record.child.pid}; refusing cleanup`);
+    const known = [...(record.windowsDescendants?.values() || [])].reverse();
+    if (identity && !known.some(item => item.pid === identity.pid)) known.push(identity);
+    for (const owned of known) await stopOwnedWindowsTree(owned);
+    await Promise.race([record.exitPromise, delay(2_000)]);
+    return;
+  }
   signalProcess(record, 'SIGTERM');
   await Promise.race([record.exitPromise, delay(5_000)]);
   if (!record.exited) {
@@ -1778,7 +1898,7 @@ function throwIfStopping() {
 function assertOnlineBinding(binding) {
   if (binding?.environment?.name === 'online') return;
   const environment = binding?.environment?.name || 'unknown';
-  throw new Error(`配置环境 ${environment} 不受支持；Task Agent 仅支持 Online，请使用 remove 删除后重新绑定`);
+  throw new Error(`配置环境 ${environment} 不受支持；Task Agent 仅支持 Online，请使用 ${displayAction('remove')} 删除后重新绑定`);
 }
 
 function onlineEnvironment(binding) {
@@ -2062,14 +2182,17 @@ async function startAgentGroups(groups) {
       throwIfStopping();
       const running = started.running;
       throwIfStopping();
-      for (const agent of running.agents || []) group.availableAgents.add(agent.name);
+      const codexFailure = codexSessionFailure(group.process.events);
+      for (const agent of running.agents || []) {
+        if (agent.name !== 'codex' || !codexFailure) group.availableAgents.add(agent.name);
+      }
       for (const agent of agents) {
         if (!group.availableAgents.has(agent.name)) {
           const failed = group.process.events.find((event) => event.type === 'agent.failed' && event.agent === agent.name);
           recordStableAgentFailure(
             group,
             agent.name,
-            failed?.message || `${agent.name} Agent Bridge 启动失败`,
+            (agent.name === 'codex' && codexFailure) || failed?.message || `${agent.name} Agent Bridge 启动失败`,
           );
           await releaseLease(group.leases.get(agent.name));
           group.leases.delete(agent.name);
@@ -2109,7 +2232,7 @@ function resolveInitializedGroup(groups, binding) {
   const email = group.identities.get(binding.agent_type);
   if (!email) throw new Error(`${binding.agent_type} Agent mailbox is unavailable`);
   if (binding.agent_target_email && binding.agent_target_email !== email) {
-    throw new Error(`Agent mailbox 已变化（配置=${binding.agent_target_email}，当前=${email}），请使用 add 或 install 重新绑定`);
+    throw new Error(`Agent mailbox 已变化（配置=${binding.agent_target_email}，当前=${email}），请使用 ${displayAction('add')} 或 ${displayAction('install')} 重新绑定`);
   }
   const runtimeAgentType = group.runtimeAgentTypes.get(binding.agent_type) || binding.agent_type;
   return { group, email, runtimeAgentType };
@@ -2427,10 +2550,10 @@ async function validateSavedRuntime(binding) {
   try {
     [imConfig, taskConfig] = await Promise.all([readJson(imFile), readJson(taskFile)]);
   } catch (error) {
-    throw new Error(`绑定运行配置缺失，请使用 add 或 install 重新绑定：${redact(error.message || error)}`);
+    throw new Error(`绑定运行配置缺失，请使用 ${displayAction('add')} 或 ${displayAction('install')} 重新绑定：${redact(error.message || error)}`);
   }
   if (imConfig.targetAgentEmail !== binding.agent_target_email || taskConfig.targetAgentEmail !== binding.agent_target_email) {
-    throw new Error('绑定运行配置与 Agent mailbox 不一致，请使用 add 或 install 重新绑定');
+    throw new Error(`绑定运行配置与 Agent mailbox 不一致，请使用 ${displayAction('add')} 或 ${displayAction('install')} 重新绑定`);
   }
   if (imConfig.feishu?.appId !== binding.bot.app_id || taskConfig.feishu?.appId !== binding.bot.app_id) {
     throw new Error('绑定运行配置与 Bot App ID 不一致，请重新绑定');
@@ -2660,7 +2783,7 @@ function reportBindingFailure(binding, runtimeAgentType, reason, mode) {
   const safeReason = safeBindingFailureReason(binding, reason);
   console.error(`🔴 启动失败：${bindingLabel(binding, runtimeAgentType)}\n   原因：${safeReason}`);
   if (mode === 'install') {
-    console.error('   绑定配置已保存，可稍后运行 feishu-task-agent start 重试。');
+    console.error(`   绑定配置已保存，可稍后运行 ${taskCommand('start')} 重试。`);
   } else {
     console.error('   已跳过该项，继续启动下一项。');
   }
@@ -3024,7 +3147,74 @@ async function dispatchStartupResult(result, operations) {
   return operations.allFailed();
 }
 
+async function prepareWindowsBackgroundBindings(bindings, operations = {}) {
+  const validate = operations.validate || assertOnlineBinding;
+  const checkStopping = operations.checkStopping || throwIfStopping;
+  const prepareAgent = operations.prepareAgent || (async binding => {
+    console.log(`[aamp-one-click] 正在准备 ${agentSelectionDisplayName(binding.agent_type)}（安装与登录检查）...`);
+    return runBootstrapHelper('__prepare-agent', binding);
+  });
+  const prepareBinding = operations.prepareBinding || (async (binding, prepared) => {
+    if (!bindingNeedsInitialStart(binding)) await validateSavedRuntime(binding);
+    console.log(`[aamp-one-click] 正在检查飞书配置：${bindingLabel(binding)}...`);
+    await prepareFeishuProcess(binding, 'start', prepared.agent_type || binding.agent_type);
+  });
+  const recordFailure = operations.recordFailure || (async (binding, reason) => {
+    await setBindingStatus(binding, 'start', 'failed', reason);
+    reportBindingFailure(binding, binding.agent_type, reason, 'start');
+  });
+  const recordCancellation = operations.recordCancellation || (async (binding, reason) => {
+    await setBindingStatus(binding, 'start', 'cancelled', reason);
+    printBindingCancelled(binding, reason);
+  });
+  const agents = new Map();
+  const result = { prepared: [], failed: [], cancelled: [] };
+  for (const binding of bindings) {
+    checkStopping();
+    try {
+      validate(binding);
+      const key = JSON.stringify([binding.aamp_host, binding.agent_type]);
+      if (!agents.has(key)) agents.set(key, Promise.resolve().then(() => prepareAgent(binding)));
+      const prepared = await agents.get(key);
+      checkStopping();
+      if (prepared.cancelled) {
+        const reason = safeBindingFailureReason(binding, prepared.reason || '用户取消了 Agent 准备流程');
+        await recordCancellation(binding, reason);
+        result.cancelled.push({ binding, reason });
+        continue;
+      }
+      await prepareBinding(binding, prepared);
+      checkStopping();
+      result.prepared.push(binding);
+    } catch (error) {
+      checkStopping();
+      const reason = safeBindingFailureReason(binding, error.message || error);
+      await recordFailure(binding, reason);
+      result.failed.push({ binding, reason });
+    }
+  }
+  return result;
+}
+
 async function startSelectedBindings(bindings, existingGroups, options = {}) {
+  if ((options.platform || process.platform) === 'win32' && options.background && !options.serviceWorker) {
+    const prepare = options.prepareBackground || prepareWindowsBackgroundBindings;
+    const result = await prepare(bindings);
+    if (!result.prepared.length) {
+      await (options.cleanup || cleanupAll)();
+      if (result.failed.length) throw new Error('全部配置均未完成启动准备');
+      return;
+    }
+    console.log('[aamp-one-click] 前台准备完成，正在交由后台启动智能体和飞书连接...');
+    const handoff = options.runtimeOperations?.handoff || handoffToBackground;
+    const service = await handoff(result.prepared);
+    if (!service.ready) throw new Error(`后台服务尚未确认就绪，请执行 ${displayAction('logs')} 查看原因`);
+    printStartupSummary({ title: '已成功启动', plannedCount: options.plannedCount ?? bindings.length,
+      running: result.prepared.map(binding => ({ binding })), failed: result.failed,
+      cancelled: orderStartupItems(options.selectedBindings || bindings, [...(options.initialCancelled || []), ...result.cancelled]) });
+    console.log(`🟢 后台服务已启动${service.pid ? `（PID ${service.pid}）` : ''}，现在可以关闭终端。`);
+    return;
+  }
   const orchestrate = options.orchestrate || orchestrateStartupBindings;
   const result = await orchestrate(
     bindings,
@@ -3042,7 +3232,7 @@ async function startSelectedBindings(bindings, existingGroups, options = {}) {
   if (options.serviceWorker && result.running.length !== bindings.length) {
     const shutdown = options.shutdown || shutdownGroups;
     await shutdown(result.groups);
-    throw new Error(`后台服务绑定未全部启动（${result.running.length}/${bindings.length}），将由 launchd 稍后重试`);
+    throw new Error(`后台服务绑定未全部启动（${result.running.length}/${bindings.length}），${process.platform === 'win32' ? `请执行 ${taskCommand('logs')} 查看原因` : '将由 launchd 稍后重试'}`);
   }
   await dispatchStartupResult(result, {
     supervise: async (running, groups) => {
@@ -3161,10 +3351,9 @@ async function cleanupAll() {
 function printLogHints(detailed = false) {
   console.log(`   日志：${RUN_LOG_DIR}`);
   if (!detailed) return;
-  const logsBin = process.env.AAMP_LOGS_BIN || path.join(HOME, '.aamp', 'bin', 'aamp-logs');
-  console.log(`   日志打包：${logsBin} collect --run-dir ${RUN_LOG_DIR}`);
-  console.log(`   特定任务日志打包：${logsBin} collect --task-id xxx`);
-  console.log(`   特定任务日志打包：${logsBin} collect --task-guid yyy`);
+  console.log(`   日志打包：${logCommand(['collect', '--run-dir', RUN_LOG_DIR])}`);
+  console.log(`   特定任务日志打包：${logCommand(['collect', '--task-id', 'xxx'])}`);
+  console.log(`   特定任务日志打包：${logCommand(['collect', '--task-guid', 'yyy'])}`);
 }
 
 function displayBindings(bindings) {
@@ -3257,7 +3446,7 @@ async function createDraft(selectedAppIds, overrides = {}) {
   );
 }
 
-async function runBindingSession(mode) {
+async function runBindingSession(mode, options = {}) {
   const store = await loadStore();
   throwIfStopping();
   const existingByAppId = new Map(store.bindings.map((binding) => [binding.bot.app_id, binding]));
@@ -3346,7 +3535,7 @@ async function runBindingSession(mode) {
   }
   const saved = persisted.bindings;
 
-  if (mode === 'add') {
+  if (mode === 'add' || options.deferLaunch) {
     succeeded.push(...acceptedBindings);
     return {
       previousBindings: store.bindings,
@@ -3431,15 +3620,21 @@ async function finalizeInstallRuntime(result, options = {}) {
     shutdown: options.shutdown || shutdownGroups,
     onlyCancelled: async () => {},
     allFailed: async () => {
-      throw new Error(`全部配置启动失败；${result.acceptedBindings.length} 个绑定配置已保存，可稍后运行 feishu-task-agent start 重试`);
+      throw new Error(`全部配置启动失败；${result.acceptedBindings.length} 个绑定配置已保存，可稍后运行 ${taskCommand('start')} 重试`);
     },
   });
 }
 
-async function runInstall() {
-  const result = await withMutationLock('install 绑定流程', async () => {
-    const bound = await runBindingSession('install');
+async function runInstall(operations = {}) {
+  const platform = operations.platform || process.platform;
+  const background = operations.background ?? shouldUseBackgroundService('install', platform);
+  const deferLaunch = platform === 'win32' && background;
+  const mutate = operations.withMutationLock || withMutationLock;
+  const runSession = operations.runBindingSession || runBindingSession;
+  const result = await mutate('install 绑定流程', async () => {
+    const bound = await runSession('install', { deferLaunch });
     throwIfStopping();
+    if (deferLaunch) return bound;
     const composed = await reconcileStartupResults(bound.selectedBindings, {
       running: bound.running,
       failed: bound.failed,
@@ -3452,9 +3647,21 @@ async function runInstall() {
     bound.disposition = composed.disposition;
     return bound;
   });
-  await finalizeInstallRuntime(result, {
-    background: shouldUseBackgroundService('install'),
-  });
+  if (deferLaunch && result.acceptedBindings.length) {
+    const startBindings = operations.startBindings || startSelectedBindings;
+    // The worker handles pending pairing using the same path as a later start.
+    try {
+      return await startBindings(result.acceptedBindings, undefined, {
+        background: true, platform,
+        plannedCount: result.selectedCount,
+        initialCancelled: result.cancelled,
+        selectedBindings: result.selectedBindings,
+      });
+    } catch (error) {
+      throw new Error(`绑定配置已保存，但启动未完成；可稍后运行 ${taskCommand('start')} 重试：${redact(error.message || error)}`);
+    }
+  }
+  await finalizeInstallRuntime(result, { background });
 }
 
 async function runAdd(operations = {}) {
@@ -3474,7 +3681,7 @@ async function runAdd(operations = {}) {
     throw new Error('没有配置完成绑定');
   }
   if (noStart) {
-    log('配置添加成功，未自动启动；运行 feishu-task-agent start 时生效');
+    log(`配置添加成功，未自动启动；运行 ${taskCommand('start')} 时生效`);
     return result;
   }
   log('配置添加成功，正在自动启动新增绑定...');
@@ -3486,9 +3693,9 @@ async function runAdd(operations = {}) {
   });
   if (activation?.mode === 'manual') {
     if (activation.reason === 'foreground-running') {
-      log(`检测到旧版前台 Task Agent 正在运行${activation.pid ? `（PID ${activation.pid}）` : ''}；新增配置已保存。请先运行 feishu-task-agent stop，再运行 feishu-task-agent start 使其生效`);
+      log(`检测到旧版前台 Task Agent 正在运行${activation.pid ? `（PID ${activation.pid}）` : ''}；新增配置已保存。请先运行 ${taskCommand('stop')}，再运行 ${taskCommand('start')} 使其生效`);
     } else {
-      log('当前平台不支持后台服务；请运行 feishu-task-agent start 启动新增绑定');
+      log(`当前平台不支持后台服务；请运行 ${taskCommand('start')} 启动新增绑定`);
     }
   } else {
     log(`🟢 新增绑定自动启动成功${activation?.pid ? `（后台服务 PID ${activation.pid}）` : ''}`);
@@ -3560,7 +3767,7 @@ async function restoreReplacedBindings(previousBindings, acceptedBindings, opera
 async function activateAddedBindings(addedBindings, operations = {}) {
   const platform = operations.platform || process.platform;
   const addedBindingIds = [...new Set(addedBindings.map((binding) => binding.binding_id))];
-  if (platform !== 'darwin') {
+  if (!['darwin', 'win32'].includes(platform)) {
     return { mode: 'manual', bindingIds: addedBindingIds, pid: null };
   }
   const withControlLock = operations.withControlLock || withServiceControlLock;
@@ -3588,7 +3795,7 @@ async function activateAddedBindings(addedBindings, operations = {}) {
     const availableIds = new Set(availableBindings.map((binding) => binding.binding_id));
     const missingAddedBindingIds = addedBindingIds.filter((bindingId) => !availableIds.has(bindingId));
     if (missingAddedBindingIds.length) {
-      throw new Error('新增绑定无法自动启动：配置已被其他命令修改，请重新运行 feishu-task-agent add');
+      throw new Error(`新增绑定无法自动启动：配置已被其他命令修改，请重新运行 ${taskCommand('add')}`);
     }
     const previousBindingIds = [...new Set((await readSelection()) || [])];
     const retainedBindingIds = previousBindingIds.filter((bindingId) => availableIds.has(bindingId));
@@ -3596,7 +3803,18 @@ async function activateAddedBindings(addedBindings, operations = {}) {
       ...retainedBindingIds,
       ...addedBindingIds.filter((bindingId) => availableIds.has(bindingId)),
     ])];
+    let serviceAttempted = false;
     try {
+      if (platform === 'win32') {
+        const prepare = operations.prepareBackground || prepareWindowsBackgroundBindings;
+        const added = availableBindings.filter(binding => addedBindingIds.includes(binding.binding_id));
+        const prepared = await prepare(added);
+        if (prepared.prepared.length !== added.length || prepared.failed.length || prepared.cancelled.length) {
+          const reasons = [...prepared.failed, ...prepared.cancelled].map(item => item.reason).filter(Boolean);
+          throw new Error(`新增绑定未完成前台准备${reasons.length ? `：${reasons.join('；')}` : ''}`);
+        }
+      }
+      serviceAttempted = true;
       const service = await startService(bindingIds);
       return { mode: 'background', bindingIds, pid: service.pid || null };
     } catch (error) {
@@ -3605,8 +3823,10 @@ async function activateAddedBindings(addedBindings, operations = {}) {
       try {
         const restored = await beforeRollback();
         if (Array.isArray(restored)) restoredReplacements = restored;
-        if (previousBindingIds.length) await startService(previousBindingIds);
-        else await stopService();
+        if (serviceAttempted) {
+          if (previousBindingIds.length) await startService(previousBindingIds);
+          else await stopService();
+        }
       } catch (caught) {
         rollbackError = caught;
       }
@@ -3615,7 +3835,7 @@ async function activateAddedBindings(addedBindings, operations = {}) {
         ? `；恢复原后台绑定也失败：${redact(rollbackError?.message || rollbackError)}`
         : '';
       if (restoredReplacements.length) {
-        throw new Error(`替换绑定自动启动失败，已恢复原绑定；如需重试新绑定，请重新运行 feishu-task-agent add：${reason}${rollbackSuffix}`);
+        throw new Error(`替换绑定自动启动失败，已恢复原绑定；如需重试新绑定，请重新运行 ${taskCommand('add')}：${reason}${rollbackSuffix}`);
       }
       throw new Error(`新增绑定已保存，但自动启动失败：${reason}${rollbackSuffix}`);
     }
@@ -3623,7 +3843,7 @@ async function activateAddedBindings(addedBindings, operations = {}) {
 }
 
 function shouldUseBackgroundService(command, platform = process.platform, foreground = FOREGROUND_MODE) {
-  return platform === 'darwin' && !foreground && (command === 'install' || command === 'start');
+  return (platform === 'darwin' || platform === 'win32') && !foreground && (command === 'install' || command === 'start');
 }
 
 async function handoffToBackground(bindings, operations = {}) {
@@ -3656,13 +3876,14 @@ async function continueStartedRuntime(runtime, operations = {}) {
 }
 
 async function resolveManagedRuntimeStatus(operations = {}) {
-  const launchdStatus = operations.launchdStatus || (process.platform === 'darwin'
+  const launchdStatus = operations.launchdStatus || (['darwin','win32'].includes(process.platform)
     ? () => launchdService.status()
     : async () => ({ loaded: false, state: 'stopped', pid: null }));
   const foregroundPids = operations.foregroundPids || (() => findOwnedControllerPids({
     leasesHome: LEASES_HOME,
     expectedControllerPath: CONTROLLER_PATH,
     expectedRuntimeHome: RUNTIME_HOME,
+    readProcessIdentity,
   }));
   const service = await launchdStatus();
   const pids = await foregroundPids();
@@ -3686,16 +3907,19 @@ async function resolveManagedRuntimeStatus(operations = {}) {
 }
 
 async function stopManagedRuntime(operations = {}) {
-  const stopLaunchd = operations.stopLaunchd || (process.platform === 'darwin'
+  const stopLaunchd = operations.stopLaunchd || (['darwin','win32'].includes(process.platform)
     ? () => launchdService.stop()
     : async () => ({ stopped: true, wasLoaded: false }));
   const discoverOwnedControllerPids = () => findOwnedControllerPids({
     leasesHome: LEASES_HOME,
     expectedControllerPath: CONTROLLER_PATH,
     expectedRuntimeHome: RUNTIME_HOME,
+    readProcessIdentity,
   });
   const foregroundPids = operations.foregroundPids || discoverOwnedControllerPids;
-  const stopForeground = operations.stopForeground || ((pids) => stopOwnedControllerProcesses({
+  const stopForeground = operations.stopForeground || (process.platform === 'win32'
+    ? (pids) => stopWindowsForegroundControllers(pids, {discoverOwnedControllerPids})
+    : (pids) => stopOwnedControllerProcesses({
     pids,
     validateProcess: async (pid) => (await discoverOwnedControllerPids()).includes(pid),
   }));
@@ -3710,6 +3934,39 @@ async function stopManagedRuntime(operations = {}) {
   return { launchd: launchd.wasLoaded, stoppedPids: foreground.stopped };
 }
 
+async function stopWindowsForegroundControllers(pids, operations = {}) {
+  const discover = operations.discoverOwnedControllerPids || (async () => pids);
+  const readIdentity = operations.readIdentity || readWindowsProcessIdentity;
+  const currentSid = operations.currentSid || getCurrentWindowsSid;
+  const requestStop = operations.requestStop || ((pid) => requestWindowsControllerStop(WINDOWS_PROCESS_JOURNAL_HOME, pid));
+  const stopTree = operations.stopTree || stopOwnedWindowsTree;
+  const wait = operations.wait || delay;
+  const attempts = operations.attempts ?? 100;
+  const stopped = [];
+  const sid = await currentSid();
+  for (const pid of pids) {
+    if (!(await discover()).includes(pid)) throw new Error('Windows Controller identity changed');
+    const identity = await readIdentity(pid);
+    if (!identity || identity.ownerSid.toLowerCase() !== sid.toLowerCase()) throw new Error('Windows Controller owner mismatch');
+    if (!await requestStop(pid)) throw new Error(`Windows Controller ${pid} has no verified stop journal`);
+    let live = identity;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await wait(100);
+      live = await readIdentity(pid);
+      if (!live || live.startedAt !== identity.startedAt) break;
+    }
+    if (live && live.startedAt === identity.startedAt) await stopTree(identity);
+    const remaining = await readIdentity(pid);
+    if (remaining && remaining.startedAt === identity.startedAt) throw new Error(`Windows Controller ${pid} did not stop`);
+    stopped.push(pid);
+  }
+  return {stopped, remaining:[]};
+}
+
+function createWindowsRestartService(serviceManager = launchdService) {
+  return (bindingIds, options) => serviceManager.restart(bindingIds, options);
+}
+
 async function runServiceLifecycleCommand(command, operations = {}) {
   const log = operations.log || console.log;
   if (command === 'status') {
@@ -3719,10 +3976,10 @@ async function runServiceLifecycleCommand(command, operations = {}) {
       if (status.state === 'running' && status.pid) {
         log(`🟢 Task Agent 正在后台运行（PID ${status.pid}），终端可以关闭。`);
       } else {
-        log(`🟡 Task Agent 后台服务已加载但未运行（状态：${status.state}）；请执行 feishu-task-agent logs 查看原因。`);
+        log(`🟡 Task Agent 后台服务已加载但未运行（状态：${status.state}）；请执行 ${taskCommand('logs')} 查看原因。`);
       }
     } else if (status.mode === 'foreground') {
-      log(`🟡 Task Agent 正在旧版前台模式运行（PID ${status.pid}）；可执行 feishu-task-agent stop 安全停止。`);
+      log(`🟡 Task Agent 正在旧版前台模式运行（PID ${status.pid}）；可执行 ${taskCommand('stop')} 安全停止。`);
     } else {
       log('⚪ Task Agent 当前未运行。');
     }
@@ -3738,8 +3995,8 @@ async function runServiceLifecycleCommand(command, operations = {}) {
     return result;
   }
   if (command === 'restart') {
-    if (process.platform !== 'darwin' && !operations.startService) {
-      throw new Error('后台服务当前仅支持 macOS；请使用 start --foreground');
+    if (!['darwin','win32'].includes(process.platform) && !operations.startService) {
+      throw new Error('后台服务当前仅支持 macOS/Windows；请使用 start --foreground');
     }
     const readSelection = operations.readSelection || (() => launchdService.selection());
     const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
@@ -3750,9 +4007,16 @@ async function runServiceLifecycleCommand(command, operations = {}) {
       const savedBindingIds = await readSelection();
       const bindingIds = selectServiceBindings(await loadBindings(), savedBindingIds)
         .map((binding) => binding.binding_id);
-      if (!bindingIds.length) throw new Error('未找到已经绑定的智能体-Bot 配置，请先运行 install');
-      await stopRuntime();
-      return startService(bindingIds);
+      if (!bindingIds.length) throw new Error(`未找到已经绑定的智能体-Bot 配置，请先运行 ${displayAction('install')}`);
+      const restartService = operations.restartService
+        || (process.platform === 'win32' && !operations.stopRuntime && !operations.startService
+          ? createWindowsRestartService()
+          : (async (ids) => { await stopRuntime(); return startService(ids); }));
+      return restartService(bindingIds, {
+        beforeStart: () => stopRuntime({
+          stopLaunchd: async () => ({stopped: true, wasLoaded: false}),
+        }),
+      });
     });
     log(`🟢 Task Agent 已重新启动${result.pid ? `（PID ${result.pid}）` : ''}。`);
     return result;
@@ -3796,12 +4060,12 @@ async function runStart(operations = {}) {
           return { ...lockedStatus, alreadyRunning: true };
         }
         if (lockedStatus.mode !== 'background') {
-          throw new Error('Task Agent 运行状态已变化，请重新执行 feishu-task-agent start');
+          throw new Error(`Task Agent 运行状态已变化，请重新执行 ${taskCommand('start')}`);
         }
         const savedBindingIds = await readSelection();
         const selectedIds = selectServiceBindings(availableBindings, savedBindingIds)
           .map((binding) => binding.binding_id);
-        if (!selectedIds.length) throw new Error('后台服务选择的绑定配置已被移除，请运行 feishu-task-agent stop 后重新 start');
+        if (!selectedIds.length) throw new Error(`后台服务选择的绑定配置已被移除，请运行 ${taskCommand('stop')} 后重新 ${displayAction('start')}`);
         return resumeService(selectedIds);
       });
       if (resumed.alreadyRunning) {
@@ -3812,7 +4076,7 @@ async function runStart(operations = {}) {
       return resumed;
     }
     if (status.mode === 'foreground') {
-      log(`🟡 Task Agent 已在旧版前台模式运行（PID ${status.pid}）；如需切换后台，请先执行 feishu-task-agent stop。`);
+      log(`🟡 Task Agent 已在旧版前台模式运行（PID ${status.pid}）；如需切换后台，请先执行 ${taskCommand('stop')}。`);
       return status;
     }
   }
@@ -3833,9 +4097,9 @@ async function runServiceWorker(operations = {}) {
   const startBindings = operations.startBindings || startSelectedBindings;
   const availableBindings = await loadBindings();
   const selectionSnapshot = await readSelectionSnapshot();
-  if (!selectionSnapshot?.generation) throw new Error('后台服务选择配置缺少启动代次，请重新运行 start');
+  if (!selectionSnapshot?.generation) throw new Error(`后台服务选择配置缺少启动代次，请重新运行 ${displayAction('start')}`);
   const selected = selectServiceBindings(availableBindings, selectionSnapshot.bindingIds);
-  if (!selected.length) throw new Error('后台服务没有可启动的绑定配置，请重新运行 install');
+  if (!selected.length) throw new Error(`后台服务没有可启动的绑定配置，请重新运行 ${displayAction('install')}`);
   await acquireLease();
   await startBindings(selected, undefined, {
     serviceWorker: true,
@@ -3861,10 +4125,40 @@ async function dispatchControllerCommand(command, operations = {}) {
   throw new Error(`unknown controller command: ${command}`);
 }
 
+async function pollWindowsStopRequest() {
+  if (process.platform !== 'win32' || stopRequested) return;
+  let requested = await windowsProcessJournal?.stopRequested();
+  if (!requested && process.env.AAMP_WINDOWS_SERVICE_GENERATION) {
+    const file = process.env.AAMP_WINDOWS_SERVICE_STOP_FILE;
+    const request = file ? await readJson(file).catch(() => undefined) : undefined;
+    requested = request?.generation === process.env.AAMP_WINDOWS_SERVICE_GENERATION;
+  }
+  if (!requested) return;
+  stopRequested = true;
+  stopSignal = 'stop';
+  promptInterrupter.interrupt(new Error('已收到停止请求'));
+  await cleanupAll();
+}
+
 async function main() {
+  if (process.platform === 'win32' && COMMAND === '__service-run') {
+    const diagnosticFile=path.join(RUNTIME_HOME,'windows-service-v1','controller-diagnostic.jsonl');
+    appendLifecycleDiagnostic(diagnosticFile,{event:'controller.started'});
+    process.once('exit',code=>appendLifecycleDiagnostic(diagnosticFile,{event:'controller.exit',code}));
+    process.on('uncaughtExceptionMonitor',error=>appendLifecycleDiagnostic(diagnosticFile,{event:'controller.uncaught',errorCode:error.code || error.name}));
+  }
   await ensurePrivateDir(STATE_HOME);
   await assertNoSymlinkPath(RUNTIME_HOME, RUNTIME_HOME);
   await ensurePrivateDir(RUNTIME_HOME);
+  if (process.platform === 'win32') {
+    const journalMode = windowsProcessJournalMode(COMMAND);
+    if (journalMode.recover) await recoverWindowsProcessJournals(WINDOWS_PROCESS_JOURNAL_HOME);
+    if (journalMode.create) {
+      const identity = await readWindowsProcessIdentity(process.pid);
+      if (!identity) throw new Error('Cannot verify Windows Controller identity');
+      windowsProcessJournal = await createWindowsProcessJournal(WINDOWS_PROCESS_JOURNAL_HOME, identity);
+    }
+  }
   await ensurePrivateDir(RUN_LOG_DIR);
   await fsp.writeFile(ERRORS_LOG, '', { mode: 0o600, flag: 'a' });
   await writeManifest();
@@ -3873,6 +4167,7 @@ async function main() {
 
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
+    if (process.platform === 'win32') appendLifecycleDiagnostic(path.join(RUNTIME_HOME,'windows-service-v1','controller-diagnostic.jsonl'),{event:'controller.signal',signal});
     if (stopRequested) return;
     stopRequested = true;
     stopSignal = signal;
@@ -3895,6 +4190,8 @@ if (process.argv[1]) {
 }
 
 if (isMainModule) {
+  const stopPoll = process.platform === 'win32' ? setInterval(() => {void pollWindowsStopRequest().catch(() => {});}, 250) : undefined;
+  stopPoll?.unref();
   main()
     .catch(async (error) => {
       if (!stopRequested) {
@@ -3906,12 +4203,14 @@ if (isMainModule) {
       }
     })
     .finally(async () => {
+      if (stopPoll) clearInterval(stopPoll);
       await cleanupAll();
       if (stopRequested && stopSignal) console.log(`\n已收到 ${stopSignal}，本次启动的 Bridge 已停止。`);
     });
 }
 
 export {
+  acquireDirectoryLock,
   buildPendingBinding,
   activateAddedBindings,
   createDraft,
@@ -3930,6 +4229,7 @@ export {
   initializeAgentGroups,
   orderStartupItems,
   prepareBindingStart,
+  prepareWindowsBackgroundBindings,
   prepareFeishuProcess,
   readInitialRuntimeMetadata,
   resolveConfiguredPendingPairingFile,
@@ -3957,6 +4257,7 @@ export {
   startSelectedBindings,
   runBootstrapHelper,
   runAdd,
+  runInstall,
   runServiceLifecycleCommand,
   runServiceWorker,
   runStart,
@@ -3965,6 +4266,10 @@ export {
   shouldUseBackgroundService,
   startupSummaryLines,
   stopManagedRuntime,
+  stopWindowsForegroundControllers,
+  createWindowsRestartService,
+  sampleWindowsProcessTree,
+  windowsProcessJournalMode,
   cleanupAll,
   upsertBindings,
   writeFeishuRuntimeProfile,

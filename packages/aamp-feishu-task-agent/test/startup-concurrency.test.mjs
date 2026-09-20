@@ -383,8 +383,8 @@ test('prepared startup dispatch and both callers use the shared launcher', () =>
   assert.doesNotMatch(start, /updateBinding|Promise\.all/)
 
   const install = functionRange(
-    'async function runBindingSession(mode)',
-    'async function runInstall()',
+    'async function runBindingSession(mode, options = {})',
+    'async function runInstall(operations = {})',
   )
   assert.match(install, /startBindingsWithGroups\(acceptedBindings, groups, mode\)/)
   assert.match(install, /selectedBindings/)
@@ -393,10 +393,10 @@ test('prepared startup dispatch and both callers use the shared launcher', () =>
 
 test('add returns before process preparation while install retains its current status phase', () => {
   const session = functionRange(
-    'async function runBindingSession(mode)',
-    'async function runInstall()',
+    'async function runBindingSession(mode, options = {})',
+    'async function runInstall(operations = {})',
   )
-  const addStart = session.indexOf("if (mode === 'add')")
+  const addStart = session.indexOf("if (mode === 'add' || options.deferLaunch)")
   const installStart = session.indexOf("console.log('\\n=== \u5efa\u7acb\u7ed1\u5b9a\u5e76\u542f\u52a8 ===')")
   assert.notEqual(addStart, -1)
   assert.notEqual(installStart, -1)

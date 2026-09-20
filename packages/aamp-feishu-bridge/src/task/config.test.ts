@@ -83,5 +83,7 @@ test('normalizeBridgeConfig rejects invalid execution locations and remote confi
 })
 
 test('normalizeBridgeConfig directs stale configs to the merged package command', () => {
-  assert.throws(() => normalizeBridgeConfig({}), /aamp-feishu-bridge start --enable-task/)
+  assert.throws(() => normalizeBridgeConfig({}), {
+    message: `Bridge config is incomplete. Run "aamp-feishu-bridge${process.platform === 'win32' ? '.cmd' : ''} start --enable-task" again.`,
+  })
 })

@@ -254,6 +254,8 @@ test('non-interactive local bootstrap helper does not require a controlling term
     'printf \'%s\n\' \'{"agent_type":"codex","acp_command":"codex-acp"}\' >&"$AAMP_TASK_INTERNAL_RESULT_FD"',
   ].join('\n'))
 
+  // Consume the controller input channel before exiting, including on Linux sockets.
+  writeFileSync(helper, readFileSync(helper, 'utf8').replace('#!/usr/bin/env bash\n', '#!/usr/bin/env bash\ncat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null\n'))
   const result = runControllerBootstrapHelper({
     root,
     helperBootstrap: helper,
@@ -275,6 +277,8 @@ test('service controller makes every local bootstrap helper non-interactive', ()
   ].join('\n'))
   const serviceFlagFile = path.join(root, 'service-flag')
 
+  // Consume the controller input channel before exiting, including on Linux sockets.
+  writeFileSync(helper, readFileSync(helper, 'utf8').replace('#!/usr/bin/env bash\n', '#!/usr/bin/env bash\ncat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null\n'))
   const result = runControllerBootstrapHelper({
     root,
     helperBootstrap: helper,
@@ -298,6 +302,8 @@ test('remote bootstrap preserves actionable failure text while redacting credent
     'exit 73',
   ].join('\n'))
 
+  // Consume the controller input channel before exiting, including on Linux sockets.
+  writeFileSync(helper, readFileSync(helper, 'utf8').replace('#!/usr/bin/env bash\n', '#!/usr/bin/env bash\ncat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null\n'))
   const result = runControllerBootstrapHelper({
     root,
     helperBootstrap: helper,
@@ -923,8 +929,9 @@ test('AIME canonicalizes a shorthand-shaped local tgz before downstream setup', 
   assert.equal(readFileSync(result.stdout.slice('downstream:'.length), 'utf8'), 'local AIME artifact')
 })
 
-test('bridge-only opt-in keeps the released AIME pin across outer controller and helper launch', () => {
+test('bridge-only opt-in keeps default pins across outer controller and helper launch', () => {
   const source = readFileSync(bootstrap, 'utf8')
+  const defaults = JSON.parse(readFileSync(new URL('../bootstrap/task-agent-defaults.json', import.meta.url), 'utf8'))
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-bridge-only-controller-helper-'))
   const helper = path.join(root, 'helper.sh')
   const outer = path.join(root, 'outer.sh')
@@ -935,6 +942,7 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
   mkdirSync(feishuDir)
   writeExecutable(helper, [
     'set -euo pipefail',
+    'cat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null',
     'AAMP_TASK_INTERNAL="${AAMP_TASK_INTERNAL:-false}"',
     packageOverrideInitialization(source),
     'agent_fail() { printf "%s\n" "$*" >&2; exit 64; }',
@@ -1003,16 +1011,16 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
   assert.equal(acpResult.status, 0, acpResult.stderr)
   assert.deepEqual(JSON.parse(acpResult.stdout), {
     acp: acpTgz,
-    feishu: '@iluolyx/aamp-feishu-bridge@0.1.52-dev.5',
-    aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
+    feishu: defaults.packages.feishuBridge,
+    aime: defaults.packages.aimeAcp,
   })
 
   const feishuResult = runOuter({ FEISHU_BRIDGE_PKG: `file:${feishuDir}` })
   assert.equal(feishuResult.status, 0, feishuResult.stderr)
   assert.deepEqual(JSON.parse(feishuResult.stdout), {
-    acp: '@luckyterry/aamp-acp-bridge@0.1.29-dev.0',
+    acp: defaults.packages.acpBridge,
     feishu: `file:${feishuDir}`,
-    aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
+    aime: defaults.packages.aimeAcp,
   })
 })
 
@@ -1417,7 +1425,8 @@ test('remote managed startup sanitizes real child output and uses location-aware
       [mixed.host, mixed],
     ]))
     console.log = originalConsoleLog
-    await until(() => remote.process?.events.some((event) => event.type === 'bridge.running'), 'remote bridge did not become ready')
+    await until(() => [remote, local, mixed].every(group => group.process?.events.some(event => event.type === 'bridge.running')), 'all fixture bridges did not become ready')
+    await until(() => { try { return readFileSync(localLog, 'utf8').includes('local-compatible output /tmp/local-compatible') } catch { return false } }, 'local fixture output was not flushed')
     await module.cleanupAll()
 
     const surfaces = {
@@ -1575,7 +1584,8 @@ test('remote managed output is a strict event projection on every controller sur
     )
     assert.equal(record.events.some((event) => event.type === 'unknown.remote.event'), false)
     assert.deepEqual(emittedEvents, record.events)
-  assert.ok(readFileSync(logFile, 'utf8').includes('arbitrary-prose-value-sentinel'))
+    await until(() => { try { return readFileSync(logFile, 'utf8').includes('arbitrary-prose-value-sentinel') } catch { return false } }, 'remote projection fixture log was not flushed')
+    assert.ok(readFileSync(logFile, 'utf8').includes('arbitrary-prose-value-sentinel'))
 
     const surfaces = {
       log: readFileSync(logFile, 'utf8'),
@@ -1971,12 +1981,14 @@ test('production cleanup stops the complete remote AIME helper process group', (
     'console.log(JSON.stringify({ type: \'cleanup.result\', npmPid, cleanupMs, helperOutcome, npmAliveAfterCleanup, prefixAtCleanup, prefixAfter, cacheAtCleanup, cacheAfter }))',
     '',
   ].join('\n'))
+  const cleanupBootstrap = path.join(root, 'cleanup-bootstrap.sh')
+  writeExecutable(cleanupBootstrap, 'cat <&"$AAMP_TASK_INTERNAL_INPUT_FD" >/dev/null\nexec bash '+JSON.stringify(bootstrap)+' "$@"')
   const result = spawnSync(process.execPath, [runner], {
     encoding: 'utf8',
     timeout: 25_000,
     env: isolatedBootstrapEnv({
       HOME: root,
-      AAMP_TASK_BOOTSTRAP_PATH: bootstrap,
+      AAMP_TASK_BOOTSTRAP_PATH: cleanupBootstrap,
       AAMP_TASK_STATE_HOME: path.join(root, 'state'),
       AAMP_TASK_RUNTIME_HOME: path.join(root, 'runtime'),
       AAMP_RUN_LOG_DIR: runLogDir,

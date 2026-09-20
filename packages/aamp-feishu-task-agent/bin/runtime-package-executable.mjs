@@ -71,8 +71,20 @@ process.stderr.write('unable to resolve npm executable shim: ' + executable + '\
 process.exit(1)
 `
 
-export function npmExecutableResolverArgs(executable) {
-  return ['--input-type=module', '--eval', RESOLVE_EXECUTABLE_SOURCE, executable]
+// npm treats its executable as shell command text on Windows. Preserve the
+// absolute Node path so spaces cannot split it or select a package-local node.
+export function npmExecutableResolverCommand({ platform = process.platform, execPath = process.execPath } = {}) {
+  return platform === 'win32' ? '""' + execPath + '""' : execPath
+}
+
+export function npmExecutableResolverArgs(executable, { platform = process.platform } = {}) {
+  // npm exec crosses cmd.exe on Windows, where a multiline --eval argument is
+  // truncated even when npm exits successfully. Keep the fixed module in one
+  // base64 data URL; the requested executable remains a separate argument.
+  const source = platform === 'win32'
+    ? `import('data:text/javascript;base64,${Buffer.from(RESOLVE_EXECUTABLE_SOURCE, 'utf8').toString('base64')}')`
+    : RESOLVE_EXECUTABLE_SOURCE
+  return ['--input-type=module', '--eval', source, executable]
 }
 
 function validatePreparedExecutable(value, executable = value?.executable) {
