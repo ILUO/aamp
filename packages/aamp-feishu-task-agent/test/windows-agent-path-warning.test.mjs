@@ -12,7 +12,8 @@ test('invalid explicit paths explain missing files without falling back or chang
   const warnings=[]
   t.mock.method(console,'error',message=>warnings.push(message))
   await writeFile(path.join(root,'coco.exe'),'')
-  const env={PATH:root,PATHEXT:'.EXE',AAMP_COCO_CLI_BIN:path.join(root,'missing.exe')}
+  // Match fixture suffixes on case-sensitive CI filesystems as well as Windows.
+  const env={PATH:root,PATHEXT:'.exe',AAMP_COCO_CLI_BIN:path.join(root,'missing.exe')}
   assert.equal(await findWindowsAgent('coco',env,async()=>{}),undefined)
   assert.match(warnings.join('\n'),/AAMP_COCO_CLI_BIN.*不存在/)
   assert.match(warnings.join('\n'),/清除.*重新扫描/)

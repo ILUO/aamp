@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os'
 import path from 'node:path'
 import {findWindowsAgent,prepareWindowsNativeAgent} from '../bootstrap/windows-agents.mjs'
 
+// Match fixture suffixes on case-sensitive CI filesystems as well as Windows.
 async function fixture(t) {
   const root=await realpath(await mkdtemp(path.join(tmpdir(),'aamp-trae-identity-')))
   t.after(()=>rm(root,{recursive:true,force:true}))
@@ -12,7 +13,7 @@ async function fixture(t) {
   t.mock.method(console,'error',line=>warnings.push(line))
   const file=async name=>{const value=path.join(root,name);await writeFile(value,'');return value}
   const shim=async(name,entry)=>{const value=path.join(root,name);await writeFile(value,`@echo off\r\n"node" "%~dp0\\${entry}" %*\r\n`);return value}
-  return {root,file,shim,warnings,env:{PATH:root,PATHEXT:'.EXE;.CMD'}}
+  return {root,file,shim,warnings,env:{PATH:root,PATHEXT:'.exe;.cmd'}}
 }
 const noRun=()=>assert.fail('identity checks must not execute an agent')
 

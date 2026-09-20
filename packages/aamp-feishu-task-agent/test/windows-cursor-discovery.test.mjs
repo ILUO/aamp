@@ -4,13 +4,14 @@ import {mkdtemp,mkdir,writeFile,chmod,rm,realpath} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import path from 'node:path'
 import {findWindowsAgent} from '../bootstrap/windows-agents.mjs'
+// Match fixture suffixes on case-sensitive CI filesystems as well as Windows.
 async function fixture(t){
  const root=await realpath(await mkdtemp(path.join(tmpdir(),'aamp-cursor-')))
  t.after(()=>rm(root,{recursive:true,force:true}))
  const local=path.join(root,'local'),bin=path.join(root,'bin'),official=path.join(local,'cursor-agent')
  await mkdir(official,{recursive:true});await mkdir(bin)
  const exe=async(dir,name)=>{const file=path.join(dir,name);await writeFile(file,'');await chmod(file,0o755);return file}
- return {root,local,bin,official,exe,env:{LOCALAPPDATA:local,PATH:bin,PATHEXT:'.EXE'}}
+ return {root,local,bin,official,exe,env:{LOCALAPPDATA:local,PATH:bin,PATHEXT:'.exe'}}
 }
 test('Cursor official directory fills missing PATH without overriding explicit or dedicated PATH commands',async t=>{
  const f=await fixture(t),local=await f.exe(f.official,'cursor-agent.exe')

@@ -929,8 +929,9 @@ test('AIME canonicalizes a shorthand-shaped local tgz before downstream setup', 
   assert.equal(readFileSync(result.stdout.slice('downstream:'.length), 'utf8'), 'local AIME artifact')
 })
 
-test('bridge-only opt-in keeps the released AIME pin across outer controller and helper launch', () => {
+test('bridge-only opt-in keeps default pins across outer controller and helper launch', () => {
   const source = readFileSync(bootstrap, 'utf8')
+  const defaults = JSON.parse(readFileSync(new URL('../bootstrap/task-agent-defaults.json', import.meta.url), 'utf8'))
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-bridge-only-controller-helper-'))
   const helper = path.join(root, 'helper.sh')
   const outer = path.join(root, 'outer.sh')
@@ -1010,16 +1011,16 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
   assert.equal(acpResult.status, 0, acpResult.stderr)
   assert.deepEqual(JSON.parse(acpResult.stdout), {
     acp: acpTgz,
-    feishu: '@zhengqilin/aamp-feishu-bridge@0.1.52-dev.6',
-    aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
+    feishu: defaults.packages.feishuBridge,
+    aime: defaults.packages.aimeAcp,
   })
 
   const feishuResult = runOuter({ FEISHU_BRIDGE_PKG: `file:${feishuDir}` })
   assert.equal(feishuResult.status, 0, feishuResult.stderr)
   assert.deepEqual(JSON.parse(feishuResult.stdout), {
-    acp: '@zhengqilin/aamp-acp-bridge@0.1.29-dev.1',
+    acp: defaults.packages.acpBridge,
     feishu: `file:${feishuDir}`,
-    aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
+    aime: defaults.packages.aimeAcp,
   })
 })
 
