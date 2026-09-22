@@ -161,6 +161,25 @@ The package installs the short command `feishu-task-agent`. Running that short
 command without arguments shows help. Running the standalone Bootstrap without
 arguments is equivalent to `install`.
 
+### Codex account and custom-provider readiness
+
+Codex does not have to use an official account: an existing API/custom provider
+configuration is accepted. AAMP first checks `codex login status` (10-second
+limit). If it fails, AAMP tries one minimal, read-only `codex exec` request using
+the same CLI, environment and user-level `CODEX_HOME` configuration, with a
+45-second limit. Project-directory configuration is not loaded by this probe. This
+fallback may consume a small amount of model quota. It runs in an empty temporary
+directory with an ephemeral session, and requires a successful final response.
+An already successful login-status check does not trigger a model request.
+
+This applies to foreground and background preparation on macOS/Linux and native
+Windows. AAMP does not automatically run `codex login` or replace provider
+credentials. If the fallback fails, follow its authentication, network or
+configuration guidance. For a new official-account setup, run `login` using the
+same Codex executable in a terminal first, then retry AAMP. For an API/custom
+provider, configure that provider's credentials instead. A successful minimal
+request is a startup check, not proof of ACP/tool compatibility or future quota.
+
 The supported canonical agent names are `codex`, `cursor`, `coco`, `traex`,
 `traecli`, `workbuddy`, `workbuddy_ai`, and `aime`.
 `--agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|aime` fixes the Agent

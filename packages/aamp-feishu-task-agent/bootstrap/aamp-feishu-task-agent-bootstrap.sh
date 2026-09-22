@@ -120,7 +120,7 @@ AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.1-dev.11"
+AAMP_TASK_AGENT_VERSION="0.1.1-dev.12"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -829,6 +829,7 @@ task_agent_global_install_is_complete() {
   [ -r "$package_dir/bootstrap/aamp-feishu-task-agent-bootstrap.sh" ] || return 1
   [ -r "$package_dir/bin/feishu-task-agent-controller.mjs" ] || return 1
   [ -r "$package_dir/bin/traecode-readiness.mjs" ] || return 1
+  [ -r "$package_dir/bin/codex-readiness.mjs" ] || return 1
 }
 
 task_agent_global_install_is_current() {
@@ -3969,9 +3970,12 @@ run_codex_login_status() {
   [ -n "$codex_bin" ] || return 127
 
   set +e
-  "$codex_bin" login status >/dev/null 2>&1
+  run_codex_check status >/dev/null 2>&1
   local status=$?
   set -e
+  case "$status" in
+    130|143) agent_fail "Codex 启动检查已取消。" ;;
+  esac
   if [ "$status" -eq 137 ] && is_macos; then
     local codex_real
     codex_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$codex_bin" 2>/dev/null || true)"
@@ -3981,22 +3985,13 @@ run_codex_login_status() {
   return "$status"
 }
 
-run_codex_login() {
-  local codex_bin
+run_codex_check() {
+  local action="$1" codex_bin helper
   codex_bin="$(resolve_codex_cli_for_acp || true)"
   [ -n "$codex_bin" ] || return 127
-
-  set +e
-  "$codex_bin" login
-  local status=$?
-  set -e
-  if [ "$status" -eq 137 ] && is_macos; then
-    local codex_real
-    codex_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$codex_bin" 2>/dev/null || true)"
-    print_codex_gatekeeper_help "$codex_bin" "$codex_real"
-    agent_fail "codex CLI was killed by macOS security policy"
-  fi
-  return "$status"
+  helper="$(task_agent_global_package_dir)/bin/codex-readiness.mjs"
+  [ -r "$helper" ] || agent_fail "Codex 启动检查组件缺失，请更新 feishu-task-agent 后重试。"
+  node "$helper" "$action" "$codex_bin"
 }
 
 run_quiet_command_with_timeout() {
@@ -4549,10 +4544,9 @@ ensure_agent_login() {
     codex)
       clear_codex_quarantine
       if ! run_codex_login_status; then
-        ensure_interactive_agent_recovery_allowed
-        agent_log "codex CLI 未登录，正在启动登录流程。"
-        run_codex_login || agent_fail "codex CLI 登录失败。请先执行 'codex login' 完成登录后重新运行脚本。"
-        run_codex_login_status || agent_fail "codex CLI 仍未登录。请先执行 'codex login' 完成登录后重新运行脚本。"
+        agent_log "Codex 登录状态未通过，正在验证当前模型配置（最多 45 秒，可能消耗少量模型额度）..."
+        run_codex_check probe || agent_fail "Codex 模型调用验证未通过；请按上方提示处理后重试。"
+        agent_log "Codex 当前模型配置可用，继续启动。"
       fi
       ;;
     cursor)

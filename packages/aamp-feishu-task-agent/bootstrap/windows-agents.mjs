@@ -12,6 +12,7 @@ import {taskAgentVersionIsNewer} from './windows-update.mjs'
 import {withWindowsOperationLock} from '../bin/windows-operation-lock.mjs'
 import {parseTraeCodeDoctor, supportsTraeCodeAcpHelp} from '../bin/traecode-readiness.mjs'
 import {warnInvalidAgentPath} from './windows-agent-path-warning.mjs'
+import {probeCodex} from '../bin/codex-readiness.mjs'
 
 const agents = {
   cursor: {names:['cursor-agent','agent'], variables:['AAMP_CURSOR_CLI_BIN'], args:['acp']},
@@ -148,6 +149,13 @@ export async function ensureWindowsAgentLogin(type, command, env, run) {
     if (type === 'cursor' && /not logged in|logged out/i.test(result.stdout)) throw new Error('Cursor 未登录')
   }
   try {await check()} catch (error) {
+    if (type === 'codex') {
+      if ([130, 143].includes(error.code)) throw new Error('Codex 启动检查已取消。', {cause: error})
+      console.log('Codex 登录状态未通过，正在验证当前模型配置（最多 45 秒，可能消耗少量模型额度）...')
+      await probeCodex(command, {env})
+      console.log('Codex 当前模型配置可用，继续启动。')
+      return
+    }
     if (error.code === 'ETIMEDOUT') throw error
     interactive(env)
     console.log(`${type} 尚未登录，正在启动登录流程。`)

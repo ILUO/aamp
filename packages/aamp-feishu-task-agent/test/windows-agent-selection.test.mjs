@@ -85,14 +85,14 @@ test('Trae family discovery follows macOS priority and AIME retains its tenant g
   assert.equal((await runWindowsHelper('__discover-agents',{}, {...env,AAMP_TASK_USER_TENANT_KEY:'736588c9260f175d'})).agents.includes('aime'),true)
 })
 
-test('Codex missing login opens login and rechecks; noninteractive worker refuses recovery',async()=>{
+test('Cursor missing login still opens login and rechecks; noninteractive worker refuses recovery',async()=>{
   const calls=[]
   const run=async(_command,args)=>{calls.push(args);if(calls.length===1)throw new Error('not logged in');return {stdout:'',stderr:''}}
-  await ensureWindowsAgentLogin('codex','codex.exe',{},run)
-  assert.deepEqual(calls,[['login','status'],['login'],['login','status']])
+  await ensureWindowsAgentLogin('cursor','cursor.exe',{},run)
+  assert.deepEqual(calls,[['status'],['login'],['status']])
   const worker=[]
-  await assert.rejects(ensureWindowsAgentLogin('codex','codex.exe',{AAMP_TASK_NON_INTERACTIVE:'true'},async(_command,args)=>{worker.push(args);throw new Error('not logged in')}),/后台/)
-  assert.deepEqual(worker,[['login','status']])
+  await assert.rejects(ensureWindowsAgentLogin('cursor','cursor.exe',{AAMP_TASK_NON_INTERACTIVE:'true'},async(_command,args)=>{worker.push(args);throw new Error('not logged in')}),/后台/)
+  assert.deepEqual(worker,[['status']])
 })
 
 test('Codex newer version asks permission, remembers the probe, and honors skip/no decisions',async t=>{

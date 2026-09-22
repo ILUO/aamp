@@ -1121,13 +1121,15 @@ agent_log() { :; }
 agent_fail() { printf '%s\\n' "$*" >&2; exit 64; }
 clear_codex_quarantine() { :; }
 run_codex_login_status() { return 1; }
+run_codex_check() { printf '%s\\n' 'Codex 模型连接失败' >&2; return 1; }
 run_codex_login() { touch "$LOGIN_MARKER"; return 0; }
 ${helpers}
 ensure_agent_login
 `, 'bash', loginMarker], { encoding: 'utf8', timeout: 5000 })
 
   assert.equal(result.status, 64)
-  assert.match(result.stderr, /后台服务无法完成交互式准备.*feishu-task-agent start/)
+  assert.match(result.stderr, /Codex 模型连接失败/)
+  assert.match(result.stderr, /Codex 模型调用验证未通过/)
   assert.equal(existsSync(loginMarker), false)
 })
 
@@ -2040,6 +2042,7 @@ test('bootstrap validates the npm-global package version before reusing its bina
   writeFileSync(path.join(packageDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'), '#!/usr/bin/env bash\n')
   writeFileSync(path.join(packageDir, 'bin/feishu-task-agent-controller.mjs'), '#!/usr/bin/env node\n')
   writeFileSync(path.join(packageDir, 'bin/traecode-readiness.mjs'), '#!/usr/bin/env node\n')
+  writeFileSync(path.join(packageDir, 'bin/codex-readiness.mjs'), '#!/usr/bin/env node\n')
   writeFileSync(path.join(prefix, 'bin/aamp-logs'), '#!/usr/bin/env node\n')
   chmodSync(path.join(prefix, 'bin/aamp-logs'), 0o755)
 
