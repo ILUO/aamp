@@ -19,6 +19,16 @@ import {
   stopOwnedWindowsTree,
 } from '../bin/windows-platform.mjs'
 
+test('native identity can read a live image when CIM and MainModule have no path', {skip: process.platform !== 'win32'}, async () => {
+  const {__test} = await import('../bin/windows-platform.mjs')
+  const script = __test.powershellScripts['read-process-identity']
+    .replaceAll('$snapshot.ExecutablePath', "''")
+    .replace('[string]$native.MainModule.FileName', "''")
+  const identity = await runWindowsPowerShell(script, {pid: process.pid})
+  assert.equal(identity.executablePath.toLowerCase(), process.execPath.toLowerCase())
+  assert.equal(identity.pid, process.pid)
+})
+
 test('atomic Windows replace retries shared-busy errors with the fixed bounded backoff', async () => {
   const calls = []
   const waits = []
@@ -594,17 +604,17 @@ function Get-CimInstance {
 function Invoke-CimMethod { return [pscustomobject]@{ReturnValue=0;Sid='S-1-5-21-1000'} }
 function Get-FixtureNativeProcess {
   param($id)
-  if ($env:AAMP_CIM_METADATA -eq 'native-gone') { throw [System.ArgumentException]::new('gone') }
+  if ($env:AAMP_CIM_METADATA -eq 'native-gone') { return [pscustomobject]@{HasExited=$true} }
   if ($env:AAMP_CIM_METADATA -eq 'native-denied') { throw [System.UnauthorizedAccessException]::new('native handle denied') }
   $created = $script:created.AddTicks(4)
   if ($env:AAMP_CIM_METADATA -eq 'native-reused') { $created = $created.AddSeconds(1) }
   $image = if ($env:AAMP_CIM_METADATA -eq 'missing') { '' } else { 'C:\fixture\node.exe' }
-  $native = [pscustomobject]@{Handle=1;HasExited=($env:AAMP_CIM_METADATA -eq 'native-exited');StartTime=$created;MainModule=[pscustomobject]@{FileName=$image}}
+  $native = [pscustomobject]@{HasExited=($env:AAMP_CIM_METADATA -eq 'native-exited');StartTime=$created;ImagePath=$image}
   $native | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
   return $native
 }
 `
-    const run = scenario => runWindowsPowerShell(fixture + __test.powershellScripts[operation].replace('[System.Diagnostics.Process]::GetProcessById([int]$snapshot.ProcessId)', '(Get-FixtureNativeProcess ([int]$snapshot.ProcessId))'), {pid:10384}, {environment:{...process.env,AAMP_CIM_METADATA:scenario}})
+    const run = scenario => runWindowsPowerShell(fixture + __test.powershellScripts[operation].replace('Read-LimitedProcessImage ([int]$snapshot.ProcessId)', '(Get-FixtureNativeProcess ([int]$snapshot.ProcessId))'), {pid:10384}, {environment:{...process.env,AAMP_CIM_METADATA:scenario}})
     const native = await run('native-restored')
     assert.equal((operation === 'read-process-identity' ? native : native.processes[0]).executablePath, String.raw`C:\fixture\node.exe`)
     for (const scenario of ['native-gone','native-reused','native-exited']) {

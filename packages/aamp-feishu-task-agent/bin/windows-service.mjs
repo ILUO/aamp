@@ -141,6 +141,7 @@ export function createWindowsServiceManager({
     serviceHome,
     selectionFile: path.join(serviceHome, 'selection.json'),
     readinessFile: path.join(serviceHome, 'readiness.json'),
+    stateFile: path.join(serviceHome, 'worker-state.json'),
     ownerFile: path.join(serviceHome, 'owner.json'),
     stopFile: path.join(serviceHome, 'stop.json'),
     configFile: path.join(serviceHome, 'worker.json'),
@@ -341,12 +342,14 @@ export function createWindowsServiceManager({
     })
     await fs.rm(paths.readinessFile, { force: true })
     await fs.rm(paths.stopFile, { force: true })
+    await fs.rm(paths.stateFile, { force: true })
     onProgress('正在创建并启动 Windows 后台任务...')
     let logOffset=await fs.stat(paths.logFile).then(value=>value.size).catch(()=>0)
     let pendingLog=''
     const decoder=new StringDecoder('utf8')
     await scheduler('start', await config())
     onProgress('后台进程已派发，正在等待智能体和飞书连接就绪...')
+    let lastRetry=0
     for (let i = 0; i < startupAttempts; i++) {
       const s = await status()
       // Forward only newly written stage lines; never replay historical logs or
@@ -362,6 +365,17 @@ export function createWindowsServiceManager({
         pendingLog=lines.pop().slice(-65536)
         for(const line of lines) if(line.startsWith('[aamp-one-click]') || line.startsWith('🔴')) onProgress(line)
       } catch(error) {if(error.code!=='ENOENT') onProgress('暂时无法读取后台进度日志')} finally {await log?.close()}
+      const workerState=await readJson(paths.stateFile)
+      if(workerState?.version===1 && workerState.generation===generation) {
+        if(workerState.state==='failed' || workerState.state==='stopped') {
+          const reason=workerState.reason || '后台进程在就绪前退出'
+          throw new Error(`后台启动失败：${reason}（${workerState.errorCode || workerState.code || workerState.state}）；请执行 ${taskCommand('logs','win32')} 查看详情`)
+        }
+        if(workerState.state==='retrying' && workerState.attempt!==lastRetry) {
+          lastRetry=workerState.attempt
+          onProgress(`后台智能体退出，正在准备第 ${lastRetry} 次启动...`)
+        }
+      }
       if (s.ready) return { ...s, alreadyRunning: false }
       await wait(500)
     }

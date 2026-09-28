@@ -4,6 +4,21 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 const mod=await import('../bin/windows-service.mjs').catch(()=>({}));
+
+test('startup reports current worker terminal failure without waiting for readiness timeout', async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-service-failed-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ let waits=0;
+ const manager=mod.createWindowsServiceManager({runtimeHome:root,controllerPath:'controller',workerPath:'worker',currentSid:async()=>'S-1-5-21-1',ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),
+ scheduler:async action=>{
+   if(action==='start') {
+     const config=JSON.parse(await fs.readFile(manager.paths.configFile,'utf8'));
+     await fs.writeFile(path.join(manager.paths.serviceHome,'worker-state.json'),JSON.stringify({version:1,generation:config.generation,state:'failed',errorCode:'EACCES'}));
+   }
+   return {loaded:false,state:'Ready',ownerSid:'S-1-5-21-1'};
+ },wait:async()=>{waits++},startupAttempts:3});
+ await assert.rejects(manager.start(['b1']),/后台启动失败.*EACCES/);
+ assert.equal(waits,0);
+});
 async function fixture(t) {
   assert.equal(typeof mod.createWindowsServiceManager,'function');
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-service-'));
