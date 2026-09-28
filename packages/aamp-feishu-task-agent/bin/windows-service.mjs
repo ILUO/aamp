@@ -1,6 +1,7 @@
 import {taskCommand, globalInstallHint} from './platform-hints.mjs'
 import { withWindowsOperationLock } from './windows-operation-lock.mjs'
 import {startupProgress} from './startup-progress.mjs'
+import {resolveWindowsNpmPrefix} from '../bootstrap/windows-runtime-paths.mjs'
 import {StringDecoder} from 'node:string_decoder'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -400,6 +401,7 @@ export function createWindowsServiceManager({
       || path.join(environment.AAMP_TASK_RUNTIME_HOME || path.join(homedir(), '.aamp', 'feishu-task-agent'), 'aime-acp')
     env.AAMP_TASK_CODEX_ACP_HOME = environment.AAMP_TASK_CODEX_ACP_HOME
       || path.join(environment.AAMP_TASK_RUNTIME_HOME || path.join(homedir(), '.aamp', 'feishu-task-agent'), 'codex-acp')
+    env.NPM_GLOBAL_PREFIX = resolveWindowsNpmPrefix(environment)
     env.AAMP_TASK_RUNTIME_HOME = runtimeHome
     await writeJson(paths.selectionFile, {
       version: 1,

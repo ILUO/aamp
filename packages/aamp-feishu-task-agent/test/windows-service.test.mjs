@@ -189,6 +189,7 @@ test('background config preserves explicit preparation policies and proxies but 
   const config=JSON.parse(await fs.readFile(manager.paths.configFile,'utf8'))
   for(const [key,value] of Object.entries(expected))assert.equal(config.env[key],value,key)
   assert.equal(config.env.AAMP_TASK_NON_INTERACTIVE,'true')
+  assert.equal(config.env.NPM_GLOBAL_PREFIX,path.join(os.homedir(),'.aamp','feishu-task-agent','npm-global'))
   assert.equal(config.env.UNRELATED_SECRET,undefined)
   assert.equal(config.env.AAMP_TASK_AIME_ACP_HOME,path.join(os.homedir(),'.aamp','feishu-task-agent','aime-acp'))
   assert.equal(config.env.AAMP_TASK_CODEX_ACP_HOME,path.join(os.homedir(),'.aamp','feishu-task-agent','codex-acp'))

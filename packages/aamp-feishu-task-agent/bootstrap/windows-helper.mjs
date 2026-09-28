@@ -22,6 +22,7 @@ import {warnInvalidAgentPath} from './windows-agent-path-warning.mjs'
 import {findUserCodexCli} from './windows-codex-discovery.mjs'
 import {ensureCodexAdapter} from './windows-codex-adapter.mjs'
 import {startupProgress} from '../bin/startup-progress.mjs'
+import {resolveWindowsNpmPrefix} from './windows-runtime-paths.mjs'
 import { registerFeishuApp, defaultOpenUrl } from './register-feishu-app.mjs'
 import { withWindowsOperationLock } from '../bin/windows-operation-lock.mjs'
 import {
@@ -384,12 +385,11 @@ export async function resolveWindowsCodexCli(env, {findUserCodex = findUserCodex
 
 async function resolveLarkCli(extraEnv, env, { install = false } = {}) {
   const explicit = envValue(extraEnv, 'AAMP_LARK_CLI_BIN')
-  const runtime = envValue(
-    extraEnv,
-    'AAMP_TASK_RUNTIME_HOME',
-    path.join(homedir(), '.aamp', 'feishu-task-agent'),
-  )
-  const prefix = envValue(extraEnv, 'NPM_GLOBAL_PREFIX', envValue(extraEnv, 'AAMP_TASK_NPM_GLOBAL_PREFIX', path.join(runtime, 'npm-global')))
+  const prefix = resolveWindowsNpmPrefix({
+    NPM_GLOBAL_PREFIX: envValue(extraEnv,'NPM_GLOBAL_PREFIX',null),
+    AAMP_TASK_NPM_GLOBAL_PREFIX: envValue(extraEnv,'AAMP_TASK_NPM_GLOBAL_PREFIX',null),
+    AAMP_TASK_RUNTIME_HOME: envValue(extraEnv,'AAMP_TASK_RUNTIME_HOME',null),
+  })
   const minimum = envValue(extraEnv, 'LARK_CLI_MIN_VERSION', defaults.larkCli.minVersion)
   const pathKey =
     Object.keys(env).find((key) => key.toLowerCase() === 'path') || 'PATH'
@@ -433,7 +433,7 @@ async function resolveLarkCli(extraEnv, env, { install = false } = {}) {
   if (!install) return undefined
   if (envValue(extraEnv, 'AAMP_TASK_NON_INTERACTIVE') === 'true')
     throw new Error(
-      `后台服务无法安装缺失的 lark-cli；请在终端执行 ${taskCommand('start', 'win32')} 完成准备。`,
+      `后台服务无法安装缺失的 lark-cli（查找目录：${prefix}，同时检查 PATH）；请在终端执行 ${taskCommand('start', 'win32')} 完成准备。`,
     )
   if (explicit)
     throw new Error(
