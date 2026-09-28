@@ -5,6 +5,67 @@ import os from 'node:os';
 import path from 'node:path';
 const mod=await import('../bin/windows-service.mjs').catch(()=>({}));
 
+test('native scheduler does not modify a task that is already disabled', {skip:process.platform!=='win32'}, async()=>{
+ const {runWindowsPowerShell}=await import('../bin/windows-platform.mjs');
+ const fixture=String.raw`
+$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+function Get-ScheduledTask { return [pscustomobject]@{Principal=[pscustomobject]@{UserId=$sid};State='Disabled'} }
+function Disable-ScheduledTask { throw 'Access is denied: a redundant write was attempted' }
+$env:AAMP_SCHEDULER_INPUT=@{operation='disable';name='in-memory-fixture';sid=$sid} | ConvertTo-Json -Compress
+`;
+ const result=await runWindowsPowerShell(fixture+mod.__test.schedulerScript+'\n@{ok=$true}|ConvertTo-Json -Compress',{});
+ assert.equal(result.ok,true);
+});
+
+test('legacy task permission repair is limited to one retry and interactive mutations',async()=>{
+ const denied=()=>Object.assign(new Error('denied'),{stderr:'HRESULT 0x80070005'});
+ const config={name:'fixture',sid:'S-1-5-21-1',allowPermissionRepair:true};
+ let calls=0,repairs=0;
+ const options={execute:async()=>{if(++calls===1)throw denied();return {stdout:'{}'}},repair:async received=>{assert.equal(received,config);repairs++}};
+ await mod.__test.nativeScheduler('disable',config,options);
+ assert.equal(calls,2);assert.equal(repairs,1);
+ calls=0;repairs=0;
+ await assert.rejects(mod.__test.nativeScheduler('start',{...config,allowPermissionRepair:false},options),/交互终端/);
+ assert.equal(repairs,0);
+ calls=0;
+ await assert.rejects(mod.__test.nativeScheduler('status',config,options),/denied/);
+ assert.equal(repairs,0);
+ calls=0;
+ await assert.rejects(mod.__test.nativeScheduler('start',config,{...options,execute:async()=>{calls++;throw denied()}}),/修复后操作仍失败/);
+ assert.equal(calls,2);assert.equal(repairs,1);
+});
+
+test('cancelled UAC repair does not retry the scheduled task operation',async()=>{
+ let calls=0;
+ await assert.rejects(mod.__test.nativeScheduler('start',{allowPermissionRepair:true},{execute:async()=>{calls++;throw Object.assign(new Error('denied'),{stderr:'0x80070005'})},repair:async()=>{throw new Error('已取消权限修复')}}),/已取消/);
+ assert.equal(calls,1);
+});
+
+test('native ACL repair accepts existing full control in Windows PowerShell 5', {skip:process.platform!=='win32'},async()=>{
+ const {runWindowsPowerShell}=await import('../bin/windows-platform.mjs');
+ const fixture=String.raw`
+$script:fixtureSid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+function Get-ScheduledTask { return [pscustomobject]@{Principal=[pscustomobject]@{UserId=$script:fixtureSid};State='Ready'} }
+function New-Object {
+  param($ComObject)
+  $registered=[pscustomobject]@{Definition=[pscustomobject]@{Principal=[pscustomobject]@{UserId=$script:fixtureSid;RunLevel=0;LogonType=3}}}
+  $registered|Add-Member ScriptMethod GetSecurityDescriptor {param($flags);return ('D:(A;;FA;;;'+$script:fixtureSid+')')}
+  $registered|Add-Member ScriptMethod SetSecurityDescriptor {throw 'should not rewrite existing full control'}
+  $script:fixtureRegistered=$registered
+  $folder=[pscustomobject]@{}
+  $folder|Add-Member ScriptMethod GetTask {param($name);return $script:fixtureRegistered}
+  $script:fixtureFolder=$folder
+  $service=[pscustomobject]@{}
+  $service|Add-Member ScriptMethod Connect {}
+  $service|Add-Member ScriptMethod GetFolder {param($name);return $script:fixtureFolder}
+  return $service
+}
+$env:AAMP_SCHEDULER_INPUT=@{operation='repair-permissions';name=('AAMP-FeishuTask-'+$script:fixtureSid);sid=$script:fixtureSid}|ConvertTo-Json -Compress
+`;
+ const result=await runWindowsPowerShell(fixture+mod.__test.schedulerScript+'\n@{ok=$true}|ConvertTo-Json -Compress',{});
+ assert.equal(result.ok,true);
+});
+
 test('startup reports current worker terminal failure without waiting for readiness timeout', async t=>{
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-service-failed-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
  let waits=0;

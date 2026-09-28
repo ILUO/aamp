@@ -32,12 +32,48 @@ if ($t) {
   $ownerSid=Resolve-TaskPrincipalSid ([string]$t.Principal.UserId)
   if ($ownerSid -ne $c.sid) { throw 'Scheduled task belongs to another identity' }
 }
+function Grant-TaskUserControl {
+  $service=New-Object -ComObject 'Schedule.Service'
+  $service.Connect()
+  $registered=$service.GetFolder('\').GetTask($c.name)
+  $definition=$registered.Definition
+  if ((Resolve-TaskPrincipalSid ([string]$definition.Principal.UserId)) -ne $c.sid -or
+      [int]$definition.Principal.RunLevel -ne 0 -or [int]$definition.Principal.LogonType -ne 3) {
+    throw 'Refusing permission repair for a foreign or elevated scheduled task'
+  }
+  $descriptor=[System.Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(4))
+  $sid=[System.Security.Principal.SecurityIdentifier]::new($c.sid)
+  $fullControl=0x1f01ff
+  $hasFullControl=$false
+  if ($null -eq $descriptor.DiscretionaryAcl) { throw 'Cannot verify scheduled task DACL' }
+  foreach ($ace in $descriptor.DiscretionaryAcl) {
+    if ($ace -is [System.Security.AccessControl.CommonAce] -and $ace.SecurityIdentifier -eq $sid) {
+      if ($ace.AceQualifier -eq [System.Security.AccessControl.AceQualifier]::AccessDenied) { throw 'Scheduled task has an explicit deny for its user' }
+      if ($ace.AceQualifier -eq [System.Security.AccessControl.AceQualifier]::AccessAllowed -and
+          ($ace.AccessMask -band $fullControl) -eq $fullControl -and
+          ([int]$ace.AceFlags -band [int][System.Security.AccessControl.AceFlags]::InheritOnly) -eq 0) { $hasFullControl=$true }
+    }
+  }
+  if ($hasFullControl) { return }
+  $rule=[System.Security.AccessControl.CommonAce]::new([System.Security.AccessControl.AceFlags]::None,[System.Security.AccessControl.AceQualifier]::AccessAllowed,$fullControl,$sid,$false,$null)
+  $insert=0
+  while ($insert -lt $descriptor.DiscretionaryAcl.Count -and $descriptor.DiscretionaryAcl[$insert].AceType -eq [System.Security.AccessControl.AceType]::AccessDenied) { $insert++ }
+  $descriptor.DiscretionaryAcl.InsertAce($insert,$rule)
+  $registered.SetSecurityDescriptor($descriptor.GetSddlForm([System.Security.AccessControl.AccessControlSections]::Access),0)
+}
 switch ($c.operation) {
  'status' {
   if ($t) { @{loaded=($t.State -ne 'Disabled');state=[string]$t.State;ownerSid=$ownerSid} | ConvertTo-Json -Compress }
   else { @{loaded=$false;state='Stopped';ownerSid=$c.sid} | ConvertTo-Json -Compress }
  }
- 'disable' { if ($t) { Disable-ScheduledTask -TaskName $c.name | Out-Null } }
+ 'disable' { if ($t -and $t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $c.name | Out-Null } }
+ 'repair-permissions' {
+  $currentSid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $expectedName='AAMP-FeishuTask-'+$currentSid
+  if ($c.sid -ne $currentSid -or ($c.name -ne $expectedName -and $c.name -notmatch ('^'+[regex]::Escape($expectedName)+'-test-[a-zA-Z0-9-]+$'))) { throw 'Refusing permission repair for an unrelated task' }
+  if (!$t) { throw 'Scheduled task disappeared before permission repair' }
+  Grant-TaskUserControl
+ }
  'start' {
   $p=New-ScheduledTaskPrincipal -UserId $c.sid -LogonType Interactive -RunLevel Limited
   $trigger=New-ScheduledTaskTrigger -AtLogOn -User $c.sid
@@ -46,14 +82,41 @@ switch ($c.operation) {
   if (!(Test-Path -LiteralPath $hostPath) -or !(Test-Path -LiteralPath $c.launcher)) { throw 'Windows background launcher is unavailable' }
   $a=New-ScheduledTaskAction -Execute $hostPath -Argument ('//B //Nologo "'+$c.launcher+'" "'+$c.node+'" "'+$c.worker+'" "'+$c.config+'"') -WorkingDirectory $c.directory
   Register-ScheduledTask -TaskName $c.name -Action $a -Principal $p -Trigger $trigger -Settings $settings -Force | Out-Null
+  Grant-TaskUserControl
   Start-ScheduledTask -TaskName $c.name
  }
  'unregister' { if ($t) { Unregister-ScheduledTask -TaskName $c.name -Confirm:$false } }
  default { throw 'Unknown scheduler operation' }
 }
 `
-async function nativeScheduler(operation, config) {
-  const { stdout } = await execFileAsync(
+async function repairWindowsTaskPermissions(config, {execute=execFileAsync}={}) {
+  // Elevate only this fixed ACL operation. Never execute a worker or load scripts
+  // from the user's runtime directory in the elevated helper.
+  const input=Buffer.from(JSON.stringify({name:config.name,sid:config.sid,operation:'repair-permissions'}),'utf8').toString('base64')
+  const repair=schedulerScript.replace('$c=$env:AAMP_SCHEDULER_INPUT | ConvertFrom-Json',`$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${input}')) | ConvertFrom-Json`)
+  const encoded=Buffer.from(`try { ${repair}\nexit 0 } catch { exit 1 }`,'utf16le').toString('base64')
+  const script=String.raw`
+$ErrorActionPreference='Stop'
+try {
+  $exe=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $p=Start-Process -FilePath $exe -Verb RunAs -WindowStyle Hidden -ArgumentList ('-NoLogo -NoProfile -NonInteractive -EncodedCommand '+$env:AAMP_TASK_ACL_REPAIR) -PassThru
+  $null=$p.Handle
+  $p.WaitForExit()
+  if ($p.ExitCode -ne 0) { throw 'AAMP_TASK_ACL_REPAIR_FAILED' }
+} catch {
+  if ($_.Exception.NativeErrorCode -eq 1223) { throw 'AAMP_TASK_ACL_REPAIR_CANCELLED' }
+  throw
+}`
+  try {
+    await execute('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',script],{env:{...process.env,AAMP_TASK_ACL_REPAIR:encoded},windowsHide:true,encoding:'utf8',timeout:180000,maxBuffer:65536})
+  } catch(error) {
+    if(String(error.stderr||error.message).includes('AAMP_TASK_ACL_REPAIR_CANCELLED')) throw new Error('已取消计划任务权限修复；后台未启动。')
+    throw new Error('计划任务权限修复未完成；请使用同一账号确认管理员授权后重试。',{cause:error})
+  }
+}
+async function nativeScheduler(operation, config, {execute=execFileAsync,repair=repairWindowsTaskPermissions,onProgress=()=>{}}={}) {
+  const run=async()=>{
+  const { stdout } = await execute(
     'powershell.exe',
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', schedulerScript],
     {
@@ -68,6 +131,15 @@ async function nativeScheduler(operation, config) {
     },
   )
   return stdout.trim() ? JSON.parse(stdout.replace(/^\uFEFF/, '')) : {}
+  }
+  try {return await run()} catch(error) {
+    const denied=/0x80070005|Access is denied|拒绝访问/i.test(String(error.stderr||error.message))
+    if(!denied || !['start','disable','unregister'].includes(operation)) throw error
+    if(!config.allowPermissionRepair) throw new Error('当前用户无权管理旧计划任务；请在交互终端执行 start 或 stop，确认一次管理员权限修复。',{cause:error})
+    onProgress('旧计划任务权限不足，正在请求一次管理员授权以修复当前用户的管理权限...')
+    await repair(config)
+    try {return await run()} catch(retryError) {throw new Error('计划任务权限修复后操作仍失败，请查看日志。',{cause:retryError})}
+  }
 }
 async function currentSid() {
   const { stdout } = await execFileAsync(
@@ -123,7 +195,7 @@ export function createWindowsServiceManager({
   ),
   environment = process.env,
   currentSid: getSid = currentSid,
-  scheduler = nativeScheduler,
+  scheduler = (operation, config) => nativeScheduler(operation, config, {onProgress}),
   readIdentity = async (pid) =>
     (await platform()).readWindowsProcessIdentity(pid),
   ensurePrivateDirectory = async (dir) =>
@@ -157,6 +229,7 @@ export function createWindowsServiceManager({
       worker: workerPath,
       config: paths.configFile,
       directory: path.dirname(workerPath),
+      allowPermissionRepair: environment.AAMP_TASK_NON_INTERACTIVE !== 'true' && Boolean(process.stdin.isTTY),
     }
   }
   async function writeJson(file, data) {
@@ -308,7 +381,7 @@ export function createWindowsServiceManager({
     if (current.ready && sameIds(ids, selected.bindingIds))
       return { ...current, alreadyRunning: true }
     if (!stopped && (current.loaded || (await readJson(paths.ownerFile)))) {
-      onProgress('正在停止旧后台实例，等待所属进程退出...')
+      onProgress('正在检查并清理旧后台状态...')
       await stopUnlocked()
     }
     const generation = randomUUID()
@@ -417,4 +490,4 @@ export function createWindowsServiceManager({
   }
 }
 
-export const __test = Object.freeze({ schedulerScript })
+export const __test = Object.freeze({ schedulerScript, nativeScheduler, repairWindowsTaskPermissions })
