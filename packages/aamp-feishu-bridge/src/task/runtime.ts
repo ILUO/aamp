@@ -40,7 +40,14 @@ import type {
   FeishuTaskEventKind,
   FeishuTaskStepInput,
   FeishuTaskSubscriptionState,
+  FeishuTaskWriteContext,
 } from './types.js'
+
+function taskWriteContext(taskState: BridgeTaskState, targetTaskGuid = taskState.taskGuid): FeishuTaskWriteContext | undefined {
+  if (targetTaskGuid !== taskState.taskGuid) return undefined
+  const executionId = taskState.executionId?.trim()
+  return executionId ? { executionId } : undefined
+}
 
 type LogMetadata = Record<string, unknown>
 type Logger = {
@@ -2506,7 +2513,7 @@ export class FeishuTaskBridgeRuntime {
     const stepsToFlush = buffer.steps.slice()
     const displaySteps = aggregateStreamStepsForFlush(stepsToFlush)
     if (displaySteps.length > 0) {
-      await this.feishu.appendTaskSteps(taskState.taskGuid, displaySteps)
+      await this.feishu.appendTaskSteps(taskState.taskGuid, displaySteps, taskWriteContext(taskState))
     }
 
     const latestBuffer = this.streamStepBuffers.get(aampTaskId)
@@ -2577,7 +2584,7 @@ export class FeishuTaskBridgeRuntime {
         bridgeName: this.config.mailbox.email,
         eventKind: taskState.feishuEventKind,
         debug: this.config.behavior.debug,
-      }))
+      }), taskWriteContext(taskState))
 
       const updatedTaskState = markAckCommented(taskState, ack.taskId)
       this.state.tasks[ack.taskId] = ackCommentEventKey
@@ -2620,7 +2627,7 @@ export class FeishuTaskBridgeRuntime {
         || blockedReason
         || '智能体需要更多信息才能继续处理该任务。'
       this.debugLog(`[aamp help ${help.taskId}] commenting on Feishu task ${latestTaskState.taskGuid}`, { taskId: help.taskId })
-      await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-comment')
+      await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-comment', taskWriteContext(latestTaskState))
 
       const helpCommentedTaskIds = new Set(latestTaskState.helpCommentedTaskIds ?? [])
       helpCommentedTaskIds.add(help.taskId)
@@ -2797,6 +2804,7 @@ export class FeishuTaskBridgeRuntime {
       await this.feishu.commentTask(
         (this.state.tasks[aampTaskId] ?? latestTaskState).taskGuid,
         buildFeishuWriteFailureNotice(action, error, completionError),
+        taskWriteContext(this.state.tasks[aampTaskId] ?? latestTaskState),
       )
     } catch (caughtError) {
       commentError = caughtError
@@ -2908,11 +2916,11 @@ export class FeishuTaskBridgeRuntime {
 
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
     if (output.kind === 'link_delivery') {
-      await this.feishu.appendTextDeliveries(latestTaskState.taskGuid, [output.url])
+      await this.feishu.appendTextDeliveries(latestTaskState.taskGuid, [output.url], taskWriteContext(latestTaskState))
     } else if (output.kind === 'file_delivery') {
-      await this.uploadFileDelivery(latestTaskState.taskGuid, output.path)
+      await this.uploadFileDelivery(latestTaskState.taskGuid, output.path, taskWriteContext(latestTaskState))
     } else {
-      await this.uploadTextDelivery(latestTaskState.taskGuid, output)
+      await this.uploadTextDelivery(latestTaskState.taskGuid, output, taskWriteContext(latestTaskState))
     }
     await this.markResultOutputApplied(aampTaskId, latestTaskState, outputKey)
   }
@@ -2958,7 +2966,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting reply output on Feishu task ${latestTaskState.taskGuid}`, { taskId: aampTaskId })
-    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, content, 'reply-comment')
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, content, 'reply-comment', taskWriteContext(latestTaskState))
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -2973,9 +2981,9 @@ export class FeishuTaskBridgeRuntime {
     await this.persistState()
   }
 
-  private async uploadFileDelivery(taskGuid: string, filePath: string): Promise<void> {
+  private async uploadFileDelivery(taskGuid: string, filePath: string, context?: FeishuTaskWriteContext): Promise<void> {
     await this.validateFileDeliveryPath(filePath)
-    await this.feishu.uploadTaskDelivery(taskGuid, filePath)
+    await this.feishu.uploadTaskDelivery(taskGuid, filePath, context)
   }
 
   private async validateFileDeliveryPath(filePath: string): Promise<void> {
@@ -2999,6 +3007,7 @@ export class FeishuTaskBridgeRuntime {
   private async uploadTextDelivery(
     taskGuid: string,
     output: Extract<FeishuTaskResultOutput, { kind: 'text_delivery' }>,
+    context?: FeishuTaskWriteContext,
   ): Promise<void> {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-delivery-'))
     const extension = output.format === 'plain_text' ? '.txt' : '.md'
@@ -3006,15 +3015,15 @@ export class FeishuTaskBridgeRuntime {
     const filePath = path.join(tempDir, fileName)
     try {
       await writeFile(filePath, output.content, 'utf8')
-      await this.feishu.uploadTaskDelivery(taskGuid, filePath)
+      await this.feishu.uploadTaskDelivery(taskGuid, filePath, context)
     } finally {
       await rm(tempDir, { recursive: true, force: true }).catch(() => {})
     }
   }
 
-  private async commentTaskOrUploadFallback(taskGuid: string, content: string, fallbackTitle: string): Promise<void> {
+  private async commentTaskOrUploadFallback(taskGuid: string, content: string, fallbackTitle: string, context?: FeishuTaskWriteContext): Promise<void> {
     if (isFeishuCommentWithinLimit(content)) {
-      await this.feishu.commentTask(taskGuid, content)
+      await this.feishu.commentTask(taskGuid, content, context)
       return
     }
 
@@ -3023,8 +3032,8 @@ export class FeishuTaskBridgeRuntime {
       title: fallbackTitle,
       format: 'markdown',
       content,
-    })
-    await this.feishu.commentTask(taskGuid, buildOversizedCommentDeliveryNotice(content))
+    }, context)
+    await this.feishu.commentTask(taskGuid, buildOversizedCommentDeliveryNotice(content), context)
   }
 
   private async commentHelpNeededOnce(aampTaskId: string, taskState: BridgeTaskState, message: string): Promise<void> {
@@ -3040,7 +3049,7 @@ export class FeishuTaskBridgeRuntime {
       message,
     ].join('\n')
     this.debugLog(`[aamp result ${aampTaskId}] commenting help-needed on Feishu task ${latestTaskState.taskGuid}`, { taskId: aampTaskId })
-    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-result')
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-result', taskWriteContext(latestTaskState))
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -3060,7 +3069,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting answered result on Feishu task ${latestTaskState.taskGuid}`, { taskId: aampTaskId })
-    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, summary, 'answered-result')
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, summary, 'answered-result', taskWriteContext(latestTaskState))
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -3089,7 +3098,7 @@ export class FeishuTaskBridgeRuntime {
     ].join('\n')
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting result on Feishu task ${latestTaskState.taskGuid}`, { taskId: aampTaskId })
-    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'failed-result')
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'failed-result', taskWriteContext(latestTaskState))
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -3131,7 +3140,7 @@ export class FeishuTaskBridgeRuntime {
     this.feishuInProgressInFlight.add(inFlightKey)
     try {
       this.debugLog(`[feishu task ${taskGuid}] marking in progress for ${aampTaskId}`, { taskId: aampTaskId })
-      await this.feishu.markTaskInProgress(taskGuid)
+      await this.feishu.markTaskInProgress(taskGuid, taskWriteContext(latestTaskState, taskGuid))
 
       const feishuInProgressTaskIds = new Set(latestTaskState.feishuInProgressTaskIds ?? [])
       feishuInProgressTaskIds.add(taskGuid)
@@ -3172,7 +3181,7 @@ export class FeishuTaskBridgeRuntime {
     this.feishuCompleteInFlight.add(inFlightKey)
     try {
       this.debugLog(`[feishu task ${taskGuid}] completing for ${aampTaskId}`, { taskId: aampTaskId })
-      await this.feishu.completeTask(taskGuid)
+      await this.feishu.completeTask(taskGuid, taskWriteContext(latestTaskState, taskGuid))
 
       const feishuCompletedTaskIds = new Set(latestTaskState.feishuCompletedTaskIds ?? [])
       feishuCompletedTaskIds.add(taskGuid)
@@ -3213,7 +3222,7 @@ export class FeishuTaskBridgeRuntime {
     this.feishuBlockInFlight.add(inFlightKey)
     try {
       this.debugLog(`[feishu task ${taskGuid}] marking blocked for ${aampTaskId}`, { taskId: aampTaskId })
-      await this.feishu.markTaskWaitingForHuman(taskGuid)
+      await this.feishu.markTaskWaitingForHuman(taskGuid, taskWriteContext(latestTaskState, taskGuid))
 
       const feishuBlockedTaskIds = new Set(latestTaskState.feishuBlockedTaskIds ?? [])
       feishuBlockedTaskIds.add(taskGuid)

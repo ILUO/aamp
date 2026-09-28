@@ -43,6 +43,8 @@ export type FeishuTaskEventKind = 'task_create' | 'task_comment' | 'task_reminde
 export interface BridgeTaskState {
   taskGuid: string
   aampTaskId: string
+  /** Set only for a controlled execution; legacy event dispatches leave this absent. */
+  executionId?: string
   aampMessageId?: string
   feishuEventId?: string
   feishuEventKind?: FeishuTaskEventKind
@@ -237,6 +239,10 @@ export interface FeishuTaskStepInput {
   quote?: string
 }
 
+export interface FeishuTaskWriteContext {
+  executionId: string
+}
+
 export interface FeishuTaskClient {
   registerAgent(): Promise<void>
   subscribeTaskEvents(): Promise<void>
@@ -250,12 +256,12 @@ export interface FeishuTaskClient {
   getComment(commentId: string): Promise<FeishuTaskComment | null>
   getAppOwner(): Promise<FeishuAppOwner>
   downloadAttachment(attachment: FeishuTaskAttachment): Promise<FeishuDownloadedAttachment>
-  commentTask(taskGuid: string, content: string): Promise<void>
-  appendTaskStep(taskGuid: string, step: string | FeishuTaskStepInput): Promise<void>
-  appendTaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>): Promise<void>
-  appendTextDeliveries(taskGuid: string, urls: string[]): Promise<void>
-  uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void>
-  markTaskInProgress(taskGuid: string): Promise<void>
-  completeTask(taskGuid: string): Promise<void>
-  markTaskWaitingForHuman(taskGuid: string): Promise<void>
+  commentTask(taskGuid: string, content: string, context?: FeishuTaskWriteContext): Promise<void>
+  appendTaskStep(taskGuid: string, step: string | FeishuTaskStepInput, context?: FeishuTaskWriteContext): Promise<void>
+  appendTaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>, context?: FeishuTaskWriteContext): Promise<void>
+  appendTextDeliveries(taskGuid: string, urls: string[], context?: FeishuTaskWriteContext): Promise<void>
+  uploadTaskDelivery(taskGuid: string, filePath: string, context?: FeishuTaskWriteContext): Promise<void>
+  markTaskInProgress(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void>
+  completeTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void>
+  markTaskWaitingForHuman(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void>
 }
