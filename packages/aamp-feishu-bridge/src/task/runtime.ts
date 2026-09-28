@@ -612,6 +612,7 @@ function describeFeishuTaskSubscription(
 }
 
 export type FeishuTaskResultDisposition =
+  | { kind: 'cancelled' }
   | { kind: 'succeeded'; summary: string; outputs: FeishuTaskResultOutput[] }
   | { kind: 'answered'; summary?: string; replyWritten?: boolean }
   | {
@@ -907,6 +908,7 @@ function classifyTaskResultUnredacted(
   result: TaskResult,
   executionLocation: AgentExecutionLocation,
 ): FeishuTaskResultDisposition {
+  if (result.status === 'cancelled') return { kind: 'cancelled' }
   const output = result.output.trim()
   if (result.status === 'rejected') {
     return {
@@ -2660,6 +2662,22 @@ export class FeishuTaskBridgeRuntime {
       const executionLocation = this.config.agent?.executionLocation ?? 'local'
       const disposition = classifyFeishuTaskResult(result, executionLocation)
       try {
+        if (disposition.kind === 'cancelled') {
+          // 当前 Feishu 接口没有停止流转；这里只记录 AAMP 的终态，不调用完成或失败写回。
+          const resultHandledTaskIds = new Set(flushedTaskState.resultHandledTaskIds ?? [])
+          resultHandledTaskIds.add(result.taskId)
+          this.state.tasks[result.taskId] = {
+            ...flushedTaskState,
+            status: 'cancelled',
+            resultHandledTaskIds: [...resultHandledTaskIds],
+            lastError: undefined,
+            updatedAt: new Date().toISOString(),
+          }
+          await this.persistState()
+          this.logger.log(`${formatTaskLogPrefix(flushedTaskState.taskGuid)} result closed aamp_task=${result.taskId} status=cancelled`, { taskId: result.taskId })
+          return
+        }
+
         if (disposition.kind === 'answered') {
           if (disposition.replyWritten === false && disposition.summary) {
             const summary = disposition.summary
@@ -3216,7 +3234,7 @@ export class FeishuTaskBridgeRuntime {
     const now = Date.now()
     let prunedCount = 0
     const terminalTasks = Object.entries(this.state.tasks)
-      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed')
+      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed' || taskState.status === 'cancelled')
 
     for (const [aampTaskId, taskState] of terminalTasks) {
       const updatedAt = Date.parse(taskState.updatedAt)
@@ -3231,7 +3249,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     const remainingTerminalTasks = Object.entries(this.state.tasks)
-      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed')
+      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed' || taskState.status === 'cancelled')
       .sort((a, b) => a[1].updatedAt.localeCompare(b[1].updatedAt))
     const overflow = remainingTerminalTasks.length - MAX_RETAINED_TERMINAL_TASKS
     if (overflow > 0) {

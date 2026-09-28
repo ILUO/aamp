@@ -5,6 +5,7 @@ import { isAbsolute, join } from 'node:path'
 import { test, type TestContext } from 'node:test'
 import {
   AampClient,
+  AAMP_CANCEL_RESULT_CONTEXT_KEY,
   type AampStreamEvent,
   type CreateStreamResult,
   type HydratedTaskDispatch,
@@ -894,6 +895,7 @@ test('stripAampInternalDispatchContext removes session compatibility field witho
     dispatchContext: {
       source: 'feishu-task',
       aamp_session_key: 'feishu-task:task-guid-123',
+      [AAMP_CANCEL_RESULT_CONTEXT_KEY]: 'cancelled',
     },
   }
 
@@ -903,6 +905,7 @@ test('stripAampInternalDispatchContext removes session compatibility field witho
   assert.deepEqual(task.dispatchContext, {
     source: 'feishu-task',
     aamp_session_key: 'feishu-task:task-guid-123',
+    [AAMP_CANCEL_RESULT_CONTEXT_KEY]: 'cancelled',
   })
 })
 
@@ -1158,6 +1161,12 @@ function cancellationTask(taskId: string, overrides: Partial<TaskDispatch> = {})
     bodyText: 'Wait until this task is cancelled.',
     ...overrides,
   }
+}
+
+function controlledCancellationTask(taskId: string): TaskDispatch {
+  return cancellationTask(taskId, {
+    dispatchContext: { source: 'feishu-task', [AAMP_CANCEL_RESULT_CONTEXT_KEY]: 'cancelled' },
+  })
 }
 
 function cancellationEvent(taskId: string): TaskCancel {
@@ -1561,6 +1570,115 @@ test('active task cancellation forwards the exact ACP session and drops a later 
     assert.deepEqual(fakeClient.helps, [])
     assert.equal(events.some((event) => event.type === 'task.completed'), false)
     assert.equal(events.some((event) => event.type === 'task.rejected'), false)
+  } finally {
+    releaseCancellationGates(fakeClient, fakeAcpx)
+    await dispatch.catch(() => undefined)
+  }
+})
+
+test('controlled cancellation reports one terminal result after ACP settles and the stream closes', async (context) => {
+  const taskId = 'controlled-active-cancel'
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeAcpx.gatePrompt = true
+  fakeAcpx.gateCancel = true
+  fakeClient.streamCloseGate.resolve()
+  fakeClient.resultGate.resolve()
+  const dispatch = fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+
+  try {
+    await fakeAcpx.promptStarted.promise
+    const cancel = fakeClient.emitTaskCancel(cancellationEvent(taskId))
+    fakeAcpx.promptGate.resolve({ output: 'late success must be suppressed', events: [], streamedAssistantText: false })
+    assert.deepEqual(fakeClient.results, [], 'cancel forwarding has not completed')
+    fakeAcpx.cancelGate.resolve()
+    await cancel
+    await dispatch
+
+    assert.deepEqual(fakeClient.results, [{
+      to: 'sender@example.com',
+      taskId,
+      status: 'cancelled',
+      output: '',
+      inReplyTo: `<${taskId}@example.com>`,
+    }])
+    assert.equal(fakeAcpx.calls.filter((call) => call.method === 'cancel').length, 1)
+  } finally {
+    releaseCancellationGates(fakeClient, fakeAcpx)
+    await dispatch.catch(() => undefined)
+  }
+})
+
+test('controlled STOP before START reports cancellation without starting ACP', async (context) => {
+  const taskId = 'controlled-early-cancel'
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeClient.resultGate.resolve()
+
+  await fakeClient.emitTaskCancel(cancellationEvent(taskId))
+  await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+  await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+
+  assert.deepEqual(fakeClient.results.map((result) => result.status), ['cancelled'])
+  assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt'), false)
+})
+
+test('controlled task ignores an early cancellation from another sender', async (context) => {
+  const taskId = 'controlled-unrelated-early-cancel'
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  releaseCancellationGates(fakeClient, fakeAcpx)
+
+  await fakeClient.emitTaskCancel({ ...cancellationEvent(taskId), from: 'other@example.com' })
+  await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+
+  assert.deepEqual(fakeClient.results.map((result) => result.status), ['completed'])
+  assert.equal(fakeAcpx.calls.filter((call) => call.method === 'prompt').length, 1)
+})
+
+test('controlled active task ignores a cancellation from another sender', async (context) => {
+  const taskId = 'controlled-unrelated-active-cancel'
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeAcpx.gatePrompt = true
+  fakeClient.streamCloseGate.resolve()
+  fakeClient.resultGate.resolve()
+  const dispatch = fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+
+  try {
+    await fakeAcpx.promptStarted.promise
+    await fakeClient.emitTaskCancel({ ...cancellationEvent(taskId), from: 'other@example.com' })
+    fakeAcpx.promptGate.resolve({ output: 'normal completion', events: [], streamedAssistantText: false })
+    await dispatch
+
+    assert.deepEqual(fakeClient.results.map((result) => result.status), ['completed'])
+    assert.equal(fakeAcpx.calls.filter((call) => call.method === 'cancel').length, 0)
+  } finally {
+    releaseCancellationGates(fakeClient, fakeAcpx)
+    await dispatch.catch(() => undefined)
+  }
+})
+
+test('controlled cancellation does not claim a terminal result if ACP cancellation fails', async (context) => {
+  const taskId = 'controlled-cancel-forward-failure'
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeAcpx.gatePrompt = true
+  fakeAcpx.cancelFailure = new Error('cancel transport unavailable')
+  fakeClient.streamCloseGate.resolve()
+  fakeClient.resultGate.resolve()
+  const dispatch = fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+
+  try {
+    await fakeAcpx.promptStarted.promise
+    await fakeClient.emitTaskCancel(cancellationEvent(taskId))
+    fakeAcpx.promptGate.resolve({
+      output: 'late success after failed cancellation',
+      events: [],
+      streamedAssistantText: false,
+    })
+    await dispatch
+
+    assert.deepEqual(fakeClient.results, [])
+    assert.deepEqual(fakeClient.streamCloses, [{
+      streamId: `stream-${taskId}`,
+      payload: { reason: 'task.cancelled', status: 'cancelled' },
+    }])
   } finally {
     releaseCancellationGates(fakeClient, fakeAcpx)
     await dispatch.catch(() => undefined)

@@ -28,7 +28,7 @@ export interface BridgeConfig {
   }
 }
 
-export type BridgeTaskStatus = 'dispatching' | 'dispatched' | 'acknowledged' | 'help_needed' | 'completed' | 'failed'
+export type BridgeTaskStatus = 'dispatching' | 'dispatched' | 'acknowledged' | 'help_needed' | 'completed' | 'failed' | 'cancelled'
 
 export type FeishuTaskEventKind = 'task_create' | 'task_comment' | 'task_reminder_fire'
 

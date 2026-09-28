@@ -3603,3 +3603,44 @@ test('runtime comments rejected task.result error and completes the Feishu task'
     await rm(configDir, { recursive: true, force: true })
   }
 })
+
+test('runtime records cancelled result as stopped without completing or commenting on the Feishu task', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const taskId = 'feishu-task-task_guid_cancelled-evt_cancelled'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_cancelled',
+      taskGuid: 'task_guid_cancelled',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266157',
+    })
+
+    fakeAamp.emitResult(taskId, { status: 'cancelled' })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[taskId]?.status, 'cancelled'))
+    assert.deepEqual(runtime.getStateSnapshot().tasks[taskId]?.resultHandledTaskIds, [taskId])
+    assert.equal(runtime.getStateSnapshot().tasks[taskId]?.lastError, undefined)
+    assert.deepEqual(fakeFeishu.comments, [])
+    assert.deepEqual(fakeFeishu.completedTaskGuids, [])
+    assert.deepEqual(fakeFeishu.blockedTaskGuids, [])
+    assert.equal((await loadBridgeState(configDir)).tasks[taskId]?.status, 'cancelled')
+
+    fakeAamp.emitResult(taskId, { status: 'completed', output: 'late result' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(runtime.getStateSnapshot().tasks[taskId]?.status, 'cancelled')
+    assert.deepEqual(fakeFeishu.comments, [])
+    assert.deepEqual(fakeFeishu.completedTaskGuids, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
