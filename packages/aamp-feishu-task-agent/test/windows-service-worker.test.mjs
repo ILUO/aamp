@@ -4,6 +4,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 const worker=await import('../bin/windows-service-worker.mjs').catch(()=>({}));
+
+test('worker publishes a terminal failure if recovery throws before readiness',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-worker-state-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const paths={selectionFile:path.join(root,'selection.json'),stopFile:path.join(root,'stop.json'),stateFile:path.join(root,'worker-state.json')};
+ await fs.writeFile(paths.selectionFile,JSON.stringify({generation:'failed-run'}));
+ await assert.rejects(worker.runWindowsServiceWorker({version:1,generation:'failed-run',paths},{runOnce:async()=>{throw Object.assign(new Error('query failed'),{code:'EACCES'})}}),/query failed/);
+ const state=JSON.parse(await fs.readFile(paths.stateFile,'utf8'));
+ assert.equal(state.generation,'failed-run');assert.equal(state.state,'failed');assert.equal(state.errorCode,'EACCES');
+});
 test('worker refuses a stale configuration before spawning a controller',async t=>{
  assert.equal(typeof worker.runWindowsServiceWorker,'function');
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-worker-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));

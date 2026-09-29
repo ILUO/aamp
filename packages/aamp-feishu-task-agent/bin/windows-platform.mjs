@@ -16,6 +16,45 @@ $config = $inputJson | ConvertFrom-Json
 // GetOwnerSid can race with process exit or PID reuse after a CIM snapshot.
 // Never attribute its result (or suppress its failure) without a fresh identity check.
 const POWERSHELL_SNAPSHOT_OWNER = String.raw`
+function Read-LimitedProcessImage([int]$processId) {
+  if (-not ('AampLimitedProcessImage' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public sealed class AampLimitedProcessImage {
+  public DateTime StartTime;
+  public string ImagePath;
+  public bool HasExited;
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(IntPtr handle, out long created, out long exited, out long kernel, out long user);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageNameW(IntPtr handle, uint flags, StringBuilder image, ref uint size);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  static Exception Failure(string stage) {
+    int code = Marshal.GetLastWin32Error();
+    return new Win32Exception(code, stage + " failed (Windows error " + code + ")");
+  }
+  public static AampLimitedProcessImage Read(int pid) {
+    IntPtr handle = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+    if (handle == IntPtr.Zero) throw Failure("OpenProcess for identity query");
+    try {
+      long created, exited, kernel, user;
+      if (!GetProcessTimes(handle, out created, out exited, out kernel, out user)) throw Failure("GetProcessTimes");
+      var result = new AampLimitedProcessImage { StartTime=DateTime.FromFileTimeUtc(created), HasExited=exited != 0 };
+      if (result.HasExited) return result;
+      uint size=32768;
+      var image=new StringBuilder((int)size);
+      if (!QueryFullProcessImageNameW(handle, 0, image, ref size)) throw Failure("QueryFullProcessImageNameW");
+      result.ImagePath=image.ToString();
+      return result;
+    } finally { CloseHandle(handle); }
+  }
+}
+'@
+  }
+  return [AampLimitedProcessImage]::Read($processId)
+}
 function Test-SnapshotProcessStillCurrent($snapshot) {
   $current = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$snapshot.ProcessId)
   if ($null -eq $current) { return $false }
@@ -57,22 +96,23 @@ function Read-VerifiedSnapshot($snapshot) {
   }
   $executablePath = [string]$snapshot.ExecutablePath
   if ([string]::IsNullOrWhiteSpace($executablePath)) {
-    $native = $null
     try {
-      try { $native = [System.Diagnostics.Process]::GetProcessById([int]$snapshot.ProcessId) }
-      catch [System.ArgumentException] { return $null }
-      # Pin a native handle while comparing creation identity and reading its image.
-      $null = $native.Handle
+      # Read creation time and image from one limited-query handle. Reading
+      # MainModule requires more access and fails for an elevated foreground.
+      $native = Read-LimitedProcessImage ([int]$snapshot.ProcessId)
       if ($native.HasExited) { return $null }
       $nativeTicks = $native.StartTime.ToUniversalTime().Ticks
       # CIM timestamps have microsecond precision; native FILETIME has 100ns precision.
       if (($nativeTicks - ($nativeTicks % 10)) -ne $snapshot.CreationDate.ToUniversalTime().Ticks) { return $null }
-      $executablePath = [string]$native.MainModule.FileName
+      $executablePath = [string]$native.ImagePath
       if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
       if ([string]::IsNullOrWhiteSpace($executablePath)) {
         throw 'unable to read process executable path for a verified live process'
       }
-    } finally { if ($null -ne $native) { $native.Dispose() } }
+    } catch {
+      if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+      throw
+    }
   }
   return @{ process = $snapshot; owner = $owner; executablePath = $executablePath }
 }

@@ -5,6 +5,7 @@ import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {recoverWindowsProcessJournals} from './windows-process-journal.mjs';
 import {appendLifecycleDiagnostic} from './windows-lifecycle-diagnostics.mjs';
+import {randomUUID} from 'node:crypto';
 function diagnostic(config,fields) {
   if(config.paths?.logFile) appendLifecycleDiagnostic(path.join(path.dirname(config.paths.logFile),'worker-diagnostic.jsonl'),{generation:config.generation,...fields});
 }
@@ -61,6 +62,16 @@ export async function runWindowsServiceWorker(config, {
   maxRestarts=Infinity,
   restartDelayMs=10000,
 }={}) {
+  const publish = async (state, fields={}) => {
+    if (!config.paths.stateFile) return; // Compatibility with existing worker configs.
+    const temporary=`${config.paths.stateFile}.${randomUUID()}.tmp`;
+    try {
+      await fs.writeFile(temporary,JSON.stringify({version:1,generation:config.generation,pid:process.pid,state,...fields})+'\n',{mode:0o600,flag:'wx'});
+      if(process.platform==='win32') await (await import('./windows-platform.mjs')).atomicReplaceWindows(temporary,config.paths.stateFile);
+      else await fs.rename(temporary,config.paths.stateFile);
+    } finally {await fs.rm(temporary,{force:true});}
+  };
+  try {
   const cancelled=async()=>{
     const selected=JSON.parse(await fs.readFile(config.paths.selectionFile,'utf8'));
     if(selected.generation!==config.generation) throw new Error('Windows service generation changed');
@@ -68,18 +79,26 @@ export async function runWindowsServiceWorker(config, {
     return stop?.generation===config.generation;
   };
   for(let attempt=0;;attempt++) {
-    if(await cancelled()) return 0;
+    if(await cancelled()) {await publish('stopped');return 0;}
+    await publish('starting',{attempt:attempt+1});
     diagnostic(config,{event:'controller.attempt',attempt});
     const code=await runOnce(config);
-    if(code===0 || attempt>=maxRestarts) return code;
+    if(code===0 || attempt>=maxRestarts) {await publish(code===0?'stopped':'failed',{code});return code;}
+    await publish('retrying',{code,attempt:attempt+2});
     diagnostic(config,{event:'controller.retry',code,attempt:attempt+1});
     const retryLimit=Number.isFinite(maxRestarts)?`/${maxRestarts}`:'';
     await fs.appendFile(config.paths.logFile,`[windows-service] controller exited ${code}; retry ${attempt+1}${retryLimit} after ${restartDelayMs}ms\n`);
     for(let elapsed=0;elapsed<restartDelayMs;) {
-      if(await cancelled()) return 0;
+      if(await cancelled()) {await publish('stopped');return 0;}
       const duration=Math.min(200,restartDelayMs-elapsed);
       await wait(duration);elapsed+=duration;
     }
+  }
+  } catch(error) {
+    const errorCode=/^[A-Za-z0-9_-]{1,80}$/.test(String(error.code||error.name)) ? String(error.code||error.name) : 'WORKER_FAILED';
+    const reason=/process.*(identity|executable)|QueryFullProcessImageName|GetProcessTimes|OpenProcess/i.test(error.message||'') ? 'Windows 进程身份查询失败' : '后台进程启动或恢复失败';
+    await publish('failed',{errorCode,reason}).catch(()=>{});
+    throw error;
   }
 }
 if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
