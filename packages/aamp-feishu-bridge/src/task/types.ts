@@ -38,13 +38,16 @@ export interface BridgeConfig {
 
 export type BridgeTaskStatus = 'dispatching' | 'dispatched' | 'acknowledged' | 'help_needed' | 'completed' | 'failed' | 'cancelled'
 
-export type FeishuTaskEventKind = 'task_create' | 'task_comment' | 'task_reminder_fire'
+export type FeishuTaskEventKind = 'task_create' | 'task_comment' | 'task_reminder_fire' | 'task_agent_start' | 'task_agent_stop'
 
 export interface BridgeTaskState {
   taskGuid: string
   aampTaskId: string
   /** Set only for a controlled execution; legacy event dispatches leave this absent. */
   executionId?: string
+  startAccepted?: boolean
+  stopRequested?: boolean
+  reportedExecutionState?: 'RUNNING' | 'BLOCKED' | 'COMPLETED' | 'STOPPED' | 'FAILED'
   aampMessageId?: string
   feishuEventId?: string
   feishuEventKind?: FeishuTaskEventKind
@@ -132,6 +135,8 @@ export interface FeishuTaskEvent {
   eventId: string
   taskGuid: string
   eventTypes: string[]
+  executionId?: string
+  action?: 'START' | 'STOP'
   commentId?: string
   timestamp?: string
   raw?: unknown

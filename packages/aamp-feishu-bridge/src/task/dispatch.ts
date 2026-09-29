@@ -22,8 +22,9 @@ function stableIdPart(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9._:-]+/g, '_') || 'unknown'
 }
 
-export function buildFeishuTaskId(event: Pick<FeishuTaskEvent, 'taskGuid' | 'eventId'>): string {
-  return `feishu-task-${stableIdPart(event.taskGuid)}-${stableIdPart(event.eventId)}`
+export function buildFeishuTaskId(event: Pick<FeishuTaskEvent, 'taskGuid' | 'eventId' | 'eventTypes' | 'executionId'>): string {
+  const controlled = event.eventTypes.includes('task_agent_start') || event.eventTypes.includes('task_agent_stop')
+  return `feishu-task-${stableIdPart(event.taskGuid)}-${stableIdPart(controlled && event.executionId ? event.executionId : event.eventId)}`
 }
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -440,6 +441,7 @@ function renderLocalExecutionRules(options?: FeishuTaskDispatchOptions): string 
     '',
     'Intent Rules:',
     '- For task_create or task_reminder_fire, execute the original delegated task intent. For task_reminder_fire, do not treat it as a follow-up question.',
+    '- For task_agent_start, execute the current delegated task intent for this execution.',
     '- For task_comment, treat the latest effective comment as the new instruction for this delegated task; Task source context remains original background for the delegated task.',
     '- Child tasks are context only: do not write child steps or child deliverables directly.',
     '- If the intent is ambiguous or missing required information, use status=need_help.',

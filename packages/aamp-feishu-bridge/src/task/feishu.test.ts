@@ -3,7 +3,30 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { OapiFeishuTaskClient } from './feishu.js'
+import { normalizeFeishuTaskEvent, OapiFeishuTaskClient } from './feishu.js'
+
+test('controlled Task event preserves command identity from the WebSocket payload', () => {
+  assert.deepEqual(normalizeFeishuTaskEvent({
+    event_id: 'evt_start_1',
+    task_guid: 'task_1',
+    event_types: ['task_agent_start'],
+    execution_id: 'execution_1',
+    action: 'START',
+  }), {
+    eventId: 'evt_start_1',
+    taskGuid: 'task_1',
+    eventTypes: ['task_agent_start'],
+    executionId: 'execution_1',
+    action: 'START',
+    raw: {
+      event_id: 'evt_start_1',
+      task_guid: 'task_1',
+      event_types: ['task_agent_start'],
+      execution_id: 'execution_1',
+      action: 'START',
+    },
+  })
+})
 
 test('controlled write context reaches patch, steps, comment and multipart upload; legacy requests omit it', async () => {
   const writes: Array<{ kind: string; data: Record<string, unknown> }> = []

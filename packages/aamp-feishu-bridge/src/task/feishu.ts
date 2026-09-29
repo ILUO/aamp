@@ -293,11 +293,15 @@ export function normalizeFeishuTaskEvent(raw: unknown, _eventName?: string): Fei
   const timestamp = getString(record?.create_time)
   const eventTypes = getStringArray(record?.event_types) ?? []
   const commentId = getString(record?.comment_id) ?? getString(record?.commentId)
+  const executionId = getString(record?.execution_id)
+  const action = getString(record?.action)
 
   return {
     eventId,
     taskGuid,
     eventTypes: [...new Set(eventTypes)],
+    ...(executionId ? { executionId } : {}),
+    ...(action === 'START' || action === 'STOP' ? { action } : {}),
     ...(commentId ? { commentId } : {}),
     ...(timestamp ? { timestamp } : {}),
     raw,
