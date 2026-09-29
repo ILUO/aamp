@@ -84,3 +84,23 @@ Remote attachments and local file delivery are unsupported. Use text or
 HTTP(S) links for remote results. `aamp-feishu-task-bridge` is deprecated and
 is not an implementation target. AIME `auth` or `doctor` readiness does not
 establish authorization to read a particular group.
+
+## Controlled Task feedback (pending Task OpenAPI publication)
+
+The controlled START/STOP event flow reports command acceptance and execution
+state through two Task OpenAPI routes. Neither route is assumed by AAMP. After
+Task publishes the routes and grants this Bot app access, set both
+`feishu.controlledFeedback.commandResultPath` and
+`feishu.controlledFeedback.executionStatePath` in the Task instance's
+`config.json`. Each value must be the exact root-relative path under
+`/open-apis/task/v2/` returned by the gateway; URLs, query strings and partial
+configuration are rejected. The combined `--enable-task` start path retains
+these values when it refreshes an existing instance config.
+
+The bridge sends both requests with its existing Feishu Bot app credentials,
+domain and environment headers. Older task events continue to work when these
+paths are absent. A controlled START without both paths is rejected before
+dispatch to AAMP. HTTP and nonzero Task API errors are not treated as a
+successful report. The gateway route, scope, and authenticated app identity
+still require real end-to-end verification before controlled execution can be
+used in production.

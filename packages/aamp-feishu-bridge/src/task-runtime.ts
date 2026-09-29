@@ -640,6 +640,7 @@ export async function ensureTaskRuntimeInstanceConfigs(
       ...(feishuHeaders ? { headers: feishuHeaders } : {}),
       userIdType: existingTask?.feishu.userIdType ?? 'open_id',
       eventNames: existingTask?.feishu.eventNames ?? ['task.task.update_user_access_v2'],
+      ...(existingTask?.feishu.controlledFeedback ? { controlledFeedback: existingTask.feishu.controlledFeedback } : {}),
     },
     mailbox: sharedMailbox,
     behavior: resolveTaskRuntimeBehavior(options, existingTask?.behavior),

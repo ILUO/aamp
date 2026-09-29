@@ -10,6 +10,7 @@ import { stdin as input, stdout as output } from 'node:process'
 import { AampClient, isPairingUrl, parsePairingUrl } from 'aamp-sdk'
 import { writePrivateJsonAtomic } from '../private-json.js'
 import type { BridgeConfig, BridgeState } from './types.js'
+import { normalizeControlledFeedbackPaths } from './controlled-feedback.js'
 
 const CONFIG_FILENAME = 'config.json'
 const STATE_FILENAME = 'state.json'
@@ -256,6 +257,7 @@ export function normalizeBridgeConfig(
   if (executionLocation === 'remote' && !appSecret) {
     throw new Error('Feishu App Secret is required for remote Task execution.')
   }
+  const controlledFeedback = normalizeControlledFeedbackPaths(config.feishu.controlledFeedback)
   return {
     version: 1,
     aampHost: config.aampHost,
@@ -272,6 +274,7 @@ export function normalizeBridgeConfig(
       ...(config.feishu.headers ? { headers: config.feishu.headers } : {}),
       userIdType: config.feishu.userIdType ?? 'open_id',
       eventNames: normalizeConfiguredEventNames(config.feishu.eventNames),
+      ...(controlledFeedback ? { controlledFeedback } : {}),
     },
     mailbox: config.mailbox,
     behavior: {
@@ -344,6 +347,7 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
       appSecret,
       userIdType,
       eventNames,
+      ...(existing?.feishu.controlledFeedback ? { controlledFeedback: existing.feishu.controlledFeedback } : {}),
     },
     mailbox: {
       email: mailbox.email,

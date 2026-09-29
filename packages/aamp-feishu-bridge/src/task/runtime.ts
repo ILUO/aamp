@@ -24,7 +24,7 @@ import {
 } from './config.js'
 import type { FeishuTaskDispatchOptions } from './dispatch.js'
 import { buildFeishuTaskDispatch, buildFeishuTaskId } from './dispatch.js'
-import { ControlledTaskFeedbackReporter, type ControlledTaskFeedbackTransport } from './controlled-feedback.js'
+import { ControlledTaskFeedbackReporter, normalizeControlledFeedbackPaths, type ControlledTaskFeedbackTransport } from './controlled-feedback.js'
 import { classifyFeishuTaskEvent } from './events.js'
 import { isRetryableFeishuError, OapiFeishuTaskClient } from './feishu.js'
 import type {
@@ -1645,12 +1645,15 @@ export class FeishuTaskBridgeRuntime {
       smtpPassword: config.mailbox.smtpPassword,
       baseUrl: config.mailbox.baseUrl,
     })
-    this.controlledFeedback = options.controlledFeedbackTransport
-      ? new ControlledTaskFeedbackReporter(options.controlledFeedbackTransport)
-      : undefined
     this.feishu = options.feishuClient ?? new OapiFeishuTaskClient(config.feishu, {
       logger: createDebugLogger(this.logger),
     })
+    const configuredPaths = normalizeControlledFeedbackPaths(config.feishu.controlledFeedback)
+    const configuredTransport = configuredPaths && this.feishu instanceof OapiFeishuTaskClient
+      ? this.feishu.createControlledFeedbackTransport(configuredPaths)
+      : undefined
+    const feedbackTransport = options.controlledFeedbackTransport ?? configuredTransport
+    this.controlledFeedback = feedbackTransport ? new ControlledTaskFeedbackReporter(feedbackTransport) : undefined
   }
 
   async start(options: FeishuTaskBridgeStartOptions = {}): Promise<void> {

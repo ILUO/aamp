@@ -232,6 +232,7 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
   const appId = 'cli_remote'
   const instanceId = `aime-${createHash('sha256').update(agentEmail).digest('hex').slice(0, 8)}-cli-remote`
   const imDir = join(root, 'task-runtime', 'instances', instanceId, 'im')
+  const taskDir = join(root, 'task-runtime', 'instances', instanceId, 'task')
   const mailbox = {
     email: 'bridge@meshmail.test',
     mailboxToken: 'mailbox-token',
@@ -240,6 +241,7 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
   }
   try {
     await mkdir(imDir, { recursive: true })
+    await mkdir(taskDir, { recursive: true })
     await writeFile(join(imDir, 'config.json'), JSON.stringify({
       version: 1,
       aampHost: 'https://meshmail.test',
@@ -248,6 +250,19 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
       feishu: { appId, appSecret: 'remote-secret' },
       mailbox,
       behavior: { streamThrottleMs: 700, streamThrottleChars: 40 },
+    }))
+    const controlledFeedback = {
+      commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+      executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+    }
+    await writeFile(join(taskDir, 'config.json'), JSON.stringify({
+      version: 1,
+      aampHost: 'https://meshmail.test',
+      targetAgentEmail: agentEmail,
+      slug: instanceId,
+      feishu: { appId, appSecret: 'remote-secret', controlledFeedback },
+      mailbox,
+      behavior: { ackComment: true },
     }))
 
     const selection = {
@@ -275,6 +290,7 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
     assert.equal(savedTaskConfig.feishu.authMode, 'app-secret')
     assert.equal(savedTaskConfig.feishu.cliProfile, undefined)
     assert.equal(savedTaskConfig.feishu.cliBin, undefined)
+    assert.deepEqual(savedTaskConfig.feishu.controlledFeedback, controlledFeedback)
     assert.equal(savedImConfig.feishu.authMode, 'app-secret')
     assert.equal(savedImConfig.feishu.cliProfile, undefined)
     assert.equal(savedImConfig.feishu.cliBin, undefined)

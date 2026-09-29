@@ -5,6 +5,70 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { normalizeFeishuTaskEvent, OapiFeishuTaskClient } from './feishu.js'
 
+const feedbackPaths = {
+  commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+  executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+}
+
+test('controlled feedback uses the existing Feishu client identity, domain and environment headers', async () => {
+  const requests: Array<{ method: string; url: string; headers: Record<string, string>; data: Record<string, unknown> }> = []
+  const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', domain: 'https://open.feishu-pre.cn', headers: { 'x-tt-env': 'ppe_test' }, eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu-pre.cn',
+    formatPayload: async (payload: { data: Record<string, unknown> }) => ({
+      params: {},
+      data: payload.data,
+      headers: { Authorization: 'Bearer app-token', 'x-tt-env': 'ppe_test' },
+    }),
+    httpInstance: { request: async (request: { method: string; url: string; headers: Record<string, string>; data: Record<string, unknown> }) => {
+      requests.push(request)
+      return { code: 0, msg: 'success' }
+    } },
+  }
+
+  const feedback = client.createControlledFeedbackTransport(feedbackPaths)
+  await feedback.reportCommandResult({ task_guid: 'task_1', execution_id: 'run_1', action: 1, result: 1 })
+  await feedback.reportExecutionState({ task_guid: 'task_1', execution_id: 'run_1', state: 3 })
+
+  assert.deepEqual(requests, [
+    { method: 'POST', url: `https://open.feishu-pre.cn${feedbackPaths.commandResultPath}`, params: {}, headers: { Authorization: 'Bearer app-token', 'x-tt-env': 'ppe_test' }, data: { task_guid: 'task_1', execution_id: 'run_1', action: 1, result: 1 } },
+    { method: 'POST', url: `https://open.feishu-pre.cn${feedbackPaths.executionStatePath}`, params: {}, headers: { Authorization: 'Bearer app-token', 'x-tt-env': 'ppe_test' }, data: { task_guid: 'task_1', execution_id: 'run_1', state: 3 } },
+  ])
+})
+
+test('controlled feedback retries HTTP 503 and rejects a nonzero or missing API code', async () => {
+  const responses: Array<unknown> = [
+    Object.assign(new Error('unavailable'), { response: { status: 503 } }),
+    { code: 0, msg: 'success' },
+    { code: 1254301, msg: 'forbidden' },
+    { data: {} },
+  ]
+  let attempts = 0
+  const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} }, retryBaseDelayMs: 0, retryMaxAttempts: 2,
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu.cn',
+    formatPayload: async (payload: { data: Record<string, unknown> }) => ({ params: {}, data: payload.data, headers: {} }),
+    httpInstance: { request: async () => {
+      const response = responses[attempts++]
+      if (response instanceof Error) throw response
+      return response
+    } },
+  }
+  const feedback = client.createControlledFeedbackTransport(feedbackPaths)
+  const body = { task_guid: 'task_1', execution_id: 'run_1', action: 1 as const, result: 1 as const }
+
+  await feedback.reportCommandResult(body)
+  assert.equal(attempts, 2)
+  await assert.rejects(feedback.reportCommandResult(body), /1254301/)
+  assert.equal(attempts, 3)
+  await assert.rejects(feedback.reportCommandResult(body), /missing.*code/i)
+  assert.equal(attempts, 4)
+})
+
 test('controlled Task event preserves command identity from the WebSocket payload', () => {
   assert.deepEqual(normalizeFeishuTaskEvent({
     event_id: 'evt_start_1',

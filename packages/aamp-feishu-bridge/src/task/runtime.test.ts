@@ -18,6 +18,7 @@ import {
   sanitizeTaskVisibleFailureReason,
 } from './runtime.js'
 import type { ControlledTaskFeedbackTransport, ReportAgentTaskCommandResultBody, ReportAgentTaskExecutionStateBody } from './controlled-feedback.js'
+import { OapiFeishuTaskClient } from './feishu.js'
 import type {
   BridgeConfig,
   FeishuDownloadedAttachment,
@@ -703,6 +704,46 @@ test('controlled START without feedback transport never sends work to AAMP', asy
     await runtime.start()
     await assert.rejects(feishu.emit({ eventId: 'evt_start_no_transport', taskGuid: 'task_controlled_no_transport', eventTypes: ['task_agent_start'], executionId: 'execution_1', action: 'START' }), /feedback transport is not configured/)
     assert.deepEqual(aamp.sentTasks, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('configured Task OpenAPI feedback is used by the real runtime without a test transport', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-http-'))
+  const config = buildConfig()
+  config.feishu.domain = 'https://open.feishu-pre.cn'
+  config.feishu.controlledFeedback = {
+    commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+    executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+  }
+  const requests: Array<{ url: string; data: Record<string, unknown> }> = []
+  const feishu = new OapiFeishuTaskClient(config.feishu, { logger: { log: () => {}, error: () => {} } })
+  let onEvent: ((event: FeishuTaskEvent) => Promise<void>) | undefined
+  feishu.registerAgent = async () => {}
+  feishu.subscribeTaskEvents = async () => {}
+  feishu.start = async (handler) => { onEvent = handler }
+  feishu.stop = async () => {}
+  ;(feishu as unknown as { client: unknown }).client = {
+    domain: config.feishu.domain,
+    formatPayload: async (payload: { data: Record<string, unknown> }) => ({ params: {}, data: payload.data, headers: { Authorization: 'Bearer app-token' } }),
+    httpInstance: { request: async (request: { url: string; data: Record<string, unknown> }) => {
+      requests.push(request)
+      return { code: 0, msg: 'success' }
+    } },
+  }
+  const aamp = new FakeAampClient()
+  const runtime = new FeishuTaskBridgeRuntime(config, { configDir, aampClient: aamp, feishuClient: feishu, logger: { log: () => {}, error: () => {} } })
+  try {
+    await runtime.start()
+    assert.ok(onEvent)
+    await onEvent({ eventId: 'evt_stop_http', taskGuid: 'task_1', eventTypes: ['task_agent_stop'], executionId: 'run_1', action: 'STOP' })
+    assert.deepEqual(requests.map(({ url, data }) => [url, data]), [
+      ['https://open.feishu-pre.cn/open-apis/task/v2/agent_task_execution/report_command_result', { task_guid: 'task_1', execution_id: 'run_1', action: 2, result: 1 }],
+      ['https://open.feishu-pre.cn/open-apis/task/v2/agent_task_execution/report_execution_state', { task_guid: 'task_1', execution_id: 'run_1', state: 4 }],
+    ])
+    assert.deepEqual(aamp.cancelRequests, [])
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

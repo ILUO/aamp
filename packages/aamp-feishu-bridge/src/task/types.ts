@@ -7,6 +7,11 @@ export interface BridgeMailboxIdentity {
 
 export type AgentExecutionLocation = 'local' | 'remote'
 
+export interface ControlledFeedbackPaths {
+  commandResultPath: string
+  executionStatePath: string
+}
+
 export interface TaskRuntimeAgentDescriptor {
   type: string
   executionLocation: AgentExecutionLocation
@@ -28,6 +33,8 @@ export interface BridgeConfig {
     headers?: Record<string, string>
     userIdType?: 'open_id' | 'user_id' | 'union_id'
     eventNames: string[]
+    /** Optional until the two Task OpenAPI routes and their app permissions are published. */
+    controlledFeedback?: ControlledFeedbackPaths
   }
   mailbox: BridgeMailboxIdentity
   behavior: {

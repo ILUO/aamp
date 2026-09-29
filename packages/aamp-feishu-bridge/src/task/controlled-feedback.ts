@@ -1,4 +1,6 @@
-/** These values match the proposed Task OpenAPI IDL; no route is wired yet. */
+import type { ControlledFeedbackPaths } from './types.js'
+
+/** These values match the proposed Task OpenAPI IDL; no route is assumed. */
 export type AgentTaskCommandAction = 'START' | 'STOP'
 export type AgentTaskCommandResult = 'ACCEPTED' | 'REJECTED'
 export type AgentTaskExecutionState = 'RUNNING' | 'BLOCKED' | 'COMPLETED' | 'STOPPED' | 'FAILED'
@@ -37,6 +39,21 @@ export interface ReportAgentTaskExecutionStateBody {
 export interface ControlledTaskFeedbackTransport {
   reportCommandResult(body: ReportAgentTaskCommandResultBody): Promise<void>
   reportExecutionState(body: ReportAgentTaskExecutionStateBody): Promise<void>
+}
+
+/** Only relative Task OpenAPI routes may receive this app's bearer token. */
+export function normalizeControlledFeedbackPaths(paths: ControlledFeedbackPaths | undefined): ControlledFeedbackPaths | undefined {
+  if (!paths) return undefined
+  const commandResultPath = paths.commandResultPath?.trim()
+  const executionStatePath = paths.executionStatePath?.trim()
+  if (!commandResultPath || !executionStatePath) {
+    throw new Error('Controlled Task feedback requires both command and execution state paths')
+  }
+  const safePath = /^\/open-apis\/task\/v2\/[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/
+  if (!safePath.test(commandResultPath) || !safePath.test(executionStatePath)) {
+    throw new Error('Controlled Task feedback requires a relative Task OpenAPI path')
+  }
+  return { commandResultPath, executionStatePath }
 }
 
 const COMMAND_ACTION = { START: 1, STOP: 2 } as const

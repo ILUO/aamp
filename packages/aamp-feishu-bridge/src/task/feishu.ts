@@ -10,6 +10,7 @@ import {
 import { createReadStream } from 'node:fs'
 import type {
   BridgeConfig,
+  ControlledFeedbackPaths,
   FeishuAppOwner,
   FeishuDownloadedAttachment,
   FeishuTaskAttachment,
@@ -26,6 +27,7 @@ import type {
   FeishuTaskSubtask,
 } from './types.js'
 import { resolveLarkCliProfileCredentialsFromDisk } from '../feishu-cli.js'
+import { normalizeControlledFeedbackPaths, type ControlledTaskFeedbackTransport } from './controlled-feedback.js'
 
 type FeishuConfig = BridgeConfig['feishu']
 type Logger = Pick<Console, 'error' | 'log'>
@@ -505,6 +507,35 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       loggerLevel: LoggerLevel.info,
       source: 'aamp-feishu-task-bridge',
     })
+  }
+
+  createControlledFeedbackTransport(paths: ControlledFeedbackPaths): ControlledTaskFeedbackTransport {
+    const normalized = normalizeControlledFeedbackPaths(paths)
+    if (!normalized) throw new Error('Controlled Task feedback paths are not configured')
+    return {
+      reportCommandResult: (body) => this.postControlledFeedback(normalized.commandResultPath, { ...body }),
+      reportExecutionState: (body) => this.postControlledFeedback(normalized.executionStatePath, { ...body }),
+    }
+  }
+
+  private async postControlledFeedback(path: string, body: Record<string, unknown>): Promise<void> {
+    const rawClient = this.client as RawClient
+    const http = rawClient.httpInstance
+    const domain = rawClient.domain
+    if (!rawClient.formatPayload || !http || !domain) {
+      throw new Error('Controlled Task feedback is unavailable in this @larksuiteoapi/node-sdk version')
+    }
+    const formatted = await rawClient.formatPayload({ params: {}, data: body })
+    const response = await withRetry(() => http.request({
+      method: 'POST',
+      url: `${domain.replace(/\/$/, '')}${path}`,
+      params: formatted.params,
+      data: formatted.data,
+      headers: formatted.headers,
+    }), this.retry, this.logger, `controlled_task_feedback task=${body.task_guid}`)
+    const code = getNumber(asRecord(response)?.code)
+    if (code === undefined) throw new Error('Controlled Task feedback response is missing API code')
+    if (code !== 0) throw new Error(`Controlled Task feedback failed with API code ${code}`)
   }
 
   async registerAgent(): Promise<void> {
