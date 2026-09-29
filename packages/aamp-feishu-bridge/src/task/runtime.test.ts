@@ -19,6 +19,7 @@ import {
 } from './runtime.js'
 import type { ControlledTaskFeedbackTransport, ReportAgentTaskCommandResultBody, ReportAgentTaskExecutionStateBody } from './controlled-feedback.js'
 import { OapiFeishuTaskClient } from './feishu.js'
+import { createDefaultBridgeState, loadBridgeState, saveBridgeState } from './config.js'
 import type {
   BridgeConfig,
   FeishuDownloadedAttachment,
@@ -362,6 +363,23 @@ function controlledFeedbackRecords(): {
   }
 }
 
+async function seedControlledExecution(configDir: string, taskGuid: string, executionId: string): Promise<string> {
+  const aampTaskId = `feishu-task-${taskGuid}-${executionId}`
+  const now = new Date().toISOString()
+  const state = createDefaultBridgeState()
+  state.tasks[aampTaskId] = {
+    taskGuid,
+    aampTaskId,
+    executionId,
+    aampMessageId: 'aamp_message_1',
+    status: 'dispatched',
+    createdAt: now,
+    updatedAt: now,
+  }
+  await saveBridgeState(state, configDir)
+  return aampTaskId
+}
+
 test('controlled START dispatches once by execution ID and reports acceptance without setting RUNNING', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-'))
   const aamp = new FakeAampClient()
@@ -425,7 +443,7 @@ test('controlled STOP cancels only its execution and does not use legacy complet
       taskId: 'feishu-task-task_controlled_1-execution_1',
       inReplyTo: 'aamp_message_1',
     }])
-    assert.deepEqual(feedback.commands.map(({ action, result }) => [action, result]), [[1, 1], [2, 2], [2, 1]])
+    assert.deepEqual(feedback.commands.map(({ action, result }) => [action, result]), [[1, 1], [2, 1]])
     assert.deepEqual(feishu.writes, [])
   } finally {
     await runtime.stop()
@@ -451,8 +469,120 @@ test('controlled STOP received first prevents a late START of the same execution
     await feishu.emit({ eventId: 'evt_start_late', taskGuid: 'task_controlled_1', eventTypes: ['task_agent_start'], executionId: 'execution_1', action: 'START' })
     assert.deepEqual(aamp.sentTasks, [])
     assert.deepEqual(aamp.cancelRequests, [])
-    assert.deepEqual(feedback.commands.map(({ action, result }) => [action, result]), [[2, 1], [1, 2]])
-    assert.deepEqual(feedback.states.map(({ state }) => state), [4])
+    assert.deepEqual(feedback.commands, [])
+    assert.deepEqual(feedback.states, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('only the bridge holding an execution reports STOP across two instances', async () => {
+  const ownerDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-owner-'))
+  const otherDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-other-'))
+  const ownerAamp = new FakeAampClient()
+  const otherAamp = new FakeAampClient()
+  const ownerFeishu = new FakeFeishuTaskClient()
+  const otherFeishu = new FakeFeishuTaskClient()
+  const ownerFeedback = controlledFeedbackRecords()
+  const otherFeedback = controlledFeedbackRecords()
+  const owner = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir: ownerDir, aampClient: ownerAamp, feishuClient: ownerFeishu,
+    controlledFeedbackTransport: ownerFeedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const other = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir: otherDir, aampClient: otherAamp, feishuClient: otherFeishu,
+    controlledFeedbackTransport: otherFeedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const taskGuid = 'task_controlled_two_bridges'
+  const executionId = 'execution_1'
+  const taskId = `feishu-task-${taskGuid}-${executionId}`
+  try {
+    await owner.start()
+    await other.start()
+    await ownerFeishu.emit({ eventId: 'evt_owner_start', taskGuid, eventTypes: ['task_agent_start'], executionId, action: 'START' })
+    ownerAamp.emitAck(taskId)
+    await waitFor(() => assert.equal(ownerFeedback.commands.length, 1))
+
+    const stopEvent: FeishuTaskEvent = { eventId: 'evt_both_stop', taskGuid, eventTypes: ['task_agent_stop'], executionId, action: 'STOP' }
+    await otherFeishu.emit(stopEvent)
+    await ownerFeishu.emit(stopEvent)
+    assert.deepEqual(otherFeedback.commands, [])
+    assert.deepEqual(otherFeedback.states, [])
+    assert.deepEqual(otherAamp.cancelRequests, [])
+    assert.deepEqual(ownerFeedback.commands.map(({ action, result }) => [action, result]), [[1, 1], [2, 1]])
+    assert.deepEqual(ownerAamp.cancelRequests.map(({ taskId: cancelledTaskId }) => cancelledTaskId), [taskId])
+
+    await ownerFeishu.emit({ ...stopEvent, eventId: 'evt_owner_stop_again' })
+    assert.deepEqual(ownerFeedback.commands.map(({ action, result }) => [action, result]), [[1, 1], [2, 1], [2, 1]])
+    assert.equal(ownerAamp.cancelRequests.length, 1)
+
+    ownerAamp.emitResult(taskId, { status: 'cancelled' })
+    await waitFor(() => assert.deepEqual(ownerFeedback.states.map(({ state }) => state), [4]))
+    await ownerFeishu.emit({ ...stopEvent, eventId: 'evt_owner_stop_after_terminal' })
+    assert.deepEqual(ownerFeedback.commands.map(({ action, result }) => [action, result]), [[1, 1], [2, 1], [2, 1]])
+    assert.deepEqual(ownerFeedback.states.map(({ state }) => state), [4, 4])
+    assert.equal(ownerAamp.cancelRequests.length, 1)
+  } finally {
+    await owner.stop()
+    await other.stop()
+    await rm(ownerDir, { recursive: true, force: true })
+    await rm(otherDir, { recursive: true, force: true })
+  }
+})
+
+test('a local task ID with another execution does not report STOP for this execution', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-mismatch-'))
+  const taskGuid = 'task_controlled_mismatch'
+  const executionId = 'execution_1'
+  const taskId = await seedControlledExecution(configDir, taskGuid, executionId)
+  const state = await loadBridgeState(configDir)
+  state.tasks[taskId]!.executionId = 'another_execution'
+  await saveBridgeState(state, configDir)
+  const aamp = new FakeAampClient()
+  const feishu = new FakeFeishuTaskClient()
+  const feedback = controlledFeedbackRecords()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu,
+    controlledFeedbackTransport: feedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await runtime.start()
+    await feishu.emit({ eventId: 'evt_stop_mismatch', taskGuid, eventTypes: ['task_agent_stop'], executionId, action: 'STOP' })
+    assert.deepEqual(feedback.commands, [])
+    assert.deepEqual(feedback.states, [])
+    assert.deepEqual(aamp.cancelRequests, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('terminal local task without a recorded outcome does not invent STOP feedback', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-terminal-'))
+  const taskGuid = 'task_controlled_failed_start'
+  const executionId = 'execution_1'
+  const taskId = await seedControlledExecution(configDir, taskGuid, executionId)
+  const state = await loadBridgeState(configDir)
+  state.tasks[taskId]!.status = 'failed'
+  await saveBridgeState(state, configDir)
+  const aamp = new FakeAampClient()
+  const feishu = new FakeFeishuTaskClient()
+  const feedback = controlledFeedbackRecords()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu,
+    controlledFeedbackTransport: feedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await runtime.start()
+    await feishu.emit({ eventId: 'evt_stop_failed_start', taskGuid, eventTypes: ['task_agent_stop'], executionId, action: 'STOP' })
+    assert.deepEqual(feedback.commands, [])
+    assert.deepEqual(feedback.states, [])
+    assert.deepEqual(aamp.cancelRequests, [])
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -712,6 +842,7 @@ test('controlled START without feedback transport never sends work to AAMP', asy
 
 test('configured Task OpenAPI feedback is used by the real runtime without a test transport', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-http-'))
+  const taskId = await seedControlledExecution(configDir, 'task_1', 'run_1')
   const config = buildConfig()
   config.feishu.domain = 'https://open.feishu-pre.cn'
   config.feishu.controlledFeedback = {
@@ -741,9 +872,14 @@ test('configured Task OpenAPI feedback is used by the real runtime without a tes
     await onEvent({ eventId: 'evt_stop_http', taskGuid: 'task_1', eventTypes: ['task_agent_stop'], executionId: 'run_1', action: 'STOP' })
     assert.deepEqual(requests.map(({ url, data }) => [url, data]), [
       ['https://open.feishu-pre.cn/open-apis/task/v2/agent_task_execution/report_command_result', { task_guid: 'task_1', execution_id: 'run_1', action: 2, result: 1 }],
+    ])
+    aamp.emitResult(taskId, { status: 'cancelled' })
+    await waitFor(() => assert.equal(requests.length, 2))
+    assert.deepEqual(requests.map(({ url, data }) => [url, data]), [
+      ['https://open.feishu-pre.cn/open-apis/task/v2/agent_task_execution/report_command_result', { task_guid: 'task_1', execution_id: 'run_1', action: 2, result: 1 }],
       ['https://open.feishu-pre.cn/open-apis/task/v2/agent_task_execution/report_execution_state', { task_guid: 'task_1', execution_id: 'run_1', state: 4 }],
     ])
-    assert.deepEqual(aamp.cancelRequests, [])
+    assert.deepEqual(aamp.cancelRequests.map(({ taskId: cancelledTaskId }) => cancelledTaskId), [taskId])
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -773,6 +909,7 @@ test('legacy task_create cannot start a second execution while a controlled roun
 
 test('controlled STOP retries the same event when feedback submission fails', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-'))
+  const taskId = await seedControlledExecution(configDir, 'task_controlled_retry', 'execution_1')
   const aamp = new FakeAampClient()
   const feishu = new FakeFeishuTaskClient()
   let commandAttempts = 0
@@ -797,8 +934,8 @@ test('controlled STOP retries the same event when feedback submission fails', as
     await feishu.emit(event)
     assert.equal(commandAttempts, 2)
     assert.deepEqual(commands, [{ task_guid: 'task_controlled_retry', execution_id: 'execution_1', action: 2, result: 1 }])
-    assert.deepEqual(states, [{ task_guid: 'task_controlled_retry', execution_id: 'execution_1', state: 4 }])
-    assert.deepEqual(aamp.cancelRequests, [])
+    assert.deepEqual(states, [])
+    assert.deepEqual(aamp.cancelRequests.map(({ taskId: cancelledTaskId }) => cancelledTaskId), [taskId])
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

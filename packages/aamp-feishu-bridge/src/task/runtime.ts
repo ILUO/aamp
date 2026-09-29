@@ -2385,31 +2385,26 @@ export class FeishuTaskBridgeRuntime {
     const stopKey = `task_agent_stop:${event.taskGuid}:${executionId}`
     if (kind === 'task_agent_stop') {
       const taskState = this.state.tasks[aampTaskId]
-      const otherRoundActive = Object.values(this.state.tasks).some((state) =>
-        state.taskGuid === event.taskGuid && state.executionId !== executionId
-          && state.status !== 'completed' && state.status !== 'failed' && state.status !== 'cancelled')
-      if (!taskState && otherRoundActive) {
-        await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'REJECTED', reason: 'execution does not match the active task' })
-        this.rememberEvent(event)
-        await this.persistState()
-        return
-      }
-      if (!taskState) {
-        await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'ACCEPTED' })
-        await feedback.reportExecutionState({ taskGuid: event.taskGuid, executionId, state: 'STOPPED' })
+      if (!taskState || taskState.executionId !== executionId) {
+        // Another bridge instance may own this execution. Keep the local STOP marker
+        // so a delayed START is not dispatched here, but never report on its behalf.
         this.rememberEvent(event, stopKey)
         await this.persistState()
         return
       }
-      if (taskState.executionId !== executionId) {
-        await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'REJECTED', reason: 'execution ID mismatch' })
-        this.rememberEvent(event)
-        await this.persistState()
-        return
-      }
       if (['completed', 'failed', 'cancelled'].includes(taskState.status)) {
-        await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'REJECTED', reason: 'execution already finished' })
-        this.rememberEvent(event)
+        const terminalState = taskState.reportedExecutionState
+        if ((taskState.status === 'completed' && terminalState === 'COMPLETED') ||
+          (taskState.status === 'failed' && terminalState === 'FAILED') ||
+          (taskState.status === 'cancelled' && terminalState === 'STOPPED')) {
+          // Re-send the outcome we actually observed; rejecting STOP could incorrectly
+          // restore Task to RUNNING if its previous terminal feedback was not applied.
+          await feedback.reportExecutionState({
+            taskGuid: event.taskGuid, executionId, state: terminalState,
+            ...(taskState.lastError ? { reason: taskState.lastError } : {}),
+          })
+        }
+        this.rememberEvent(event, stopKey)
         await this.persistState()
         return
       }
@@ -2444,7 +2439,8 @@ export class FeishuTaskBridgeRuntime {
     }
 
     if (this.state.dedupSemanticEventKeys[stopKey]) {
-      await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'REJECTED', reason: 'STOP was already received' })
+      // Seeing STOP first only proves this bridge must not start the round;
+      // another bridge may already own it, so do not reject START for Task.
       this.rememberEvent(event)
       await this.persistState()
       return
