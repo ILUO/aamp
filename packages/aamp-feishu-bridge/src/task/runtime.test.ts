@@ -64,6 +64,7 @@ class FakeAampClient {
   sentTasks: SendTaskOptions[] = []
   cancelRequests: Array<{ to: string; taskId: string; inReplyTo?: string }> = []
   sendCancelHold?: Promise<void>
+  sendCancelError?: Error
   sendTaskError?: Error
 
   on(event: 'connected', handler: () => void): void
@@ -99,6 +100,7 @@ class FakeAampClient {
 
   async sendCancel(opts: { to: string; taskId: string; inReplyTo?: string }): Promise<void> {
     this.cancelRequests.push(opts)
+    if (this.sendCancelError) throw this.sendCancelError
     await this.sendCancelHold
   }
 
@@ -379,6 +381,75 @@ async function seedControlledExecution(configDir: string, taskGuid: string, exec
   await saveBridgeState(state, configDir)
   return aampTaskId
 }
+
+test('controlled BLOCKED ownership survives 30-day pruning and STOP after restart cancels the same execution', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-blocked-'))
+  const taskGuid = 'task_controlled_blocked'
+  const executionId = 'execution_1'
+  const aampTaskId = await seedControlledExecution(configDir, taskGuid, executionId)
+  const state = await loadBridgeState(configDir)
+  const oldTimestamp = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString()
+  state.tasks[aampTaskId]!.status = 'help_needed'
+  state.tasks[aampTaskId]!.reportedExecutionState = 'BLOCKED'
+  state.tasks[aampTaskId]!.updatedAt = oldTimestamp
+  state.tasks.legacy_help = {
+    taskGuid: 'legacy_task', aampTaskId: 'legacy_help', status: 'help_needed',
+    createdAt: oldTimestamp, updatedAt: oldTimestamp,
+  }
+  await saveBridgeState(state, configDir)
+
+  const aamp = new FakeAampClient()
+  const feishu = new FakeFeishuTaskClient()
+  const feedback = controlledFeedbackRecords()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu,
+    controlledFeedbackTransport: feedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await runtime.start()
+    assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'help_needed')
+    assert.equal(runtime.getStateSnapshot().tasks.legacy_help, undefined)
+
+    await feishu.emit({ eventId: 'evt_stop_old_blocked', taskGuid, eventTypes: ['task_agent_stop'], executionId, action: 'STOP' })
+    assert.deepEqual(aamp.cancelRequests, [{ to: 'agent@meshmail.ai', taskId: aampTaskId, inReplyTo: 'aamp_message_1' }])
+    assert.deepEqual(feedback.commands, [{ task_guid: taskGuid, execution_id: executionId, action: 2, result: 1 }])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('STOP after a retained BLOCKED restart reports rejection when cancellation cannot be sent', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-blocked-'))
+  const taskGuid = 'task_controlled_blocked_unavailable'
+  const executionId = 'execution_1'
+  const aampTaskId = await seedControlledExecution(configDir, taskGuid, executionId)
+  const state = await loadBridgeState(configDir)
+  state.tasks[aampTaskId]!.status = 'help_needed'
+  state.tasks[aampTaskId]!.updatedAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString()
+  await saveBridgeState(state, configDir)
+
+  const aamp = new FakeAampClient()
+  aamp.sendCancelError = new Error('AAMP cancellation unavailable')
+  const feishu = new FakeFeishuTaskClient()
+  const feedback = controlledFeedbackRecords()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu,
+    controlledFeedbackTransport: feedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await runtime.start()
+    await feishu.emit({ eventId: 'evt_stop_old_blocked_failed', taskGuid, eventTypes: ['task_agent_stop'], executionId, action: 'STOP' })
+    assert.deepEqual(aamp.cancelRequests.map(({ taskId }) => taskId), [aampTaskId])
+    assert.deepEqual(feedback.commands, [{ task_guid: taskGuid, execution_id: executionId, action: 2, result: 2, reason: 'AAMP cancellation unavailable' }])
+    assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.stopRequested, undefined)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
 
 test('controlled START dispatches once by execution ID and reports acceptance without setting RUNNING', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-'))

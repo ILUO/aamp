@@ -3598,8 +3598,13 @@ export class FeishuTaskBridgeRuntime {
   private pruneTaskState(): number {
     const now = Date.now()
     let prunedCount = 0
+    // Controlled help_needed means Task is still BLOCKED in the current execution.
+    // Keep its local ownership record so a later STOP can reach that AAMP task.
+    const isPrunableTerminalTask = (taskState: BridgeTaskState): boolean =>
+      (taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'cancelled'
+        || taskState.status === 'help_needed' && !taskState.executionId)
     const terminalTasks = Object.entries(this.state.tasks)
-      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed' || taskState.status === 'cancelled')
+      .filter(([, taskState]) => isPrunableTerminalTask(taskState))
 
     for (const [aampTaskId, taskState] of terminalTasks) {
       const updatedAt = Date.parse(taskState.updatedAt)
@@ -3614,7 +3619,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     const remainingTerminalTasks = Object.entries(this.state.tasks)
-      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed' || taskState.status === 'cancelled')
+      .filter(([, taskState]) => isPrunableTerminalTask(taskState))
       .sort((a, b) => a[1].updatedAt.localeCompare(b[1].updatedAt))
     const overflow = remainingTerminalTasks.length - MAX_RETAINED_TERMINAL_TASKS
     if (overflow > 0) {
