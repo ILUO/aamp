@@ -26,7 +26,7 @@ import type { FeishuTaskDispatchOptions } from './dispatch.js'
 import { buildFeishuTaskDispatch, buildFeishuTaskId } from './dispatch.js'
 import { ControlledTaskFeedbackReporter, normalizeControlledFeedbackPaths, type ControlledTaskFeedbackTransport } from './controlled-feedback.js'
 import { classifyFeishuTaskEvent } from './events.js'
-import { CONTROLLED_EXECUTION_PROTOCOL_VERSION, isRetryableFeishuError, OapiFeishuTaskClient } from './feishu.js'
+import { isRetryableFeishuError, OapiFeishuTaskClient } from './feishu.js'
 import type {
   AgentExecutionLocation,
   BridgeConfig,
@@ -536,14 +536,12 @@ function buildFeishuTaskDispatchOptions(config: BridgeConfig): FeishuTaskDispatc
 
 function buildFeishuAgentRegistrationIdentity(
   config: BridgeConfig,
-  controlledExecutionProtocolVersion?: number,
 ): Omit<FeishuAgentRegistrationState, 'registeredAt'> {
   const env = getFeishuEnvHeader(config.feishu.headers)
   return {
     appId: config.feishu.appId,
     domain: normalizeDomain(config.feishu.domain) ?? 'default',
     ...(env ? { env } : {}),
-    ...(controlledExecutionProtocolVersion === undefined ? {} : { controlledExecutionProtocolVersion }),
   }
 }
 
@@ -579,7 +577,6 @@ function hasMatchingFeishuAgentRegistration(
     && current?.appId === expected.appId
     && current?.domain === expected.domain
     && (current?.env ?? undefined) === (expected.env ?? undefined)
-    && !(current?.controlledExecutionProtocolVersion && !expected.controlledExecutionProtocolVersion)
 }
 
 function hasMatchingFeishuTaskSubscription(
@@ -611,7 +608,6 @@ function describeFeishuAgentRegistration(
     `app=${registration.appId}`,
     `domain=${registration.domain}`,
     `env=${registration.env ?? '(none)'}`,
-    `controlledProtocol=${registration.controlledExecutionProtocolVersion ?? '(none)'}`,
   ].join(' ')
 }
 
@@ -1738,14 +1734,12 @@ export class FeishuTaskBridgeRuntime {
   }
 
   private async ensureFeishuAgentRegistered(): Promise<void> {
-    const protocolVersion = this.controlledFeedback ? CONTROLLED_EXECUTION_PROTOCOL_VERSION : undefined
-    const expected = buildFeishuAgentRegistrationIdentity(this.config, protocolVersion)
+    const expected = buildFeishuAgentRegistrationIdentity(this.config)
     this.logger.log(`[feishu agent] registering ${describeFeishuAgentRegistration(expected)}`)
     try {
-      await this.feishu.registerAgent(protocolVersion)
+      await this.feishu.registerAgent()
     } catch (error) {
       // A prior registration can still serve legacy tasks during a transient failure.
-      // Do not upgrade the cached protocol version after an unconfirmed refresh.
       if (!hasMatchingFeishuAgentRegistration(this.state.agentRegistration, expected)) throw error
       const message = error instanceof Error ? error.message : String(error)
       this.state.lastError = message

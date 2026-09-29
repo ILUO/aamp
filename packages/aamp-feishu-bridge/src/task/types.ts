@@ -83,8 +83,6 @@ export interface FeishuAgentRegistrationState {
   appId: string
   domain: string
   env?: string
-  /** Missing in local state written before controlled execution support. */
-  controlledExecutionProtocolVersion?: number
   registeredAt: string
 }
 
@@ -258,7 +256,7 @@ export interface FeishuTaskWriteContext {
 }
 
 export interface FeishuTaskClient {
-  registerAgent(controlledExecutionProtocolVersion?: number): Promise<void>
+  registerAgent(): Promise<void>
   subscribeTaskEvents(): Promise<void>
   registerEventHandlers(register: (handlers: Record<string, (data: unknown) => void>) => void, onEvent: (event: FeishuTaskEvent) => Promise<void>): void
   start(onEvent: (event: FeishuTaskEvent) => Promise<void>): Promise<void>

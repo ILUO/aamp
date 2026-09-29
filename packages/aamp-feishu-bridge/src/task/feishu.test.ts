@@ -10,7 +10,7 @@ const feedbackPaths = {
   executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
 }
 
-test('Agent registration advertises controlled execution protocol v1 only when requested', async () => {
+test('Agent registration keeps the existing request payload', async () => {
   const requests: Array<{ method: string; url: string; data: Record<string, unknown> }> = []
   const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {
     logger: { log: () => {}, error: () => {} },
@@ -24,34 +24,15 @@ test('Agent registration advertises controlled execution protocol v1 only when r
     } },
   }
 
-  await client.registerAgent(1)
+  await client.registerAgent()
 
   assert.deepEqual(requests, [{
     method: 'POST',
     url: 'https://open.feishu.cn/open-apis/task/v2/agent/register_agent',
     params: {},
     headers: {},
-    data: { controlled_execution_protocol_version: 1 },
+    data: {},
   }])
-})
-
-test('Agent registration without controlled feedback keeps the legacy payload', async () => {
-  const requests: Array<{ data: Record<string, unknown> }> = []
-  const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {
-    logger: { log: () => {}, error: () => {} },
-  })
-  ;(client as unknown as { client: unknown }).client = {
-    domain: 'https://open.feishu.cn',
-    formatPayload: async (payload: { data: Record<string, unknown> }) => ({ params: {}, data: payload.data, headers: {} }),
-    httpInstance: { request: async (request: { data: Record<string, unknown> }) => {
-      requests.push(request)
-      return { code: 0, msg: 'success' }
-    } },
-  }
-
-  await client.registerAgent()
-
-  assert.deepEqual(requests.map((request) => request.data), [{}])
 })
 
 test('Agent registration does not confirm capability on a nonzero Task API code', async () => {
@@ -64,7 +45,7 @@ test('Agent registration does not confirm capability on a nonzero Task API code'
     httpInstance: { request: async () => ({ code: 1254301, msg: 'not available' }) },
   }
 
-  await assert.rejects(client.registerAgent(1), /1254301/)
+  await assert.rejects(client.registerAgent(), /1254301/)
 })
 
 test('controlled feedback uses the existing Feishu client identity, domain and environment headers', async () => {
