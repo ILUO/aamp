@@ -175,6 +175,8 @@ class FakeAampClient {
 
 class FakeFeishuTaskClient implements FeishuTaskClient {
   eventHandler?: (event: FeishuTaskEvent) => Promise<void>
+  registerAgentCalls = 0
+  registerAgentError?: Error
   comments: Array<{ taskGuid: string; content: string }> = []
   steps: Array<{ taskGuid: string; step: FeishuTaskStepInput }> = []
   uploadedDeliveries: Array<{ taskGuid: string; filePath: string }> = []
@@ -199,7 +201,10 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     this.writes.push({ method, taskGuid, executionId: context?.executionId })
   }
 
-  async registerAgent(): Promise<void> {}
+  async registerAgent(): Promise<void> {
+    this.registerAgentCalls += 1
+    if (this.registerAgentError) throw this.registerAgentError
+  }
 
   async subscribeTaskEvents(): Promise<void> {}
 
@@ -347,6 +352,78 @@ function buildRemoteConfig(): BridgeConfig {
     agent: { type: 'aime', executionLocation: 'remote' },
   }
 }
+
+test('every bridge startup registers controlled protocol even after a cached upgrade', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-agent-upgrade-'))
+  const state = createDefaultBridgeState()
+  state.agentRegistration = {
+    appId: 'cli_xxx',
+    domain: 'default',
+    registeredAt: '2026-09-01T00:00:00.000Z',
+  }
+  await saveBridgeState(state, configDir)
+  const firstFeishu = new FakeFeishuTaskClient()
+  const firstRuntime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: new FakeAampClient(), feishuClient: firstFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const secondFeishu = new FakeFeishuTaskClient()
+  const secondRuntime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: new FakeAampClient(), feishuClient: secondFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await firstRuntime.start()
+    assert.equal(firstFeishu.registerAgentCalls, 1)
+    assert.equal((await loadBridgeState(configDir)).agentRegistration?.controlledExecutionProtocolVersion, 1)
+    await firstRuntime.stop()
+
+    await secondRuntime.start()
+    assert.equal(secondFeishu.registerAgentCalls, 1)
+  } finally {
+    await firstRuntime.stop()
+    await secondRuntime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('registration refresh failure retains a matching legacy registration without claiming v1', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-agent-refresh-'))
+  const state = createDefaultBridgeState()
+  state.agentRegistration = { appId: 'cli_xxx', domain: 'default', registeredAt: '2026-09-01T00:00:00.000Z' }
+  await saveBridgeState(state, configDir)
+  const feishu = new FakeFeishuTaskClient()
+  feishu.registerAgentError = new Error('temporary registration failure')
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: new FakeAampClient(), feishuClient: feishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await runtime.start()
+    assert.equal(feishu.registerAgentCalls, 1)
+    assert.equal((await loadBridgeState(configDir)).agentRegistration?.controlledExecutionProtocolVersion, undefined)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('registration failure without a matching cached identity still blocks startup', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-agent-refresh-'))
+  const feishu = new FakeFeishuTaskClient()
+  feishu.registerAgentError = new Error('registration denied')
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: new FakeAampClient(), feishuClient: feishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await assert.rejects(runtime.start(), /registration denied/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
 
 function controlledFeedbackRecords(): {
   transport: ControlledTaskFeedbackTransport

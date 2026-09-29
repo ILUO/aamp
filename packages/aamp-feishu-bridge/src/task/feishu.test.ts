@@ -10,6 +10,31 @@ const feedbackPaths = {
   executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
 }
 
+test('Agent registration advertises controlled execution protocol v1', async () => {
+  const requests: Array<{ method: string; url: string; data: Record<string, unknown> }> = []
+  const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu.cn',
+    formatPayload: async (payload: { data: Record<string, unknown> }) => ({ params: {}, data: payload.data, headers: {} }),
+    httpInstance: { request: async (request: { method: string; url: string; data: Record<string, unknown> }) => {
+      requests.push(request)
+      return { code: 0, msg: 'success' }
+    } },
+  }
+
+  await client.registerAgent()
+
+  assert.deepEqual(requests, [{
+    method: 'POST',
+    url: 'https://open.feishu.cn/open-apis/task/v2/agent/register_agent',
+    params: {},
+    headers: {},
+    data: { controlled_execution_protocol_version: 1 },
+  }])
+})
+
 test('controlled feedback uses the existing Feishu client identity, domain and environment headers', async () => {
   const requests: Array<{ method: string; url: string; headers: Record<string, string>; data: Record<string, unknown> }> = []
   const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', domain: 'https://open.feishu-pre.cn', headers: { 'x-tt-env': 'ppe_test' }, eventNames: [] }, {

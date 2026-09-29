@@ -30,6 +30,7 @@ import { resolveLarkCliProfileCredentialsFromDisk } from '../feishu-cli.js'
 import { normalizeControlledFeedbackPaths, type ControlledTaskFeedbackTransport } from './controlled-feedback.js'
 
 type FeishuConfig = BridgeConfig['feishu']
+export const CONTROLLED_EXECUTION_PROTOCOL_VERSION = 1
 type Logger = Pick<Console, 'error' | 'log'>
 type JsonRecord = Record<string, unknown>
 type TaskStepPayload = {
@@ -47,7 +48,7 @@ function executionIdData(context?: FeishuTaskWriteContext): { execution_id?: str
 }
 type RegisterAgentPayload = {
   params: Record<string, never>
-  data: Record<string, never>
+  data: { controlled_execution_protocol_version: number }
 }
 type TaskSubscriptionPayload = {
   params: { user_id_type: NonNullable<BridgeConfig['feishu']['userIdType']> }
@@ -542,7 +543,7 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     this.logger.log('[feishu agent] register via v2')
     await this.registerV2AgentWithRawRequest({
       params: {},
-      data: {},
+      data: { controlled_execution_protocol_version: CONTROLLED_EXECUTION_PROTOCOL_VERSION },
     })
   }
 

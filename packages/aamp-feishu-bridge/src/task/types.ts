@@ -83,6 +83,8 @@ export interface FeishuAgentRegistrationState {
   appId: string
   domain: string
   env?: string
+  /** Missing in local state written before controlled execution support. */
+  controlledExecutionProtocolVersion?: number
   registeredAt: string
 }
 

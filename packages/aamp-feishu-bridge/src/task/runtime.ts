@@ -26,7 +26,7 @@ import type { FeishuTaskDispatchOptions } from './dispatch.js'
 import { buildFeishuTaskDispatch, buildFeishuTaskId } from './dispatch.js'
 import { ControlledTaskFeedbackReporter, normalizeControlledFeedbackPaths, type ControlledTaskFeedbackTransport } from './controlled-feedback.js'
 import { classifyFeishuTaskEvent } from './events.js'
-import { isRetryableFeishuError, OapiFeishuTaskClient } from './feishu.js'
+import { CONTROLLED_EXECUTION_PROTOCOL_VERSION, isRetryableFeishuError, OapiFeishuTaskClient } from './feishu.js'
 import type {
   AgentExecutionLocation,
   BridgeConfig,
@@ -542,6 +542,7 @@ function buildFeishuAgentRegistrationIdentity(
     appId: config.feishu.appId,
     domain: normalizeDomain(config.feishu.domain) ?? 'default',
     ...(env ? { env } : {}),
+    controlledExecutionProtocolVersion: CONTROLLED_EXECUTION_PROTOCOL_VERSION,
   }
 }
 
@@ -608,6 +609,7 @@ function describeFeishuAgentRegistration(
     `app=${registration.appId}`,
     `domain=${registration.domain}`,
     `env=${registration.env ?? '(none)'}`,
+    `controlledProtocol=${registration.controlledExecutionProtocolVersion ?? '(none)'}`,
   ].join(' ')
 }
 
@@ -1600,6 +1602,7 @@ export interface FeishuTaskBridgeRuntimeOptions {
   feishuClient?: FeishuTaskClient
   aampClient?: AampClientLike
   controlledFeedbackTransport?: ControlledTaskFeedbackTransport
+  /** Retained for callers of older releases; registration now runs at every startup. */
   forceRegisterAgent?: boolean
   streamStepFlushIntervalMs?: number
 }
@@ -1615,7 +1618,6 @@ export class FeishuTaskBridgeRuntime {
   private readonly aamp: AampClientLike
   private readonly controlledFeedback?: ControlledTaskFeedbackReporter
   private readonly feishu: FeishuTaskClient
-  private readonly forceRegisterAgent: boolean
   private readonly streamStepFlushIntervalMs: number
   private state: BridgeState = createDefaultBridgeState()
   private readonly ackCommentInFlight = new Set<string>()
@@ -1637,7 +1639,6 @@ export class FeishuTaskBridgeRuntime {
     this.config = config
     this.configDir = options.configDir
     this.logger = createBridgeLogger(options.logger ?? console, Boolean(config.behavior.debug))
-    this.forceRegisterAgent = Boolean(options.forceRegisterAgent)
     this.streamStepFlushIntervalMs = options.streamStepFlushIntervalMs ?? STREAM_STEP_FLUSH_INTERVAL_MS
     this.aamp = options.aampClient ?? new AampClient({
       email: config.mailbox.email,
@@ -1736,13 +1737,19 @@ export class FeishuTaskBridgeRuntime {
 
   private async ensureFeishuAgentRegistered(): Promise<void> {
     const expected = buildFeishuAgentRegistrationIdentity(this.config)
-    if (!this.forceRegisterAgent && hasMatchingFeishuAgentRegistration(this.state.agentRegistration, expected)) {
-      this.logger.log(`[feishu agent] registration cached ${describeFeishuAgentRegistration(expected)}`)
+    this.logger.log(`[feishu agent] registering ${describeFeishuAgentRegistration(expected)}`)
+    try {
+      await this.feishu.registerAgent()
+    } catch (error) {
+      // A prior registration can still serve legacy tasks during a transient failure.
+      // Do not upgrade the cached protocol version after an unconfirmed refresh.
+      if (!hasMatchingFeishuAgentRegistration(this.state.agentRegistration, expected)) throw error
+      const message = error instanceof Error ? error.message : String(error)
+      this.state.lastError = message
+      this.logger.error(`[feishu agent] registration refresh failed; continuing cached registration: ${message}`)
+      await this.persistState()
       return
     }
-
-    this.logger.log(`[feishu agent] registering ${describeFeishuAgentRegistration(expected)}`)
-    await this.feishu.registerAgent()
     this.state.agentRegistration = {
       ...expected,
       registeredAt: new Date().toISOString(),
