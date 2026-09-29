@@ -176,6 +176,7 @@ class FakeAampClient {
 class FakeFeishuTaskClient implements FeishuTaskClient {
   eventHandler?: (event: FeishuTaskEvent) => Promise<void>
   registerAgentCalls = 0
+  registeredProtocolVersions: Array<number | undefined> = []
   registerAgentError?: Error
   comments: Array<{ taskGuid: string; content: string }> = []
   steps: Array<{ taskGuid: string; step: FeishuTaskStepInput }> = []
@@ -201,8 +202,9 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     this.writes.push({ method, taskGuid, executionId: context?.executionId })
   }
 
-  async registerAgent(): Promise<void> {
+  async registerAgent(version?: number): Promise<void> {
     this.registerAgentCalls += 1
+    this.registeredProtocolVersions.push(version)
     if (this.registerAgentError) throw this.registerAgentError
   }
 
@@ -363,27 +365,73 @@ test('every bridge startup registers controlled protocol even after a cached upg
   }
   await saveBridgeState(state, configDir)
   const firstFeishu = new FakeFeishuTaskClient()
+  const firstFeedback = controlledFeedbackRecords()
   const firstRuntime = new FeishuTaskBridgeRuntime(buildConfig(), {
     configDir, aampClient: new FakeAampClient(), feishuClient: firstFeishu,
+    controlledFeedbackTransport: firstFeedback.transport,
     logger: { log: () => {}, error: () => {} },
   })
   const secondFeishu = new FakeFeishuTaskClient()
+  const secondFeedback = controlledFeedbackRecords()
   const secondRuntime = new FeishuTaskBridgeRuntime(buildConfig(), {
     configDir, aampClient: new FakeAampClient(), feishuClient: secondFeishu,
+    controlledFeedbackTransport: secondFeedback.transport,
     logger: { log: () => {}, error: () => {} },
   })
 
   try {
     await firstRuntime.start()
     assert.equal(firstFeishu.registerAgentCalls, 1)
+    assert.deepEqual(firstFeishu.registeredProtocolVersions, [1])
     assert.equal((await loadBridgeState(configDir)).agentRegistration?.controlledExecutionProtocolVersion, 1)
     await firstRuntime.stop()
 
     await secondRuntime.start()
     assert.equal(secondFeishu.registerAgentCalls, 1)
+    assert.deepEqual(secondFeishu.registeredProtocolVersions, [1])
   } finally {
     await firstRuntime.stop()
     await secondRuntime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('bridge without controlled feedback registers legacy capability on every startup', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-agent-legacy-'))
+  const feishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: new FakeAampClient(), feishuClient: feishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await runtime.start()
+    assert.deepEqual(feishu.registeredProtocolVersions, [undefined])
+    assert.equal((await loadBridgeState(configDir)).agentRegistration?.controlledExecutionProtocolVersion, undefined)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('bridge without feedback does not continue from cached v1 after downgrade registration fails', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-agent-downgrade-'))
+  const state = createDefaultBridgeState()
+  state.agentRegistration = {
+    appId: 'cli_xxx', domain: 'default', controlledExecutionProtocolVersion: 1,
+    registeredAt: '2026-09-01T00:00:00.000Z',
+  }
+  await saveBridgeState(state, configDir)
+  const feishu = new FakeFeishuTaskClient()
+  feishu.registerAgentError = new Error('downgrade failed')
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: new FakeAampClient(), feishuClient: feishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await assert.rejects(runtime.start(), /downgrade failed/)
+    assert.deepEqual(feishu.registeredProtocolVersions, [undefined])
+  } finally {
+    await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
   }
 })

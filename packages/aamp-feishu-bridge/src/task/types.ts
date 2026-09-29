@@ -258,7 +258,7 @@ export interface FeishuTaskWriteContext {
 }
 
 export interface FeishuTaskClient {
-  registerAgent(): Promise<void>
+  registerAgent(controlledExecutionProtocolVersion?: number): Promise<void>
   subscribeTaskEvents(): Promise<void>
   registerEventHandlers(register: (handlers: Record<string, (data: unknown) => void>) => void, onEvent: (event: FeishuTaskEvent) => Promise<void>): void
   start(onEvent: (event: FeishuTaskEvent) => Promise<void>): Promise<void>

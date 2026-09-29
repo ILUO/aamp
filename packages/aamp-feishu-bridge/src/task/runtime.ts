@@ -536,13 +536,14 @@ function buildFeishuTaskDispatchOptions(config: BridgeConfig): FeishuTaskDispatc
 
 function buildFeishuAgentRegistrationIdentity(
   config: BridgeConfig,
+  controlledExecutionProtocolVersion?: number,
 ): Omit<FeishuAgentRegistrationState, 'registeredAt'> {
   const env = getFeishuEnvHeader(config.feishu.headers)
   return {
     appId: config.feishu.appId,
     domain: normalizeDomain(config.feishu.domain) ?? 'default',
     ...(env ? { env } : {}),
-    controlledExecutionProtocolVersion: CONTROLLED_EXECUTION_PROTOCOL_VERSION,
+    ...(controlledExecutionProtocolVersion === undefined ? {} : { controlledExecutionProtocolVersion }),
   }
 }
 
@@ -578,6 +579,7 @@ function hasMatchingFeishuAgentRegistration(
     && current?.appId === expected.appId
     && current?.domain === expected.domain
     && (current?.env ?? undefined) === (expected.env ?? undefined)
+    && !(current?.controlledExecutionProtocolVersion && !expected.controlledExecutionProtocolVersion)
 }
 
 function hasMatchingFeishuTaskSubscription(
@@ -1736,10 +1738,11 @@ export class FeishuTaskBridgeRuntime {
   }
 
   private async ensureFeishuAgentRegistered(): Promise<void> {
-    const expected = buildFeishuAgentRegistrationIdentity(this.config)
+    const protocolVersion = this.controlledFeedback ? CONTROLLED_EXECUTION_PROTOCOL_VERSION : undefined
+    const expected = buildFeishuAgentRegistrationIdentity(this.config, protocolVersion)
     this.logger.log(`[feishu agent] registering ${describeFeishuAgentRegistration(expected)}`)
     try {
-      await this.feishu.registerAgent()
+      await this.feishu.registerAgent(protocolVersion)
     } catch (error) {
       // A prior registration can still serve legacy tasks during a transient failure.
       // Do not upgrade the cached protocol version after an unconfirmed refresh.

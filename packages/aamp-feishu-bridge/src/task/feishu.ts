@@ -48,7 +48,7 @@ function executionIdData(context?: FeishuTaskWriteContext): { execution_id?: str
 }
 type RegisterAgentPayload = {
   params: Record<string, never>
-  data: { controlled_execution_protocol_version: number }
+  data: { controlled_execution_protocol_version?: number }
 }
 type TaskSubscriptionPayload = {
   params: { user_id_type: NonNullable<BridgeConfig['feishu']['userIdType']> }
@@ -539,11 +539,13 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     if (code !== 0) throw new Error(`Controlled Task feedback failed with API code ${code}`)
   }
 
-  async registerAgent(): Promise<void> {
+  async registerAgent(controlledExecutionProtocolVersion?: number): Promise<void> {
     this.logger.log('[feishu agent] register via v2')
     await this.registerV2AgentWithRawRequest({
       params: {},
-      data: { controlled_execution_protocol_version: CONTROLLED_EXECUTION_PROTOCOL_VERSION },
+      data: controlledExecutionProtocolVersion === undefined
+        ? {}
+        : { controlled_execution_protocol_version: controlledExecutionProtocolVersion },
     })
   }
 
@@ -841,13 +843,16 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     })
     const requestUrl = `${rawClient.domain}/open-apis/task/v2/agent/register_agent`
     try {
-      await withRetry(() => rawClient.httpInstance.request({
+      const response = await withRetry(() => rawClient.httpInstance.request({
         method: 'POST',
         url: requestUrl,
         params: formatted.params,
         data: formatted.data,
         headers: formatted.headers,
       }), this.retry, this.logger, 'agent.register_agent')
+      const code = getNumber(asRecord(response)?.code)
+      if (code === undefined) throw new Error('Task Agent registration response is missing API code')
+      if (code !== 0) throw new Error(`Task Agent registration failed with API code ${code}`)
     } catch (error) {
       this.logger.error(
         `[feishu agent] register failed url=${requestUrl} params=${safeJsonStringify(formatted.params ?? {})} ` +
