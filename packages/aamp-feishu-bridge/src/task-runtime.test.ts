@@ -252,8 +252,8 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
       behavior: { streamThrottleMs: 700, streamThrottleChars: 40 },
     }))
     const controlledFeedback = {
-      commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
-      executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+      commandResultPath: '/open-apis/task/v2/agent_task_execution/custom_command_result',
+      executionStatePath: '/open-apis/task/v2/agent_task_execution/custom_execution_state',
     }
     await writeFile(join(taskDir, 'config.json'), JSON.stringify({
       version: 1,
@@ -294,6 +294,74 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
     assert.equal(savedImConfig.feishu.authMode, 'app-secret')
     assert.equal(savedImConfig.feishu.cliProfile, undefined)
     assert.equal(savedImConfig.feishu.cliBin, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('new combined Task runtime writes standard controlled feedback paths only to Task config', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aamp-feishu-runtime-new-feedback-'))
+  const selection = {
+    agent: {
+      type: 'aime', display_name: 'Aime', target_agent_email: 'aime@meshmail.test',
+      execution_location: 'remote' as const, updated_at: '2026-08-14T00:00:00.000Z',
+    },
+    bot: normalizeTaskProfile({ app_id: 'cli_remote', app_secret: 'remote-secret', auth_mode: 'app-secret' }),
+  }
+  const mailbox = {
+    email: 'bridge@meshmail.test', mailboxToken: 'mailbox-token',
+    smtpPassword: 'smtp-password', baseUrl: 'https://meshmail.test',
+  }
+  try {
+    const configured = await ensureTaskRuntimeInstanceConfigs(selection, { configDir: root }, {
+      registerMailbox: async () => mailbox,
+      sendPairRequestIfNeeded: async () => {},
+    })
+    const savedTask = JSON.parse(await readFile(join(configured.taskDir, 'config.json'), 'utf8'))
+    const savedIm = JSON.parse(await readFile(join(configured.imDir, 'config.json'), 'utf8'))
+    assert.deepEqual(savedTask.feishu.controlledFeedback, {
+      commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+      executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+    })
+    assert.equal(savedIm.feishu.controlledFeedback, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('combined Task runtime upgrades an existing config without feedback paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aamp-feishu-runtime-upgrade-feedback-'))
+  const agentEmail = 'aime@meshmail.test'
+  const appId = 'cli_remote'
+  const instanceId = `aime-${createHash('sha256').update(agentEmail).digest('hex').slice(0, 8)}-cli-remote`
+  const taskDir = join(root, 'task-runtime', 'instances', instanceId, 'task')
+  const mailbox = {
+    email: 'bridge@meshmail.test', mailboxToken: 'mailbox-token',
+    smtpPassword: 'smtp-password', baseUrl: 'https://meshmail.test',
+  }
+  try {
+    await mkdir(taskDir, { recursive: true })
+    await writeFile(join(taskDir, 'config.json'), JSON.stringify({
+      version: 1, aampHost: 'https://meshmail.test', targetAgentEmail: agentEmail,
+      slug: instanceId, agent: { type: 'aime', executionLocation: 'remote' },
+      feishu: { appId, appSecret: 'remote-secret', eventNames: ['task.task.update_user_access_v2'] },
+      mailbox, behavior: { ackComment: true },
+    }))
+    const selection = {
+      agent: {
+        type: 'aime', display_name: 'Aime', target_agent_email: agentEmail,
+        execution_location: 'remote' as const, updated_at: '2026-08-14T00:00:00.000Z',
+      },
+      bot: normalizeTaskProfile({ app_id: appId, app_secret: 'remote-secret', auth_mode: 'app-secret' }),
+    }
+    const configured = await ensureTaskRuntimeInstanceConfigs(selection, { configDir: root }, {
+      sendPairRequestIfNeeded: async () => {},
+    })
+    const savedTask = JSON.parse(await readFile(join(configured.taskDir, 'config.json'), 'utf8'))
+    assert.deepEqual(savedTask.feishu.controlledFeedback, {
+      commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+      executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+    })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

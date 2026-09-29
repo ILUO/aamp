@@ -88,14 +88,15 @@ establish authorization to read a particular group.
 ## Controlled Task feedback (pending Task OpenAPI publication)
 
 The controlled START/STOP event flow reports command acceptance and execution
-state through two Task OpenAPI routes. Neither route is assumed by AAMP. After
-Task publishes the routes and grants this Bot app access, set both
-`feishu.controlledFeedback.commandResultPath` and
-`feishu.controlledFeedback.executionStatePath` in the Task instance's
-`config.json`. Each value must be the exact root-relative path under
-`/open-apis/task/v2/` returned by the gateway; URLs, query strings and partial
-configuration are rejected. The combined `--enable-task` start path retains
-these values when it refreshes an existing instance config.
+state through two Task OpenAPI routes. The combined `--enable-task` setup fills
+new and previously unconfigured Task instances with the proposed Task v2 paths;
+existing explicit paths take precedence. Standalone bridge instances still
+require both `feishu.controlledFeedback.commandResultPath` and
+`feishu.controlledFeedback.executionStatePath` in `config.json`. Each value
+must be the exact root-relative path under `/open-apis/task/v2/` returned by
+the gateway; URLs, query strings and partial configuration are rejected.
+These defaults come from draft API Meta and must not be published until the
+routes and Bot app authorization are verified end to end.
 
 The bridge sends both requests with its existing Feishu Bot app credentials,
 domain and environment headers. Older task events continue to work when these
