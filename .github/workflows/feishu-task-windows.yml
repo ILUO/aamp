@@ -5,6 +5,7 @@ on:
       - 'packages/aamp-feishu-task-agent/**'
       - 'packages/aamp-acp-bridge/**'
       - 'packages/aamp-feishu-bridge/**'
+      - 'packages/sdks/nodejs/**'
       - '.github/workflows/feishu-task-windows.yml'
   workflow_dispatch:
 permissions:
@@ -37,6 +38,17 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Pop-Location
           }
+      - name: Build local SDK for source tests
+        run: |
+          Push-Location packages/sdks/nodejs
+          if (($env:OS -eq 'Windows_NT')) { npm.cmd ci } else { npm ci }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/typescript/bin/tsc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          foreach ($name in @('aamp-acp-bridge','aamp-feishu-bridge')) {
+            Copy-Item -Path packages/sdks/nodejs/dist/* -Destination "packages/$name/node_modules/aamp-sdk/dist" -Recurse -Force
+          }
       - name: Task Agent platform tests
         working-directory: packages/aamp-feishu-task-agent
         run: |
@@ -55,6 +67,16 @@ jobs:
           node --import tsx --test 'src/**/*.test.ts'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node node_modules/typescript/bin/tsc --noEmit
+      - name: Verify published SDK dependency before packing
+        run: |
+          foreach ($name in @('aamp-acp-bridge','aamp-feishu-bridge')) {
+            Push-Location "packages/$name"
+            if (($env:OS -eq 'Windows_NT')) { npm.cmd ci } else { npm ci }
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node --input-type=module -e "const sdk = await import('aamp-sdk'); if (sdk.AAMP_CANCEL_RESULT_CONTEXT_KEY !== 'aamp_cancel_result') { console.error('Pinned aamp-sdk lacks controlled cancellation; publish and pin a compatible SDK before packing.'); process.exit(1) }"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Pop-Location
+          }
       - name: Pack actual artifacts
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
