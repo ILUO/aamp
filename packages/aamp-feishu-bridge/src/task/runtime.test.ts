@@ -690,6 +690,7 @@ test('only the bridge holding an execution reports STOP across two instances', a
 
     ownerAamp.emitResult(taskId, { status: 'cancelled' })
     await waitFor(() => assert.deepEqual(ownerFeedback.states.map(({ state }) => state), [4]))
+    await waitFor(() => assert.equal(owner.getStateSnapshot().tasks[taskId]?.status, 'cancelled'))
     await ownerFeishu.emit({ ...stopEvent, eventId: 'evt_owner_stop_after_terminal' })
     assert.deepEqual(ownerFeedback.commands.map(({ action, result }) => [action, result]), [[1, 1], [2, 1], [2, 1]])
     assert.deepEqual(ownerFeedback.states.map(({ state }) => state), [4, 4])
