@@ -861,7 +861,7 @@ function validateBinding(binding, index) {
     throw new Error(`bindings[${index}].binding_id 必须是 UUID`);
   }
   if (!TASK_AGENT_TYPES.includes(binding.agent_type)) {
-    throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor/coco/traex/traecli/workbuddy/workbuddy_ai/aime`);
+    throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor/coco/traex/traecli/workbuddy/workbuddy_ai/codebuddy/aime`);
   }
   assertString(binding.aamp_host, `bindings[${index}].aamp_host`);
   assertString(binding.environment?.name, `bindings[${index}].environment.name`);
@@ -1065,6 +1065,9 @@ function agentFailureMessage(agentType, message) {
   const text = safeAgentFailureReason(agentType, message || 'Agent Bridge 启动失败');
   if (agentType === 'traecli') {
     return `${text}\n请执行 'traecli doctor --json' 检查 TraeCode CLI，修复后重试。`;
+  }
+  if (agentType === 'codebuddy') {
+    return `${text}\n请在终端运行 codebuddy（或 cbc），确认独立 CLI 的登录和模型可用后重试。`;
   }
   const productName = agentType === 'workbuddy'
     ? 'WorkBuddy'
@@ -3385,7 +3388,7 @@ async function discoverAgents(tenantKey) {
   });
   const agents = (result.agents || []).filter((agent) => TASK_AGENT_TYPES.includes(agent));
   if (!agents.length) {
-    throw new Error('暂未检测到智能体。请先安装 Codex、Cursor、Trae CLI、TraeCode CLI、WorkBuddy 或 WorkBuddy AI；AIME 仅对已登录的字节租户开放。');
+    throw new Error('暂未检测到智能体。请先安装 Codex、Cursor、Trae CLI、TraeCode CLI、WorkBuddy、WorkBuddy AI 或 CodeBuddy CLI；AIME 仅对已登录的字节租户开放。');
   }
   return agents;
 }

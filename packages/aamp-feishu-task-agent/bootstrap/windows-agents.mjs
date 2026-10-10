@@ -21,6 +21,7 @@ const agents = {
   traecli: {names:['traecli'], variables:['AAMP_TRAECODE_CLI_BIN','TRAECODE_CLI_BIN'], args:['acp','serve']},
   workbuddy: {names:['workbuddy'], variables:['AAMP_WORKBUDDY_CLI_BIN'], args:['--acp'], config:'.workbuddy', app:'WorkBuddy'},
   workbuddy_ai: {names:['workbuddy-ai'], variables:['AAMP_WORKBUDDY_AI_CLI_BIN'], args:['--acp'], config:'.workbuddy-ai', app:'WorkBuddy AI'},
+  codebuddy: {names:['codebuddy','cbc'], variables:[], args:['--acp']},
   aime: {names:['aime-acp'], variables:['AAMP_AIME_ACP_BIN'], args:['--site','cn']},
 }
 

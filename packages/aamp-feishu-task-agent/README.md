@@ -182,7 +182,7 @@ request is a startup check, not proof of ACP/tool compatibility or future quota.
 
 The supported canonical agent names are `codex`, `cursor`, `coco`, `traex`,
 `traecli`, `workbuddy`, `workbuddy_ai`, and `aime`.
-`--agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|aime` fixes the Agent
+`--agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|codebuddy|aime` fixes the Agent
 for every new binding in that command instead of prompting.
 Selection menus, saved bindings, and startup output display these canonical
 `agent_type` values verbatim. The removed `trae` value is not accepted as a
@@ -245,6 +245,16 @@ Its persisted and displayed Agent type remains the literal `workbuddy_ai`.
 When both WorkBuddy applications are installed, `workbuddy` and
 `workbuddy_ai` are offered independently. The Task Agent does not run a login
 command for either product; complete login in the selected desktop app.
+
+`codebuddy` is the independent CodeBuddy Code CLI (`@tencent-ai/codebuddy-code`),
+separate from the WorkBuddy desktop applications. On macOS and Windows, discovery
+looks for `codebuddy` and then `cbc` on PATH, offers one `codebuddy` option, and
+keeps the user selection step. Launch uses that CLI with `--acp` and its own
+configuration; it does not inject the WorkBuddy desktop configuration directory.
+On Windows, standard npm `.cmd` shims are resolved to Node and their script entry,
+including extensionless Node bins. Open `codebuddy` (or `cbc`) in a terminal and
+complete its login/model setup before binding. No automatic login, installation,
+or upgrade is performed for this Agent.
 
 `aime` is the ByteDance-internal remote AIME Agent. The launcher authorizes the
 Bot, creates or reuses its `lark-cli` profile, completes user login, and reads

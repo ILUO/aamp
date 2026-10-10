@@ -388,7 +388,7 @@ async function isFile(candidate) {
   return fsp.stat(candidate).then((stat) => stat.isFile(), () => false)
 }
 
-function npmJavaScriptBin(shim, shimPath) {
+async function npmJavaScriptBin(shim, shimPath) {
   // npm cmd-shim initializes dp0 in its standard prologue. Never evaluate batch.
   if (/^\s*(?:@?SET|SET)\s+"?dp0=%~dp0"?\s*$/im.test(shim)) {
     shim = shim.replace(/%dp0%/gi, "%~dp0")
@@ -401,6 +401,18 @@ function npmJavaScriptBin(shim, shimPath) {
   for (const match of matches) {
     const relative = match[1].replace(/[\\/]+/g, path.sep)
     if (!relative.toLowerCase().endsWith('node.exe')) return path.resolve(path.dirname(shimPath), relative)
+  }
+  // Some npm packages (CodeBuddy included) expose an extensionless Node bin.
+  // Accept only an argument immediately following a Node launcher, and verify
+  // its shebang. Never execute the batch shim or infer arbitrary batch logic.
+  const nodeEntries = shim.matchAll(/(?:\bnode(?:\.exe)?|"%_prog%"|"%~dp0[\\/]node\.exe")\s+"%~dp0[\\/]([^"\r\n]+)"\s+%\*/gi)
+  for (const match of nodeEntries) {
+    const entry = path.resolve(path.dirname(shimPath), match[1].replace(/[\\/]+/g, path.sep))
+    if (path.extname(entry)) continue
+    try {
+      const source = await fsp.readFile(entry, 'utf8')
+      if (/^#![^\r\n]*\bnode(?:\s|$)/.test(source)) return entry
+    } catch {}
   }
   return undefined
 }
@@ -427,7 +439,7 @@ export async function resolveNativeCommand(name, options = {}) {
       const candidateExtension = path.extname(candidate).toLowerCase()
       if (platform === 'win32' && candidateExtension === '.cmd') {
         const shim = await fsp.readFile(candidate, 'utf8')
-        const javascriptBin = npmJavaScriptBin(shim, candidate)
+        const javascriptBin = await npmJavaScriptBin(shim, candidate)
         if (javascriptBin && await isFile(javascriptBin)) {
           return { command: nodeExecutable, argsPrefix: [javascriptBin] }
         }

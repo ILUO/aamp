@@ -206,7 +206,7 @@ Running the standalone one-click script without a subcommand is the same as
 "feishu-task-agent install".
 
 Options:
-  --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|aime
+  --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|codebuddy|aime
                                Use this Agent for every new binding in the command.
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
@@ -1327,8 +1327,8 @@ aime_tenant_available() {
 
 validate_agent_name() {
   case "$1" in
-    codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|aime) ;;
-    *) agent_fail "--agent must be codex, cursor, coco, traex, traecli, workbuddy, workbuddy_ai, or aime" ;;
+    codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|codebuddy|aime) ;;
+    *) agent_fail "--agent must be codex, cursor, coco, traex, traecli, workbuddy, workbuddy_ai, codebuddy, or aime" ;;
   esac
 }
 
@@ -1370,6 +1370,9 @@ agent_cli_detected() {
     traecli)
       find_traecode_cli >/dev/null 2>&1
       ;;
+    codebuddy)
+      find_codebuddy_cli >/dev/null 2>&1
+      ;;
     workbuddy)
       find_workbuddy_cli >/dev/null 2>&1
       ;;
@@ -1406,12 +1409,15 @@ discover_interactive_agents() {
   if agent_cli_detected workbuddy_ai; then
     DETECTED_AGENTS+=("workbuddy_ai")
   fi
+  if agent_cli_detected codebuddy; then
+    DETECTED_AGENTS+=("codebuddy")
+  fi
   if agent_cli_detected aime; then
     DETECTED_AGENTS+=("aime")
   fi
 
   if [ "${#DETECTED_AGENTS[@]}" -eq 0 ]; then
-    agent_fail "暂未检测到本地智能体。请先安装 Codex、Cursor、Trae CLI、WorkBuddy 或 WorkBuddy AI 后重试。"
+    agent_fail "暂未检测到本地智能体。请先安装 Codex、Cursor、Trae CLI、WorkBuddy、WorkBuddy AI 或 CodeBuddy CLI 后重试。"
   fi
 }
 
@@ -1446,7 +1452,7 @@ select_agent_interactively() {
   discover_interactive_agents
 
   if ! exec 3<>/dev/tty; then
-    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|aime"
+    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|coco|traex|traecli|workbuddy|workbuddy_ai|codebuddy|aime"
   fi
 
   tty_state="$(stty -g <&3)"
@@ -3264,6 +3270,14 @@ resolve_trae_cli() {
   esac
 }
 
+find_codebuddy_cli() {
+  local candidate
+  for candidate in codebuddy cbc; do
+    command -v "$candidate" && return 0
+  done
+  return 1
+}
+
 find_workbuddy_cli() {
   is_macos || return 1
   [ -x "$WORKBUDDY_APP_CLI" ] || return 1
@@ -3523,6 +3537,12 @@ ensure_agent_cli() {
     if find_coco_cli >/dev/null 2>&1; then return 0; fi
     if find_traecode_cli >/dev/null 2>&1; then return 0; fi
     agent_fail "未检测到 Trae CLI（内部版）、Trae CLI Next（内部版）或 TraeCode CLI。"
+  fi
+
+  if [ "$AGENT" = "codebuddy" ]; then
+    find_codebuddy_cli >/dev/null 2>&1 \
+      || agent_fail "未检测到独立 CodeBuddy CLI。请先安装 codebuddy 或 cbc 后重试。"
+    return 0
   fi
 
   if [ "$AGENT" = "workbuddy" ]; then
@@ -4580,6 +4600,9 @@ ensure_agent_login() {
         agent_fail "未检测到 Trae CLI（内部版）、Trae CLI Next（内部版）或 TraeCode CLI。"
       fi
       ;;
+    codebuddy)
+      agent_detail "CodeBuddy uses its own CLI authentication; open codebuddy or cbc to sign in if needed"
+      ;;
     workbuddy)
       agent_detail "WorkBuddy authentication is managed by the desktop app"
       ;;
@@ -4680,6 +4703,13 @@ acp_command_word() {
 
 build_acp_agent_command() {
   ACP_AGENT_COMMAND="$AGENT"
+  if [ "$AGENT" = "codebuddy" ]; then
+    local codebuddy_bin codebuddy_word
+    codebuddy_bin="$(find_codebuddy_cli)" || agent_fail "未检测到独立 CodeBuddy CLI。"
+    codebuddy_word="$(acp_command_word "$codebuddy_bin")" || agent_fail "CodeBuddy CLI 路径包含不受支持的换行符。"
+    ACP_AGENT_COMMAND="$codebuddy_word --acp"
+    return 0
+  fi
   if [ "$AGENT" = "workbuddy" ]; then
     local workbuddy_bin workbuddy_config_dir_word
     workbuddy_bin="$(find_workbuddy_cli)" \
@@ -4965,6 +4995,9 @@ run_internal_discover_agents() {
   fi
   if agent_cli_detected workbuddy_ai; then
     agents+=("workbuddy_ai")
+  fi
+  if agent_cli_detected codebuddy; then
+    agents+=("codebuddy")
   fi
   if agent_cli_detected aime; then
     agents+=("aime")
