@@ -1,5 +1,6 @@
 import {
   AampClient,
+  AAMP_CANCEL_RESULT_CONTEXT_KEY,
   type TaskDispatch,
   type AampAttachment,
   type ReceivedAttachment,
@@ -65,11 +66,14 @@ type TaskTerminalOutcome = 'completed' | 'help_needed' | 'rejected'
 interface ActiveTaskSession {
   readonly agent: string
   readonly sessionName: string
+  readonly dispatcherEmail: string
+  readonly reportCancellation: boolean
   readonly sessionWaitController: AbortController
   phase: 'active' | 'cancelled' | 'terminal'
   terminalOutcome?: TaskTerminalOutcome
   promptStarted: boolean
   cancelForwarded: boolean
+  cancelPromise?: Promise<void>
   clearPendingText?: () => void
 }
 
@@ -497,8 +501,12 @@ export function stripAampInternalDispatchContext<T extends { dispatchContext?: R
   task: T,
 ): T {
   const context = task.dispatchContext
-  if (!context || !(SESSION_KEY_DISPATCH_CONTEXT_KEY in context)) return task
-  const { [SESSION_KEY_DISPATCH_CONTEXT_KEY]: _sessionKey, ...publicContext } = context
+  if (!context || (!(SESSION_KEY_DISPATCH_CONTEXT_KEY in context) && !(AAMP_CANCEL_RESULT_CONTEXT_KEY in context))) return task
+  const {
+    [SESSION_KEY_DISPATCH_CONTEXT_KEY]: _sessionKey,
+    [AAMP_CANCEL_RESULT_CONTEXT_KEY]: _cancelResult,
+    ...publicContext
+  } = context
   const stripped = { ...task }
   if (Object.keys(publicContext).length > 0) {
     stripped.dispatchContext = publicContext
@@ -717,7 +725,7 @@ export class AgentBridge {
   private transportMode: 'connecting' | 'websocket' | 'polling' | 'disconnected' = 'connecting'
   private senderPolicies: SenderPolicy[] = []
   private readonly activeTaskSessions = new Map<string, ActiveTaskSession>()
-  private readonly earlyCancelledTaskIds = new BoundedStringMap<true>(TASK_LIFECYCLE_HISTORY_LIMIT)
+  private readonly earlyCancelledTaskIds = new BoundedStringMap<string>(TASK_LIFECYCLE_HISTORY_LIMIT)
   private readonly settledTaskLifecycles = new BoundedStringMap<string>(TASK_LIFECYCLE_HISTORY_LIMIT)
   private readonly sessionMutex = new FairKeyedMutex()
   private stopping = false
@@ -1121,6 +1129,7 @@ export class AgentBridge {
    */
   private async handleTask(task: TaskDispatch, options: HandleEventOptions = {}): Promise<void> {
     if (!this.client || this.stopping) return
+    const reportCancellation = task.dispatchContext?.[AAMP_CANCEL_RESULT_CONTEXT_KEY] === 'cancelled'
 
     const settledMessageId = this.settledTaskLifecycles.get(task.taskId)
     if (settledMessageId !== undefined) {
@@ -1134,10 +1143,27 @@ export class AgentBridge {
       return
     }
 
-    if (this.earlyCancelledTaskIds.take(task.taskId)) {
-      this.settledTaskLifecycles.set(task.taskId, task.messageId)
-      console.warn(`[${this.name}] Dropping first delivery for early-cancelled task ${task.taskId}`)
-      return
+    const earlyCancelSender = this.earlyCancelledTaskIds.take(task.taskId)
+    if (earlyCancelSender !== undefined) {
+      if (!reportCancellation || this.normalizeEmail(earlyCancelSender) === this.normalizeEmail(task.from)) {
+        this.settledTaskLifecycles.set(task.taskId, task.messageId)
+        console.warn(`[${this.name}] Dropping first delivery for early-cancelled task ${task.taskId}`)
+        if (reportCancellation) {
+          try {
+            await this.client.sendResult({
+              to: task.from,
+              taskId: task.taskId,
+              status: 'cancelled',
+              output: '',
+              inReplyTo: task.messageId,
+            })
+          } catch (error) {
+            console.error(`[${this.name}] Cancelled result delivery failed for ${task.taskId}: ${(error as Error).message}`)
+          }
+        }
+        return
+      }
+      console.warn(`[${this.name}] Ignoring task.cancel from a different sender for controlled task ${task.taskId}`)
     }
 
     if (task.expiresAt && new Date(task.expiresAt).getTime() <= Date.now()) {
@@ -1164,6 +1190,8 @@ export class AgentBridge {
     const activeTaskSession: ActiveTaskSession = {
       agent: this.agentConfig.acpCommand,
       sessionName: taskSessionName,
+      dispatcherEmail: task.from,
+      reportCancellation,
       sessionWaitController: new AbortController(),
       phase: 'active',
       promptStarted: false,
@@ -1433,11 +1461,35 @@ export class AgentBridge {
         return Promise.resolve()
       }
       console.warn(`[${this.name}] Dropping task ${task.taskId} because the task was cancelled`)
-      return closeStream({ reason: 'task.cancelled', status: 'cancelled' }).catch((err) => {
-        console.warn(
-          `[${this.name}] Failed to close cancelled stream for ${task.taskId}: ${(err as Error).message}`,
-        )
-      })
+      return (async () => {
+        let cancelForwarded = true
+        try {
+          await activeTaskSession.cancelPromise
+        } catch (error) {
+          cancelForwarded = false
+          console.warn(`[${this.name}] ACP cancellation failed for ${task.taskId}: ${(error as Error).message}`)
+        }
+        try {
+          await closeStream({ reason: 'task.cancelled', status: 'cancelled' })
+        } catch (error) {
+          console.warn(`[${this.name}] Failed to close cancelled stream for ${task.taskId}: ${(error as Error).message}`)
+          return
+        }
+        if (!cancelForwarded || !reportCancellation) return
+        const resultClient = this.client
+        if (!resultClient || isBridgeStopping()) return
+        try {
+          await resultClient.sendResult({
+            to: task.from,
+            taskId: task.taskId,
+            status: 'cancelled',
+            output: '',
+            inReplyTo: task.messageId,
+          })
+        } catch (error) {
+          console.error(`[${this.name}] Cancelled result delivery failed for ${task.taskId}: ${(error as Error).message}`)
+        }
+      })()
     }
 
     const queuePhaseStatus = (channel: AcpTextChunk['channel']) => {
@@ -1813,6 +1865,10 @@ export class AgentBridge {
   private async handleCancel(task: TaskCancel): Promise<void> {
     const active = this.activeTaskSessions.get(task.taskId)
     if (active?.phase === 'terminal') return
+    if (active?.reportCancellation && this.normalizeEmail(task.from) !== this.normalizeEmail(active.dispatcherEmail)) {
+      console.warn(`[${this.name}] Ignoring task.cancel from a different sender for controlled task ${task.taskId}`)
+      return
+    }
 
     console.warn(`[${this.name}] <- task.cancel  ${task.taskId}  from=${task.from}`)
     if (active) {
@@ -1821,12 +1877,13 @@ export class AgentBridge {
       active.sessionWaitController.abort()
       if (!active.promptStarted || active.cancelForwarded) return
       active.cancelForwarded = true
-      await this.acpx.cancel(active.agent, active.sessionName)
+      active.cancelPromise = this.acpx.cancel(active.agent, active.sessionName)
+      await active.cancelPromise
       return
     }
 
     if (this.settledTaskLifecycles.get(task.taskId) !== undefined) return
-    this.earlyCancelledTaskIds.set(task.taskId, true)
+    this.earlyCancelledTaskIds.set(task.taskId, task.from)
   }
 
   private async rejectAttachmentsIfRequired(task: TaskDispatch): Promise<boolean> {

@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import {
   buildFeishuTaskDispatch,
   buildFeishuTaskDispatchContext,
+  buildFeishuTaskId,
   buildFeishuTaskContext,
   buildFeishuTaskPromptRules,
 } from './dispatch.js'
@@ -201,6 +202,32 @@ test('buildFeishuTaskDispatch mirrors session key into dispatch context', () => 
   assert.equal(dispatch.sessionKey, 'feishu-task:task_guid_123')
   assert.equal(dispatch.dispatchContext.source, 'feishu-task')
   assert.equal(dispatch.dispatchContext.aamp_session_key, dispatch.sessionKey)
+})
+
+test('controlled Task retries use the execution ID for one AAMP task', () => {
+  assert.equal(buildFeishuTaskId({
+    taskGuid: 'task_guid_123',
+    eventId: 'evt_first',
+    executionId: 'execution_1',
+    eventTypes: ['task_agent_start'],
+  }), 'feishu-task-task_guid_123-execution_1')
+  assert.equal(buildFeishuTaskId({
+    taskGuid: 'task_guid_123',
+    eventId: 'evt_retry',
+    executionId: 'execution_1',
+    eventTypes: ['task_agent_start'],
+  }), 'feishu-task-task_guid_123-execution_1')
+  assert.equal(buildFeishuTaskId({
+    taskGuid: 'task_guid_123',
+    eventId: 'evt_legacy',
+    executionId: 'execution_1',
+    eventTypes: ['task_create'],
+  }), 'feishu-task-task_guid_123-evt_legacy')
+})
+
+test('controlled START prompt treats the task intent as a fresh execution', () => {
+  const rules = buildFeishuTaskPromptRules()
+  assert.match(rules, /For task_agent_start, execute the current delegated task intent/)
 })
 
 test('buildFeishuTaskDispatch uses invariant rules for local and remote execution without rewriting task text', () => {

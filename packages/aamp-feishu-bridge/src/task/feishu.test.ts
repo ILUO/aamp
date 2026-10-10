@@ -1,6 +1,178 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { test } from 'node:test'
-import { OapiFeishuTaskClient } from './feishu.js'
+import { normalizeFeishuTaskEvent, OapiFeishuTaskClient } from './feishu.js'
+
+const feedbackPaths = {
+  commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+  executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+}
+
+test('Agent registration keeps the existing request payload', async () => {
+  const requests: Array<{ method: string; url: string; data: Record<string, unknown> }> = []
+  const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu.cn',
+    formatPayload: async (payload: { data: Record<string, unknown> }) => ({ params: {}, data: payload.data, headers: {} }),
+    httpInstance: { request: async (request: { method: string; url: string; data: Record<string, unknown> }) => {
+      requests.push(request)
+      return { code: 0, msg: 'success' }
+    } },
+  }
+
+  await client.registerAgent()
+
+  assert.deepEqual(requests, [{
+    method: 'POST',
+    url: 'https://open.feishu.cn/open-apis/task/v2/agent/register_agent',
+    params: {},
+    headers: {},
+    data: {},
+  }])
+})
+
+test('Agent registration does not confirm capability on a nonzero Task API code', async () => {
+  const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu.cn',
+    formatPayload: async (payload: { data: Record<string, unknown> }) => ({ params: {}, data: payload.data, headers: {} }),
+    httpInstance: { request: async () => ({ code: 1254301, msg: 'not available' }) },
+  }
+
+  await assert.rejects(client.registerAgent(), /1254301/)
+})
+
+test('controlled feedback uses the existing Feishu client identity, domain and environment headers', async () => {
+  const requests: Array<{ method: string; url: string; headers: Record<string, string>; data: Record<string, unknown> }> = []
+  const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', domain: 'https://open.feishu-pre.cn', headers: { 'x-tt-env': 'ppe_test' }, eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu-pre.cn',
+    formatPayload: async (payload: { data: Record<string, unknown> }) => ({
+      params: {},
+      data: payload.data,
+      headers: { Authorization: 'Bearer app-token', 'x-tt-env': 'ppe_test' },
+    }),
+    httpInstance: { request: async (request: { method: string; url: string; headers: Record<string, string>; data: Record<string, unknown> }) => {
+      requests.push(request)
+      return { code: 0, msg: 'success' }
+    } },
+  }
+
+  const feedback = client.createControlledFeedbackTransport(feedbackPaths)
+  await feedback.reportCommandResult({ task_guid: 'task_1', execution_id: 'run_1', action: 1, result: 1 })
+  await feedback.reportExecutionState({ task_guid: 'task_1', execution_id: 'run_1', state: 3 })
+
+  assert.deepEqual(requests, [
+    { method: 'POST', url: `https://open.feishu-pre.cn${feedbackPaths.commandResultPath}`, params: {}, headers: { Authorization: 'Bearer app-token', 'x-tt-env': 'ppe_test' }, data: { task_guid: 'task_1', execution_id: 'run_1', action: 1, result: 1 } },
+    { method: 'POST', url: `https://open.feishu-pre.cn${feedbackPaths.executionStatePath}`, params: {}, headers: { Authorization: 'Bearer app-token', 'x-tt-env': 'ppe_test' }, data: { task_guid: 'task_1', execution_id: 'run_1', state: 3 } },
+  ])
+})
+
+test('controlled feedback retries HTTP 503 and rejects a nonzero or missing API code', async () => {
+  const responses: Array<unknown> = [
+    Object.assign(new Error('unavailable'), { response: { status: 503 } }),
+    { code: 0, msg: 'success' },
+    { code: 1254301, msg: 'forbidden' },
+    { data: {} },
+  ]
+  let attempts = 0
+  const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} }, retryBaseDelayMs: 0, retryMaxAttempts: 2,
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu.cn',
+    formatPayload: async (payload: { data: Record<string, unknown> }) => ({ params: {}, data: payload.data, headers: {} }),
+    httpInstance: { request: async () => {
+      const response = responses[attempts++]
+      if (response instanceof Error) throw response
+      return response
+    } },
+  }
+  const feedback = client.createControlledFeedbackTransport(feedbackPaths)
+  const body = { task_guid: 'task_1', execution_id: 'run_1', action: 1 as const, result: 1 as const }
+
+  await feedback.reportCommandResult(body)
+  assert.equal(attempts, 2)
+  await assert.rejects(feedback.reportCommandResult(body), /1254301/)
+  assert.equal(attempts, 3)
+  await assert.rejects(feedback.reportCommandResult(body), /missing.*code/i)
+  assert.equal(attempts, 4)
+})
+
+test('controlled Task event preserves command identity from the WebSocket payload', () => {
+  assert.deepEqual(normalizeFeishuTaskEvent({
+    event_id: 'evt_start_1',
+    task_guid: 'task_1',
+    event_types: ['task_agent_start'],
+    execution_id: 'execution_1',
+    action: 'START',
+  }), {
+    eventId: 'evt_start_1',
+    taskGuid: 'task_1',
+    eventTypes: ['task_agent_start'],
+    executionId: 'execution_1',
+    action: 'START',
+    raw: {
+      event_id: 'evt_start_1',
+      task_guid: 'task_1',
+      event_types: ['task_agent_start'],
+      execution_id: 'execution_1',
+      action: 'START',
+    },
+  })
+})
+
+test('controlled write context reaches patch, steps, comment and multipart upload; legacy requests omit it', async () => {
+  const writes: Array<{ kind: string; data: Record<string, unknown> }> = []
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-execution-context-'))
+  const filePath = path.join(tempDir, 'result.md')
+  const client = new OapiFeishuTaskClient({ appId: 'cli_xxx', appSecret: 'secret', eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu.cn',
+    formatPayload: async (payload: { params: unknown; data: Record<string, unknown> }) => ({ ...payload, headers: {} }),
+    httpInstance: { request: async (payload: { data: Record<string, unknown> }) => {
+      writes.push({ kind: 'steps', data: payload.data })
+      return { data: {}, status: 200 }
+    } },
+    task: { v2: {
+      task: { patch: async (payload: { data: Record<string, unknown> }) => { writes.push({ kind: 'patch', data: payload.data }) } },
+      comment: { create: async (payload: { data: Record<string, unknown> }) => { writes.push({ kind: 'comment', data: payload.data }) } },
+      attachment: { upload: async (payload: { data: Record<string, unknown> }) => { writes.push({ kind: 'upload', data: payload.data }) } },
+    } },
+  }
+
+  try {
+    await writeFile(filePath, '# Result\n')
+    for (const context of [undefined, { executionId: 'run_1' }]) {
+      await client.markTaskInProgress('task_1', context)
+      await client.appendTextDeliveries('task_1', ['https://example.com/result'], context)
+      await client.appendTaskSteps('task_1', ['分析完成'], context)
+      await client.commentTask('task_1', '分析结果', context)
+      await client.uploadTaskDelivery('task_1', filePath, context)
+    }
+
+    assert.deepEqual(writes.map((write) => write.kind), [
+      'patch', 'patch', 'steps', 'comment', 'upload',
+      'patch', 'patch', 'steps', 'comment', 'upload',
+    ])
+    for (const write of writes.slice(0, 5)) assert.equal('execution_id' in write.data, false)
+    for (const write of writes.slice(5)) assert.equal(write.data.execution_id, 'run_1')
+    assert.equal(writes[9]?.data.resource_id, 'task_1')
+    assert.equal(typeof writes[9]?.data.file, 'object')
+  } finally {
+    await rm(tempDir, { recursive: true, force: true })
+  }
+})
 
 test('OapiFeishuTaskClient maps source message content from v2 task origin refer resources', async () => {
   const client = new OapiFeishuTaskClient({
