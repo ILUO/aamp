@@ -218,15 +218,27 @@ Ready `coco` bindings keep their stored identity and mailbox, while runtime
 startup output displays the resolved raw type `traex` or `traecli` that will
 actually be used.
 
-`workbuddy` is detected only from the standard macOS WorkBuddy.app installation:
+On macOS, `workbuddy` is detected from the standard WorkBuddy.app installation:
 `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy`.
 The launcher uses the app-bundled `codebuddy --acp` command.
 It does not run a WorkBuddy login command. Open WorkBuddy and complete login
 before starting a binding. Startup verifies login by creating and immediately
 closing a temporary ACP session without sending a model prompt. Nonstandard
-paths and non-macOS installations are not auto-detected.
+paths are not auto-detected on macOS.
 
-`workbuddy_ai` is the international WorkBuddy AI application. It is detected
+On Windows, WorkBuddy and WorkBuddy AI discovery first honors
+`AAMP_WORKBUDDY_CLI_BIN` and `AAMP_WORKBUDDY_AI_CLI_BIN`, respectively.
+Without an explicit override, it checks the separate `WorkBuddy` or
+`WorkBuddy AI` application directories under `%LOCALAPPDATA%\Programs`,
+`%ProgramW6432%`, `%ProgramFiles%`, and `%ProgramFiles(x86)%`, in that order.
+The bundled entry is `resources\app.asar.unpacked\cli\bin\codebuddy`;
+its Node shebang is checked and it is launched with Node and `--acp`.
+If no bundled entry is found, the existing `workbuddy` / `workbuddy-ai`
+PATH command lookup is retained. An invalid explicit override reports an
+error without falling back. Custom installation locations require an override.
+Each product keeps its own `.workbuddy` / `.workbuddy-ai` configuration directory.
+
+`workbuddy_ai` is the international WorkBuddy AI application. On macOS it is detected
 only at
 `/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy`.
 Its persisted and displayed Agent type remains the literal `workbuddy_ai`.

@@ -19,8 +19,8 @@ const agents = {
   coco: {names:['coco'], variables:['AAMP_COCO_CLI_BIN','AAMP_TRAE_CLI_BIN','TRAE_CLI_BIN'], args:['acp','serve']},
   traex: {names:['traex'], variables:['AAMP_TRAEX_CLI_BIN','AAMP_TRAE_CLI_BIN','TRAE_CLI_BIN'], args:['acp','serve']},
   traecli: {names:['traecli'], variables:['AAMP_TRAECODE_CLI_BIN','TRAECODE_CLI_BIN'], args:['acp','serve']},
-  workbuddy: {names:['workbuddy'], variables:['AAMP_WORKBUDDY_CLI_BIN'], args:['--acp'], config:'.workbuddy'},
-  workbuddy_ai: {names:['workbuddy-ai'], variables:['AAMP_WORKBUDDY_AI_CLI_BIN'], args:['--acp'], config:'.workbuddy-ai'},
+  workbuddy: {names:['workbuddy'], variables:['AAMP_WORKBUDDY_CLI_BIN'], args:['--acp'], config:'.workbuddy', app:'WorkBuddy'},
+  workbuddy_ai: {names:['workbuddy-ai'], variables:['AAMP_WORKBUDDY_AI_CLI_BIN'], args:['--acp'], config:'.workbuddy-ai', app:'WorkBuddy AI'},
   aime: {names:['aime-acp'], variables:['AAMP_AIME_ACP_BIN'], args:['--site','cn']},
 }
 
@@ -42,11 +42,33 @@ async function descriptor(candidate, env) {
   } catch {return undefined}
 }
 
+async function workbuddyNodeEntry(file) {
+  try {
+    const source = await readFile(file, 'utf8')
+    if (/^#![^\r\n]*\bnode(?:\s|$)/.test(source)) return {command:process.execPath,argsPrefix:[file]}
+  } catch {}
+}
+
+async function findWorkbuddyApp(app, env) {
+  const value = name => Object.entries(env).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1]
+  const local = value('LOCALAPPDATA')
+  const roots = [local && path.isAbsolute(local) && path.join(local,'Programs'), value('ProgramW6432'), value('ProgramFiles'), value('ProgramFiles(x86)')]
+  for (const root of new Set(roots)) {
+    if (typeof root !== 'string' || !path.isAbsolute(root)) continue
+    const found = await workbuddyNodeEntry(path.join(root,app,'resources','app.asar.unpacked','cli','bin','codebuddy'))
+    if (found) return found
+  }
+}
+
 export async function findWindowsAgent(type, env, run) {
   const definition = agents[type]
   if (!definition) return undefined
   let rejectionReason
   const resolveCandidate = async candidate => {
+    // App-bundled codebuddy has a Node shebang but no extension on Windows.
+    if (definition.app && !path.extname(candidate) && (path.isAbsolute(candidate) || /[\\/]/.test(candidate))) {
+      return workbuddyNodeEntry(candidate)
+    }
     const found = await descriptor(candidate, env)
     if (found && type === 'traecli') {
       const coco = await findWindowsAgent('coco', env, run)
@@ -87,6 +109,10 @@ export async function findWindowsAgent(type, env, run) {
     const found = await resolveCandidate(value)
     if (!found) await warnInvalidAgentPath(key,value,{reason:rejectionReason,fallback:type === 'aime'})
     return found
+  }
+  if (definition.app) {
+    const found = await findWorkbuddyApp(definition.app, env)
+    if (found) return found
   }
   if (type === 'cursor') {
     const dedicated = await resolveCandidate('cursor-agent')

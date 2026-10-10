@@ -15,7 +15,7 @@ async function fixture(t) {
   t.after(()=>rm(root,{recursive:true,force:true}))
   const coco=path.join(root,'coco.mjs')
   await writeFile(coco,`if(process.argv.includes('--help'))console.log('Usage: coco acp serve; Start the ACP server');else console.log(JSON.stringify({args:process.argv.slice(2),proxy:process.env.HTTPS_PROXY}));`)
-  return {root,coco,env:{PATH:'',Path:'',AAMP_COCO_CLI_BIN:coco,AAMP_CODEX_CLI_BIN:process.execPath,AAMP_TASK_RUNTIME_HOME:root,AAMP_LARK_CLI_CONFIG_DIR:path.join(root,'lark'),CODEX_AUTO_UPDATE:'false',AAMP_TASK_SKIP_LOGIN_CHECK:'true',HTTPS_PROXY:'http://proxy.example.test:8080'}}
+  return {root,coco,env:{PATH:'',Path:'',ProgramFiles:root,ProgramW6432:root,'ProgramFiles(x86)':root,LOCALAPPDATA:root,AAMP_COCO_CLI_BIN:coco,AAMP_CODEX_CLI_BIN:process.execPath,AAMP_TASK_RUNTIME_HOME:root,AAMP_LARK_CLI_CONFIG_DIR:path.join(root,'lark'),CODEX_AUTO_UPDATE:'false',AAMP_TASK_SKIP_LOGIN_CHECK:'true',HTTPS_PROXY:'http://proxy.example.test:8080'}}
 }
 
 test('AIME background preparation reuses the foreground adapter installation',async t=>{

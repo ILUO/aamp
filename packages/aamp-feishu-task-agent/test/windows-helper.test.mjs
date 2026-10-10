@@ -88,6 +88,7 @@ test('discovers installed native Agents in stable order without a Codex allowlis
         .filter(key => /^(path|.*(?:aamp_.*_cli_bin|aamp_aime_acp_bin|trae_cli_bin|traecode_cli_bin))$/i.test(key))
         .map(key => [key, ''])),
       PATH: '', AAMP_TASK_USER_TENANT_KEY: '',
+      ProgramFiles: root, ProgramW6432: root, 'ProgramFiles(x86)': root, LOCALAPPDATA: root,
       AAMP_COCO_CLI_BIN: '', AAMP_TRAEX_CLI_BIN: '', TRAE_CLI_BIN: '',
       AAMP_TRAECODE_CLI_BIN: '', TRAECODE_CLI_BIN: '',
       AAMP_WORKBUDDY_CLI_BIN: '', AAMP_WORKBUDDY_AI_CLI_BIN: '', AAMP_AIME_ACP_BIN: '',
