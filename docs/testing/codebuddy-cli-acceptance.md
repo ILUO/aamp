@@ -1,6 +1,6 @@
 # 独立 CodeBuddy CLI 接入验收
 
-开发分支：`codex/codebuddy-cli-support`，基于 `2b82c99`。
+开发分支：`fix/feishu-auth-scope-negotiation`，基于 `2b82c99`。
 
 ## 改动范围
 
@@ -47,7 +47,7 @@ Windows 原生进程、ACL 等测试在 macOS 上跳过，不能替代 Windows �
 
 ```powershell
 git fetch origin
-git switch codex/codebuddy-cli-support
+git switch fix/feishu-auth-scope-negotiation
 git pull --ff-only
 node packages/aamp-feishu-task-agent/scripts/run-platform-tests.mjs
 ```
