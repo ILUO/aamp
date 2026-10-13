@@ -741,6 +741,11 @@ test('start resumes a loaded service with only saved bindings that still exist',
     background: true,
     log: () => {},
     loadBindings: async () => bindings.slice(0, 2),
+    filterRegisteredBindings: async (available) => ({
+      availableBindings: available,
+      unboundBindings: [],
+      failures: [],
+    }),
     getStatus: async () => ({ mode: 'background', state: 'waiting', pid: null, pids: [] }),
     readSelection: async () => ['missing-binding', 'binding-b'],
     withControlLock: async (action) => {
@@ -766,6 +771,11 @@ test('start preflights selected bindings before handing them to the background s
   await controller.runStart({
     background: true,
     loadBindings: async () => bindings,
+    filterRegisteredBindings: async (available) => ({
+      availableBindings: available,
+      unboundBindings: [],
+      failures: [],
+    }),
     getStatus: async () => ({ mode: 'stopped', state: 'stopped', pid: null, pids: [] }),
     acquireLease: async () => calls.push('lease'),
     chooseBindings: async (prompt, available) => {

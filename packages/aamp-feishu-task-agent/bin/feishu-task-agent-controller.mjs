@@ -20,6 +20,7 @@ import {
   createKeyedSerialExecutor,
   createSerializedRunner,
   runLayeredStarts,
+  settleWithConcurrency,
 } from './runtime-concurrency.mjs';
 import {
   createPackageExecutableLauncher,
@@ -122,6 +123,7 @@ const NETWORK_MAX_ATTEMPTS = Math.max(1, Number(process.env.AAMP_TASK_NETWORK_MA
 const NETWORK_RETRY_BASE_DELAY_MS = Math.max(0, Number(process.env.AAMP_TASK_NETWORK_RETRY_BASE_DELAY_MS || 500));
 const NETWORK_PROBE_TIMEOUT_MS = Math.max(1_000, Number(process.env.AAMP_TASK_NETWORK_PROBE_TIMEOUT_MS || 10_000));
 const FEISHU_START_CONCURRENCY = 4;
+const BINDING_STATUS_CONCURRENCY = 3;
 const AIME_ALLOWED_TENANT_KEY = '736588c9260f175d';
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
@@ -130,6 +132,14 @@ const OPEN_API_DOMAIN_BY_TENANT_BRAND = Object.freeze({
   feishu: 'https://open.feishu.cn',
   lark: 'https://open.larksuite.com',
 });
+const TENANT_ACCESS_TOKEN_PATH = '/open-apis/auth/v3/tenant_access_token/internal';
+const TASK_OPEN_API_PREFIX = '/open-apis/task';
+const CHECK_AGENT_REGISTERED_PATH = process.env.AAMP_TASK_CHECK_AGENT_REGISTERED_PATH
+  || '/v2/agent/check_agent_registered_oapi_v_2';
+const BINDING_STATUS_TIMEOUT_MS = Math.max(
+  1_000,
+  Number(process.env.AAMP_TASK_BINDING_STATUS_TIMEOUT_MS || 10_000),
+);
 
 const secrets = new Set();
 const managedProcesses = new Set();
@@ -937,6 +947,147 @@ function normalizeTenantBrand(value, field = 'tenant_brand') {
 
 function openApiDomainForTenantBrand(value) {
   return OPEN_API_DOMAIN_BY_TENANT_BRAND[normalizeTenantBrand(value)];
+}
+
+async function readOpenApiJson(response, label) {
+  if (!response?.ok) {
+    throw new Error(`${label}失败（HTTP ${response?.status || 'unknown'}）`);
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(`${label}返回了无效 JSON`);
+  }
+}
+
+function openApiRequestSignal(timeoutMs) {
+  return typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(timeoutMs)
+    : undefined;
+}
+
+async function fetchTenantAccessToken(binding, operations = {}) {
+  const fetchImpl = operations.fetch || globalThis.fetch;
+  if (typeof fetchImpl !== 'function') throw new Error('当前 Node.js 不支持 OpenAPI 请求');
+  const domain = openApiDomainForTenantBrand(binding.bot.tenant_brand);
+  let response;
+  try {
+    response = await fetchImpl(`${domain}${TENANT_ACCESS_TOKEN_PATH}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({
+        app_id: binding.bot.app_id,
+        app_secret: binding.bot.app_secret,
+      }),
+      signal: operations.signal || openApiRequestSignal(
+        operations.timeoutMs || BINDING_STATUS_TIMEOUT_MS,
+      ),
+    });
+  } catch (error) {
+    const suffix = error?.name === 'TimeoutError' ? '请求超时' : '网络请求失败';
+    throw new Error(`获取 tenant_access_token ${suffix}`);
+  }
+  const payload = await readOpenApiJson(response, '获取 tenant_access_token');
+  if (typeof payload?.code === 'number' && payload.code !== 0) {
+    throw new Error(`获取 tenant_access_token 失败（code ${payload.code}）`);
+  }
+  if (typeof payload?.tenant_access_token !== 'string' || !payload.tenant_access_token) {
+    throw new Error('获取 tenant_access_token 的响应缺少 token');
+  }
+  return payload.tenant_access_token;
+}
+
+function parseAgentRegisteredResponse(payload) {
+  if (typeof payload?.code === 'number' && payload.code !== 0) {
+    throw new Error(`检查绑定状态失败（code ${payload.code}）`);
+  }
+  const candidates = [
+    payload?.data?.is_bound,
+    payload?.data?.IsBound,
+    payload?.is_bound,
+    payload?.IsBound,
+  ];
+  const isBound = candidates.find((value) => typeof value === 'boolean');
+  if (typeof isBound !== 'boolean') throw new Error('检查绑定状态的响应缺少 IsBound');
+  return isBound;
+}
+
+async function checkAgentRegistered(binding, operations = {}) {
+  const fetchImpl = operations.fetch || globalThis.fetch;
+  if (typeof fetchImpl !== 'function') throw new Error('当前 Node.js 不支持 OpenAPI 请求');
+  const token = await (operations.fetchTenantAccessToken || fetchTenantAccessToken)(
+    binding,
+    operations,
+  );
+  const domain = openApiDomainForTenantBrand(binding.bot.tenant_brand);
+  let response;
+  try {
+    response = await fetchImpl(`${domain}${TASK_OPEN_API_PREFIX}${CHECK_AGENT_REGISTERED_PATH}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: '{}',
+      signal: operations.signal || openApiRequestSignal(
+        operations.timeoutMs || BINDING_STATUS_TIMEOUT_MS,
+      ),
+    });
+  } catch (error) {
+    const suffix = error?.name === 'TimeoutError' ? '请求超时' : '网络请求失败';
+    throw new Error(`检查绑定状态${suffix}`);
+  }
+  return parseAgentRegisteredResponse(await readOpenApiJson(response, '检查绑定状态'));
+}
+
+async function filterRegisteredBindings(bindings, operations = {}) {
+  const check = operations.checkAgentRegistered || checkAgentRegistered;
+  const results = await settleWithConcurrency(
+    bindings,
+    operations.concurrency || BINDING_STATUS_CONCURRENCY,
+    (binding) => check(binding, operations),
+  );
+  const availableBindings = [];
+  const unboundBindings = [];
+  const failures = [];
+  results.forEach((result, index) => {
+    const binding = bindings[index];
+    if (result.status === 'rejected') {
+      availableBindings.push(binding);
+      failures.push({ binding, reason: result.reason });
+    } else if (result.value) {
+      availableBindings.push(binding);
+    } else {
+      unboundBindings.push(binding);
+    }
+  });
+  return { availableBindings, unboundBindings, failures };
+}
+
+async function removeUnboundBindings(unboundBindings, operations = {}) {
+  if (!unboundBindings.length) return 0;
+  const staleById = new Map(unboundBindings.map((binding) => [binding.binding_id, {
+    appId: binding.bot.app_id,
+    updatedAt: binding.updated_at,
+  }]));
+  const remove = async () => {
+    const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
+    const writeBindings = operations.writeBindings || (async (bindings) => {
+      await writeJsonAtomic(CONFIG_FILE, { ...emptyStore(), bindings });
+    });
+    const current = await loadBindings();
+    const next = current.filter((binding) => {
+      const stale = staleById.get(binding.binding_id);
+      return !stale
+        || binding.bot.app_id !== stale.appId
+        || binding.updated_at !== stale.updatedAt;
+    });
+    const removed = current.length - next.length;
+    if (removed > 0) await writeBindings(next);
+    return removed;
+  };
+  if (operations.loadBindings || operations.writeBindings) return remove();
+  return withConfigLock(remove);
 }
 
 function sameBindingRelationship(existing, candidate) {
@@ -4039,13 +4190,33 @@ async function runStart(operations = {}) {
   const background = operations.background ?? shouldUseBackgroundService('start');
   const log = operations.log || console.log;
   const loadBindings = operations.loadBindings || (async () => (await loadStore()).bindings);
-  const availableBindings = await loadBindings();
-  if (!availableBindings.length) {
+  const savedBindings = await loadBindings();
+  if (!savedBindings.length) {
     console.error('未找到已经绑定的智能体-Bot 配置，请先运行安装命令重新绑定：');
     console.error(`  ${INSTALL_COMMAND}`);
     process.exitCode = 1;
     return;
   }
+  const filterBindings = operations.filterRegisteredBindings || filterRegisteredBindings;
+  const removeBindings = operations.removeUnboundBindings || removeUnboundBindings;
+  let availableBindings;
+  const loadAvailableBindings = async () => {
+    if (availableBindings) return availableBindings;
+    const status = await filterBindings(savedBindings);
+    availableBindings = status.availableBindings;
+    if (status.unboundBindings.length > 0) {
+      await removeBindings(status.unboundBindings);
+    }
+    if (status.failures.length > 0) {
+      log(`${status.failures.length} 个配置的绑定状态检查失败，已按默认策略放行。`);
+    }
+    return availableBindings;
+  };
+  const reportNoAvailableBindings = () => {
+    console.error('未找到仍处于绑定状态的智能体-Bot 配置，请运行安装命令重新绑定：');
+    console.error(`  ${INSTALL_COMMAND}`);
+    process.exitCode = 1;
+  };
   if (background) {
     const getStatus = operations.getStatus || resolveManagedRuntimeStatus;
     const status = await getStatus();
@@ -4057,6 +4228,11 @@ async function runStart(operations = {}) {
       const readSelection = operations.readSelection || (() => launchdService.selection());
       const resumeService = operations.resumeService || ((bindingIds) => launchdService.start(bindingIds));
       const withControlLock = operations.withControlLock || withServiceControlLock;
+      await loadAvailableBindings();
+      if (!availableBindings.length) {
+        reportNoAvailableBindings();
+        return;
+      }
       const resumed = await withControlLock(async () => {
         const lockedStatus = await getStatus();
         if (lockedStatus.mode === 'background' && lockedStatus.state === 'running' && lockedStatus.pid) {
@@ -4082,6 +4258,11 @@ async function runStart(operations = {}) {
       log(`🟡 Task Agent 已在旧版前台模式运行（PID ${status.pid}）；如需切换后台，请先执行 ${taskCommand('stop')}。`);
       return status;
     }
+  }
+  await loadAvailableBindings();
+  if (!availableBindings.length) {
+    reportNoAvailableBindings();
+    return;
   }
   const acquireLease = operations.acquireLease || (() => acquireRuntimeSessionLease('start'));
   const chooseBindings = operations.chooseBindings
@@ -4228,6 +4409,11 @@ export {
   executePreparedBindingStart,
   executePreparedPendingBindingStart,
   executePreparedReadyBindingStart,
+  checkAgentRegistered,
+  fetchTenantAccessToken,
+  filterRegisteredBindings,
+  parseAgentRegisteredResponse,
+  removeUnboundBindings,
   installHasOnlyCancellations,
   initializeAgentGroups,
   orderStartupItems,
