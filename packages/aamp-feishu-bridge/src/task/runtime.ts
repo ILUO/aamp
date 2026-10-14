@@ -1631,6 +1631,8 @@ export class FeishuTaskBridgeRuntime {
   private readonly streamStepFlushQueues = new Map<string, Promise<void>>()
   private readonly backgroundTasks = new Set<Promise<void>>()
   private readonly controlledEventQueues = new Map<string, Promise<void>>()
+  private readonly controlledStopInFlight = new Set<string>()
+  private readonly controlledStopCallbacks = new Map<string, Set<Promise<void>>>()
   private stopping = false
 
   constructor(config: BridgeConfig, options: FeishuTaskBridgeRuntimeOptions = {}) {
@@ -1809,7 +1811,7 @@ export class FeishuTaskBridgeRuntime {
       this.state.lastAampAckAt = new Date().toISOString()
       this.state.lastAampAckTaskId = ack.taskId
       this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} ack received aamp_task=${ack.taskId} from=${ack.from}`, { taskId: ack.taskId })
-      this.trackBackgroundTask(this.handleTaskAck(ack).catch(async (error: Error) => {
+      this.trackBackgroundTask(this.enqueueControlledCallback(ack.taskId, () => this.handleTaskAck(ack)).catch(async (error: Error) => {
         const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
         this.state.lastError = message
         this.logger.error(`[aamp ack ${ack.taskId}] ${message}`, { taskId: ack.taskId })
@@ -1823,7 +1825,7 @@ export class FeishuTaskBridgeRuntime {
       } else {
         this.logger.log(`[aamp stream] ignored reason=unknown_task task=${stream.taskId} stream=${stream.streamId} from=${stream.from}`, { taskId: stream.taskId })
       }
-      this.trackBackgroundTask(this.handleTaskStreamOpened(stream).catch(async (error: Error) => {
+      this.trackBackgroundTask(this.enqueueControlledCallback(stream.taskId, () => this.handleTaskStreamOpened(stream)).catch(async (error: Error) => {
         const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
         this.state.lastError = message
         this.logger.error(`[aamp stream ${stream.taskId}] ${message}`, { taskId: stream.taskId })
@@ -1834,7 +1836,7 @@ export class FeishuTaskBridgeRuntime {
       this.state.lastAampHelpAt = new Date().toISOString()
       this.state.lastAampHelpTaskId = help.taskId
       this.logger.log(`[aamp help] received task=${help.taskId} from=${help.from}`, { taskId: help.taskId })
-      this.trackBackgroundTask(this.handleTaskHelp(help).catch(async (error: Error) => {
+      this.trackBackgroundTask(this.enqueueControlledCallback(help.taskId, () => this.handleTaskHelp(help)).catch(async (error: Error) => {
         const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
         this.state.lastError = message
         this.logger.error(`[aamp help ${help.taskId}] ${message}`, { taskId: help.taskId })
@@ -1850,7 +1852,7 @@ export class FeishuTaskBridgeRuntime {
       this.state.lastAampResultAt = new Date().toISOString()
       this.state.lastAampResultTaskId = result.taskId
       this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} result received aamp_task=${result.taskId} from=${result.from} status=${result.status}`, { taskId: result.taskId })
-      this.trackBackgroundTask(this.handleTaskResult(result).catch(async (error: Error) => {
+      this.trackBackgroundTask(this.enqueueControlledCallback(result.taskId, () => this.handleTaskResult(result)).catch(async (error: Error) => {
         const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
         this.state.lastError = message
         this.logger.error(`[aamp result ${result.taskId}] ${message}`, { taskId: result.taskId })
@@ -1915,7 +1917,8 @@ export class FeishuTaskBridgeRuntime {
   private async loadTaskForCommentEvent(
     event: FeishuTaskEvent,
     aampTaskId: string,
-  ): Promise<{ task?: FeishuTaskDetails; ignoreReason?: FeishuTaskEventIgnoreReason }> {
+    writeContext?: FeishuTaskWriteContext,
+  ): Promise<{ task?: FeishuTaskDetails; effectiveComment?: FeishuTaskComment; ignoreReason?: FeishuTaskEventIgnoreReason }> {
     const commentId = event.commentId ?? getEventCommentId(event)
     let changedComment: FeishuTaskComment | undefined
     let loadedComments: FeishuTaskComment[] | undefined
@@ -1929,7 +1932,7 @@ export class FeishuTaskBridgeRuntime {
       const effectiveComment = changedComment
       const ownerIgnoreReason = await withPromptDispatchFailure('verify_task_owner', () => this.getHumanCommentOwnerIgnoreReason(effectiveComment))
       if (ownerIgnoreReason) {
-        await this.commentPermissionDeniedOnce(event, effectiveComment)
+        await this.commentPermissionDeniedOnce(event, effectiveComment, writeContext)
         return { ignoreReason: ownerIgnoreReason }
       }
     } else {
@@ -1947,7 +1950,7 @@ export class FeishuTaskBridgeRuntime {
       const effectiveComment = changedComment
       const ownerIgnoreReason = await withPromptDispatchFailure('verify_task_owner', () => this.getHumanCommentOwnerIgnoreReason(effectiveComment))
       if (ownerIgnoreReason) {
-        await this.commentPermissionDeniedOnce(event, effectiveComment)
+        await this.commentPermissionDeniedOnce(event, effectiveComment, writeContext)
         return { ignoreReason: ownerIgnoreReason }
       }
     }
@@ -1959,6 +1962,7 @@ export class FeishuTaskBridgeRuntime {
     if (executionIgnoreReason) return { ignoreReason: executionIgnoreReason }
 
     return {
+      effectiveComment: changedComment,
       task: await withPromptDispatchFailure('read_task_context', () => this.hydrateTaskContext(baseTask, {
         comments: loadedComments,
         changedComment,
@@ -1978,7 +1982,7 @@ export class FeishuTaskBridgeRuntime {
     return commentAuthorId === appOwnerId ? undefined : 'comment_author_not_app_owner'
   }
 
-  private async commentPermissionDeniedOnce(event: FeishuTaskEvent, comment: FeishuTaskComment): Promise<void> {
+  private async commentPermissionDeniedOnce(event: FeishuTaskEvent, comment: FeishuTaskComment, writeContext?: FeishuTaskWriteContext): Promise<void> {
     const noticeKey = getPermissionDeniedCommentNoticeKey(event, comment)
     if (this.state.permissionDeniedCommentNoticeKeys[noticeKey]) {
       this.debugLog(`[feishu event ${event.eventId}] permission denied notice already commented key=${noticeKey}`)
@@ -1991,7 +1995,7 @@ export class FeishuTaskBridgeRuntime {
       return
     }
 
-    const task = this.writePermissionDeniedCommentNotice(event, noticeKey)
+    const task = this.writePermissionDeniedCommentNotice(event, noticeKey, writeContext)
     this.permissionDeniedCommentNoticeInFlight.set(noticeKey, task)
     try {
       await task
@@ -2002,9 +2006,9 @@ export class FeishuTaskBridgeRuntime {
     }
   }
 
-  private async writePermissionDeniedCommentNotice(event: FeishuTaskEvent, noticeKey: string): Promise<void> {
+  private async writePermissionDeniedCommentNotice(event: FeishuTaskEvent, noticeKey: string, writeContext?: FeishuTaskWriteContext): Promise<void> {
     if (this.state.permissionDeniedCommentNoticeKeys[noticeKey]) return
-    await this.commentTaskOrUploadFallback(event.taskGuid, PERMISSION_DENIED_COMMENT_REPLY, 'permission-denied-comment')
+    await this.commentTaskOrUploadFallback(event.taskGuid, PERMISSION_DENIED_COMMENT_REPLY, 'permission-denied-comment', writeContext)
     this.state.permissionDeniedCommentNoticeKeys[noticeKey] = new Date().toISOString()
     this.prunePermissionDeniedCommentNotices()
     await this.persistState()
@@ -2178,6 +2182,15 @@ export class FeishuTaskBridgeRuntime {
       await this.enqueueControlledTaskEvent(event, controlledKind)
       return
     }
+    if (controlledKind === 'task_comment') {
+      // User replies and START/STOP must select the current AAMP turn in the same order.
+      await this.enqueueControlledOperation(event.taskGuid, () => this.handleLegacyTaskEvent(event))
+      return
+    }
+    await this.handleLegacyTaskEvent(event)
+  }
+
+  private async handleLegacyTaskEvent(event: FeishuTaskEvent): Promise<void> {
     this.state.lastFeishuEventAt = new Date().toISOString()
     this.state.lastFeishuEventId = event.eventId
     this.state.lastFeishuEventTaskGuid = event.taskGuid
@@ -2192,15 +2205,21 @@ export class FeishuTaskBridgeRuntime {
       await this.ignoreFeishuTaskEvent(event, 'event_type_not_allowlisted')
       return
     }
-    if (Object.values(this.state.tasks).some((task) =>
-      task.taskGuid === event.taskGuid && task.executionId
-        && task.status !== 'completed' && task.status !== 'failed' && task.status !== 'cancelled')) {
-      await this.ignoreFeishuTaskEvent(event, 'controlled_task_uses_commands')
-      return
-    }
     const semanticEventKey = getSemanticEventKey(event, eventKind)
     if (semanticEventKey && this.state.dedupSemanticEventKeys[semanticEventKey]) {
       await this.ignoreFeishuTaskEvent(event, 'duplicate_task_event')
+      return
+    }
+    // The newest controlled round remains authoritative after finishing; comments cannot fall back to legacy.
+    const owner = Object.values(this.state.tasks)
+      .filter((task) => task.taskGuid === event.taskGuid && task.executionId && this.getControlledOwner(task) === task)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
+    if (owner) {
+      if (eventKind === 'task_comment' && !['completed', 'failed', 'cancelled'].includes(owner.status)) {
+        await this.handleControlledCommentEvent(event, owner, semanticEventKey)
+      } else {
+        await this.ignoreFeishuTaskEvent(event, 'controlled_task_uses_commands')
+      }
       return
     }
     this.logger.log(`${formatTaskLogPrefix(event.taskGuid, event.eventId)} received kind=${eventKind} types=${event.eventTypes.join(',') || '(unknown)'}`)
@@ -2354,15 +2373,151 @@ export class FeishuTaskBridgeRuntime {
     event: FeishuTaskEvent,
     kind: 'task_agent_start' | 'task_agent_stop',
   ): Promise<void> {
-    const previous = this.controlledEventQueues.get(event.taskGuid) ?? Promise.resolve()
-    const next = previous.catch(() => {}).then(() => this.handleControlledTaskEvent(event, kind))
-    this.controlledEventQueues.set(event.taskGuid, next)
+    await this.enqueueControlledOperation(event.taskGuid, () => this.handleControlledTaskEvent(event, kind))
+  }
+
+  private async enqueueControlledOperation(taskGuid: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.controlledEventQueues.get(taskGuid) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(operation)
+    this.controlledEventQueues.set(taskGuid, next)
     try {
       await next
     } finally {
-      if (this.controlledEventQueues.get(event.taskGuid) === next) {
-        this.controlledEventQueues.delete(event.taskGuid)
+      if (this.controlledEventQueues.get(taskGuid) === next) {
+        this.controlledEventQueues.delete(taskGuid)
       }
+    }
+  }
+
+  private enqueueControlledCallback(aampTaskId: string, operation: () => Promise<void>): Promise<void> {
+    const taskState = this.state.tasks[aampTaskId]
+    // A real terminal result can arrive while cancellation is still being sent.
+    if (taskState && this.controlledStopInFlight.has(taskState.taskGuid)) {
+      const callbacks = this.controlledStopCallbacks.get(taskState.taskGuid) ?? new Set<Promise<void>>()
+      this.controlledStopCallbacks.set(taskState.taskGuid, callbacks)
+      const callback: Promise<void> = operation().finally(() => callbacks.delete(callback))
+      callbacks.add(callback)
+      return callback
+    }
+    return taskState?.executionId ? this.enqueueControlledOperation(taskState.taskGuid, operation) : operation()
+  }
+
+  private async drainControlledStopCallbacks(taskGuid: string): Promise<void> {
+    const callbacks = this.controlledStopCallbacks.get(taskGuid)
+    while (callbacks?.size) await Promise.allSettled([...callbacks])
+    this.controlledStopCallbacks.delete(taskGuid)
+  }
+
+  private getControlledOwner(taskState: BridgeTaskState): BridgeTaskState | undefined {
+    if (!taskState.executionId) return undefined
+    const rootId = buildFeishuTaskId({ taskGuid: taskState.taskGuid, executionId: taskState.executionId,
+      eventId: '', eventTypes: ['task_agent_start'] })
+    return this.state.tasks[rootId]
+  }
+
+  private isCurrentControlledTask(taskState: BridgeTaskState): boolean {
+    if (!taskState.executionId) return true
+    const owner = this.getControlledOwner(taskState)
+    return Boolean(owner && owner.executionId === taskState.executionId
+      && (owner.activeContinuationTaskId ?? owner.aampTaskId) === taskState.aampTaskId)
+  }
+
+  private syncControlledOwner(taskState: BridgeTaskState): void {
+    const owner = this.getControlledOwner(taskState)
+    if (!owner || owner === taskState || !this.isCurrentControlledTask(taskState)) return
+    this.state.tasks[owner.aampTaskId] = {
+      ...owner, status: taskState.status, startAccepted: taskState.startAccepted,
+      stopRequested: taskState.stopRequested, reportedExecutionState: taskState.reportedExecutionState,
+      lastError: taskState.lastError, updatedAt: taskState.updatedAt,
+    }
+  }
+
+  private async handleControlledCommentEvent(
+    event: FeishuTaskEvent, owner: BridgeTaskState, semanticEventKey?: string,
+  ): Promise<void> {
+    const aampTaskId = buildFeishuTaskId(event)
+    const { task, effectiveComment, ignoreReason } = await this.loadTaskForCommentEvent(event, aampTaskId, taskWriteContext(owner))
+    if (!task || ignoreReason) {
+      await this.ignoreFeishuTaskEvent(event, ignoreReason ?? 'comment_without_effective_comment')
+      return
+    }
+    // Task's persisted BLOCKED state also covers old feedback failures that left local state acknowledged.
+    if (task.agentTaskStatus !== 3 || owner.stopRequested || !owner.executionId) {
+      await this.ignoreFeishuTaskEvent(event, 'controlled_task_uses_commands')
+      return
+    }
+    if (!effectiveComment?.content.trim() || effectiveComment.authorType !== 'user') {
+      await this.ignoreFeishuTaskEvent(event, 'comment_without_effective_comment')
+      return
+    }
+    const replyKey = semanticEventKey ?? getSemanticEventKey({ ...event, commentId: effectiveComment.id }, 'task_comment')
+    if (replyKey && this.state.dedupSemanticEventKeys[replyKey]) {
+      await this.ignoreFeishuTaskEvent(event, 'duplicate_task_event')
+      return
+    }
+    if (this.state.tasks[aampTaskId]) {
+      await this.ignoreFeishuTaskEvent(event, 'duplicate_task_event')
+      return
+    }
+    const activeId = owner.activeContinuationTaskId ?? owner.aampTaskId
+    const previousTask = this.state.tasks[activeId]
+    if (owner.activeContinuationTaskId && previousTask?.status !== 'help_needed') {
+      // Do not dispatch a second prompt into the same session before the reply turn has paused again.
+      await this.ignoreFeishuTaskEvent(event, 'controlled_task_uses_commands')
+      return
+    }
+    // Drain old buffered writes before handing this execution to a new AAMP turn.
+    await this.enqueueStreamStepFlush(activeId)
+    if (this.config.agent?.executionLocation === 'remote' && this.collectFeishuTaskAttachmentRefs(task).length > 0) {
+      throw new Error('REMOTE_ATTACHMENTS_UNSUPPORTED: Remote Agent input attachments are not supported.')
+    }
+    const preparedAttachments = await this.prepareFeishuTaskAttachments(task, aampTaskId)
+    const dispatch = buildFeishuTaskDispatch(event, task, 'task_comment', {
+      feishuAppId: this.config.feishu.appId, feishuAppOwnerId: await this.getAppOwnerId(),
+      ...buildFeishuTaskDispatchOptions(this.config),
+    })
+    const now = new Date().toISOString()
+    const taskState: BridgeTaskState = {
+      taskGuid: owner.taskGuid, aampTaskId, executionId: owner.executionId,
+      startAccepted: owner.startAccepted, reportedExecutionState: 'BLOCKED',
+      feishuEventId: event.eventId, feishuEventKind: 'task_comment',
+      ...(task.taskId ? { feishuTaskId: task.taskId } : {}),
+      ...(task.subtasks?.length ? { childTaskGuids: task.subtasks.map((subtask) => subtask.guid) } : {}),
+      status: 'dispatching', createdAt: now, updatedAt: now,
+    }
+    const savedOwner = this.state.tasks[owner.aampTaskId] ?? owner
+    this.state.tasks[aampTaskId] = taskState
+    this.state.tasks[owner.aampTaskId] = { ...savedOwner, activeContinuationTaskId: aampTaskId,
+      status: 'dispatching', reportedExecutionState: 'BLOCKED', updatedAt: now }
+    let sentToAamp = false
+    try {
+      await this.persistState()
+      const bodyText = appendAttachmentNotes(dispatch.bodyText, preparedAttachments.notes)
+      const sent = await this.aamp.sendTask({
+        to: this.config.targetAgentEmail, taskId: aampTaskId, sessionKey: dispatch.sessionKey,
+        title: dispatch.title, bodyText, rawBodyText: bodyText, promptRules: dispatch.promptRules,
+        dispatchContext: { ...dispatch.dispatchContext, execution_id: owner.executionId,
+          [AAMP_CANCEL_RESULT_CONTEXT_KEY]: 'cancelled' },
+        attachments: preparedAttachments.attachments.length ? preparedAttachments.attachments : undefined,
+      })
+      sentToAamp = true
+      this.state.tasks[aampTaskId] = { ...taskState, aampMessageId: sent.messageId,
+        status: 'dispatched', updatedAt: new Date().toISOString() }
+      this.syncControlledOwner(this.state.tasks[aampTaskId]!)
+      this.state.lastAampDispatchAt = new Date().toISOString()
+      this.state.lastAampDispatchTaskId = aampTaskId
+      this.rememberEvent(event, replyKey)
+      await this.persistState()
+      this.logger.log(`${formatTaskLogPrefix(task.guid, event.eventId)} controlled reply dispatched execution=${owner.executionId} aamp_task=${aampTaskId}`)
+    } catch (error) {
+      if (sentToAamp) throw error
+      if (this.state.tasks[owner.aampTaskId]?.activeContinuationTaskId === aampTaskId) {
+        // A failed reply delivery must not reject or release the already accepted execution.
+        this.state.tasks[owner.aampTaskId] = savedOwner
+        delete this.state.tasks[aampTaskId]
+      }
+      await this.persistState()
+      throw error
     }
   }
 
@@ -2388,10 +2543,17 @@ export class FeishuTaskBridgeRuntime {
     const aampTaskId = buildFeishuTaskId(event)
     const stopKey = `task_agent_stop:${event.taskGuid}:${executionId}`
     if (kind === 'task_agent_stop') {
-      const taskState = this.state.tasks[aampTaskId]
-      if (!taskState || taskState.executionId !== executionId) {
+      const owner = this.state.tasks[aampTaskId]
+      if (!owner || owner.executionId !== executionId) {
         // Another bridge instance may own this execution. Keep the local STOP marker
         // so a delayed START is not dispatched here, but never report on its behalf.
+        this.rememberEvent(event, stopKey)
+        await this.persistState()
+        return
+      }
+      const activeId = owner.activeContinuationTaskId ?? aampTaskId
+      const taskState = this.state.tasks[activeId] ?? owner
+      if (taskState.executionId !== executionId || !this.isCurrentControlledTask(taskState)) {
         this.rememberEvent(event, stopKey)
         await this.persistState()
         return
@@ -2413,10 +2575,11 @@ export class FeishuTaskBridgeRuntime {
         return
       }
       if (!taskState.stopRequested) {
+        this.controlledStopInFlight.add(event.taskGuid)
         try {
           await this.aamp.sendCancel({
             to: this.config.targetAgentEmail,
-            taskId: aampTaskId,
+            taskId: activeId,
             ...(taskState.aampMessageId ? { inReplyTo: taskState.aampMessageId } : {}),
           })
         } catch (error) {
@@ -2424,17 +2587,22 @@ export class FeishuTaskBridgeRuntime {
           this.rememberEvent(event)
           await this.persistState()
           return
+        } finally {
+          this.controlledStopInFlight.delete(event.taskGuid)
+          // A late help/result writer must finish before a queued user reply replaces its AAMP turn.
+          await this.drainControlledStopCallbacks(event.taskGuid)
         }
       }
       // ACK or a terminal result can arrive while sendCancel is in flight.
-      const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
+      const latestTaskState = this.state.tasks[activeId] ?? taskState
       if (['completed', 'failed', 'cancelled'].includes(latestTaskState.status)) {
         await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'REJECTED', reason: 'execution already finished' })
         this.rememberEvent(event)
         await this.persistState()
         return
       }
-      this.state.tasks[aampTaskId] = { ...latestTaskState, stopRequested: true, updatedAt: new Date().toISOString() }
+      this.state.tasks[activeId] = { ...latestTaskState, stopRequested: true, updatedAt: new Date().toISOString() }
+      this.syncControlledOwner(this.state.tasks[activeId]!)
       await this.persistState()
       await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'ACCEPTED' })
       this.rememberEvent(event, stopKey)
@@ -2529,6 +2697,8 @@ export class FeishuTaskBridgeRuntime {
   private async handleTaskStreamOpened(stream: TaskStreamOpened): Promise<void> {
     const taskState = this.state.tasks[stream.taskId]
     if (!taskState) return
+    if (!this.isCurrentControlledTask(taskState)) return
+    if (taskState.executionId && ['completed', 'failed', 'cancelled'].includes(taskState.status)) return
     if (taskState.executionId && !isSameMailboxAddress(stream.from, this.config.targetAgentEmail)) return
 
     this.state.tasks[stream.taskId] = {
@@ -2570,7 +2740,7 @@ export class FeishuTaskBridgeRuntime {
     const previous = this.streamEventQueues.get(aampTaskId) ?? Promise.resolve()
     const next = previous
       .catch(() => {})
-      .then(() => this.handleStreamEvent(aampTaskId, event))
+      .then(() => this.enqueueControlledCallback(aampTaskId, () => this.handleStreamEvent(aampTaskId, event)))
       .catch(async (error: Error) => {
         const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
         this.state.lastError = message
@@ -2588,6 +2758,8 @@ export class FeishuTaskBridgeRuntime {
   private async handleStreamEvent(aampTaskId: string, event: AampStreamEvent): Promise<void> {
     const taskState = this.state.tasks[aampTaskId]
     if (!taskState) return
+    if (!this.isCurrentControlledTask(taskState)) return
+    if (taskState.executionId && ['completed', 'failed', 'cancelled'].includes(taskState.status)) return
     if (taskState.executionId && taskState.stopRequested) return
 
     const baseState: BridgeTaskState = {
@@ -2721,7 +2893,8 @@ export class FeishuTaskBridgeRuntime {
       this.streamStepBuffers.delete(aampTaskId)
       return
     }
-    if (taskState.executionId && taskState.stopRequested) {
+    if (!this.isCurrentControlledTask(taskState) || taskState.executionId
+      && (taskState.stopRequested || ['completed', 'failed', 'cancelled'].includes(taskState.status))) {
       this.streamStepBuffers.delete(aampTaskId)
       return
     }
@@ -2762,6 +2935,7 @@ export class FeishuTaskBridgeRuntime {
     if (this.ackCommentInFlight.has(ack.taskId)) return
     const taskState = this.state.tasks[ack.taskId]
     if (!taskState) return
+    if (!this.isCurrentControlledTask(taskState)) return
 
     if (taskState.executionId) {
       if (taskState.stopRequested) return
@@ -2847,7 +3021,9 @@ export class FeishuTaskBridgeRuntime {
   ): Promise<void> {
     const taskState = this.state.tasks[aampTaskId]
     if (!taskState?.executionId) return
+    if (!this.isCurrentControlledTask(taskState)) return
     if (taskState.stopRequested && (state === 'RUNNING' || state === 'BLOCKED')) return
+    if (['completed', 'failed', 'cancelled'].includes(taskState.status) && (state === 'RUNNING' || state === 'BLOCKED')) return
     if (taskState.reportedExecutionState === state) return
     const feedback = this.controlledFeedback
     if (!feedback) throw new Error('Controlled Task feedback transport is not configured')
@@ -2864,6 +3040,7 @@ export class FeishuTaskBridgeRuntime {
     })
     const latest = this.state.tasks[aampTaskId] ?? taskState
     this.state.tasks[aampTaskId] = { ...latest, reportedExecutionState: state, updatedAt: new Date().toISOString() }
+    this.syncControlledOwner(this.state.tasks[aampTaskId]!)
     await this.persistState()
   }
 
@@ -2871,14 +3048,18 @@ export class FeishuTaskBridgeRuntime {
     if (this.helpCommentInFlight.has(help.taskId)) return
     const taskState = this.state.tasks[help.taskId]
     if (!taskState) return
+    if (!this.isCurrentControlledTask(taskState)) return
+    if (taskState.executionId && ['completed', 'failed', 'cancelled'].includes(taskState.status)) return
     if (taskState.executionId) {
       if (taskState.stopRequested) return
       if (!isSameMailboxAddress(help.from, this.config.targetAgentEmail)) return
       this.helpCommentInFlight.add(help.taskId)
       try {
+        await this.markControlledHelpNeeded(help.taskId)
         const question = sanitizeTaskVisibleHelpText(help.question || help.blockedReason || '智能体需要更多信息才能继续处理该任务。', this.config.agent?.executionLocation ?? 'local')
         await this.enqueueStreamStepFlush(help.taskId)
         const latest = this.state.tasks[help.taskId] ?? taskState
+        if (!this.isCurrentControlledTask(latest) || ['completed', 'failed', 'cancelled'].includes(latest.status)) return
         if (!(latest.helpCommentedTaskIds ?? []).includes(help.taskId)) {
           await this.commentTaskOrUploadFallback(latest.taskGuid, question, 'help-needed-comment', taskWriteContext(latest))
           this.state.tasks[help.taskId] = {
@@ -2890,7 +3071,9 @@ export class FeishuTaskBridgeRuntime {
         }
         await this.reportControlledExecutionState(help.taskId, 'BLOCKED')
         const current = this.state.tasks[help.taskId] ?? latest
+        if (!this.isCurrentControlledTask(current) || ['completed', 'failed', 'cancelled'].includes(current.status)) return
         this.state.tasks[help.taskId] = { ...current, status: 'help_needed', updatedAt: new Date().toISOString() }
+        this.syncControlledOwner(this.state.tasks[help.taskId]!)
         await this.persistState()
       } finally {
         this.helpCommentInFlight.delete(help.taskId)
@@ -2940,6 +3123,16 @@ export class FeishuTaskBridgeRuntime {
     }
   }
 
+  private async markControlledHelpNeeded(aampTaskId: string): Promise<void> {
+    const current = this.state.tasks[aampTaskId]
+    if (!current?.executionId || !this.isCurrentControlledTask(current) || current.stopRequested
+      || ['completed', 'failed', 'cancelled'].includes(current.status)) return
+    // The Agent has actually paused. Preserve that fact even if commenting or feedback acknowledgement fails.
+    this.state.tasks[aampTaskId] = { ...current, status: 'help_needed', updatedAt: new Date().toISOString() }
+    this.syncControlledOwner(this.state.tasks[aampTaskId]!)
+    await this.persistState()
+  }
+
   private async handleControlledTaskResult(result: TaskResult, taskState: BridgeTaskState): Promise<void> {
     const aampTaskId = result.taskId
     const executionId = taskState.executionId
@@ -2956,6 +3149,20 @@ export class FeishuTaskBridgeRuntime {
         ...taskState, status: 'failed', resultHandledTaskIds: [...new Set([...(taskState.resultHandledTaskIds ?? []), aampTaskId])],
         updatedAt: new Date().toISOString(),
       }
+      await this.persistState()
+      return
+    }
+
+    if (disposition.kind === 'help_needed' && !taskState.stopRequested) {
+      await this.markControlledHelpNeeded(aampTaskId)
+      const paused = this.state.tasks[aampTaskId] ?? taskState
+      await this.commentHelpNeededOnce(aampTaskId, paused, disposition.message)
+      await this.reportControlledExecutionState(aampTaskId, 'BLOCKED')
+      const latest = this.state.tasks[aampTaskId] ?? paused
+      this.state.tasks[aampTaskId] = { ...latest,
+        resultHandledTaskIds: [...new Set([...(latest.resultHandledTaskIds ?? []), aampTaskId])],
+        updatedAt: new Date().toISOString() }
+      this.syncControlledOwner(this.state.tasks[aampTaskId]!)
       await this.persistState()
       return
     }
@@ -3002,6 +3209,7 @@ export class FeishuTaskBridgeRuntime {
       ...(reason ? { lastError: reason } : { lastError: undefined }),
       updatedAt: new Date().toISOString(),
     }
+    this.syncControlledOwner(this.state.tasks[aampTaskId]!)
     await this.persistState()
   }
 
@@ -3009,6 +3217,7 @@ export class FeishuTaskBridgeRuntime {
     if (this.resultInFlight.has(result.taskId)) return
     const taskState = this.state.tasks[result.taskId]
     if (!taskState) return
+    if (!this.isCurrentControlledTask(taskState)) return
     if (taskState.executionId && !isSameMailboxAddress(result.from, this.config.targetAgentEmail)) return
 
     this.resultInFlight.add(result.taskId)
