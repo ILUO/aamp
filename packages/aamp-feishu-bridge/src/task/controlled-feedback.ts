@@ -18,8 +18,6 @@ export interface ControlledTaskExecutionState {
   executionId: string
   state: AgentTaskExecutionState
   reason?: string
-  /** Present only for a user-comment continuation of this execution. */
-  triggerCommentId?: string
 }
 
 export interface ReportAgentTaskCommandResultBody {
@@ -35,7 +33,6 @@ export interface ReportAgentTaskExecutionStateBody {
   execution_id: string
   state: 1 | 2 | 3 | 4 | 5
   reason?: string
-  trigger_comment_id?: string
 }
 
 /** The OpenAPI transport is supplied only after its route and auth are published. */
@@ -94,13 +91,11 @@ export class ControlledTaskFeedbackReporter {
 
   async reportExecutionState(request: ControlledTaskExecutionState): Promise<void> {
     const { taskGuid, executionId } = requireControlledIdentity(request.taskGuid, request.executionId)
-    const triggerCommentId = request.triggerCommentId?.trim()
     await this.transport.reportExecutionState({
       task_guid: taskGuid,
       execution_id: executionId,
       state: mappedValue(EXECUTION_STATE, request.state, 'state'),
       ...(request.reason !== undefined ? { reason: request.reason } : {}),
-      ...(triggerCommentId ? { trigger_comment_id: triggerCommentId } : {}),
     })
   }
 }

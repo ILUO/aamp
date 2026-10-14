@@ -519,7 +519,6 @@ test('controlled human reply reuses execution and session with a fresh AAMP task
     assert.notEqual(sent.taskId, f.rootId)
     assert.equal(sent.sessionKey, `feishu-task:${f.taskGuid}`)
     assert.equal(sent.dispatchContext?.execution_id, f.executionId)
-    assert.equal(sent.dispatchContext?.trigger_comment_id, f.humanComment.id)
     assert.equal(sent.dispatchContext?.sender_open_id, 'ou_human')
     assert.match(sent.bodyText ?? '', /成都/)
     assert.equal(f.runtime.getStateSnapshot().tasks[f.rootId]?.activeContinuationTaskId, f.childId)
@@ -536,58 +535,39 @@ test('controlled human reply reuses execution and session with a fresh AAMP task
     await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.rootId]?.status, 'completed'))
     assert.deepEqual(f.feedback.states.map(({ state }) => state), [1, 3])
     assert.ok(f.feedback.states.every(({ execution_id }) => execution_id === f.executionId))
-    assert.ok(f.feedback.states.every(({ trigger_comment_id }) => trigger_comment_id === f.humanComment.id))
   } finally { await f.cleanup() }
 })
 
-test('each controlled reply reports a fresh BLOCKED result even without RUNNING and keeps comment identity local to the turn', async () => {
+test('each controlled reply reports a fresh BLOCKED result without RUNNING and duplicate feedback stays deduplicated', async () => {
   const f = await controlledReplyFixture()
   try {
     await f.feishu.emit(f.event)
     assert.equal(f.feedback.states.length, 0)
-    assert.equal(f.runtime.getStateSnapshot().tasks[f.childId]?.triggerCommentId, 'reply_comment_1')
     f.aamp.emitAck(f.childId)
     f.aamp.emitStreamOpened(f.childId, 'reply_ignored_start')
     await waitFor(() => assert.ok(f.aamp.streamHandlers.reply_ignored_start))
     f.aamp.emitStreamEvent('reply_ignored_start', { taskId: f.childId, seq: 1, type: 'text.delta', payload: { text: 'ACP task started' } })
     f.aamp.emitResult(f.childId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"need_help","question":"具体是哪个日期？"}' })
     await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.childId]?.reportedExecutionState, 'BLOCKED'))
-    assert.deepEqual(f.feedback.states, [{ task_guid: f.taskGuid, execution_id: f.executionId, state: 2, trigger_comment_id: 'reply_comment_1' }])
+    assert.deepEqual(f.feedback.states, [{ task_guid: f.taskGuid, execution_id: f.executionId, state: 2 }])
     assert.equal(f.feedback.commands.length, 0)
 
     const secondComment = { ...f.humanComment, id: 'reply_comment_2', content: '今天' }
     f.feishu.getComment = async () => secondComment
     await f.feishu.emit({ ...f.event, eventId: 'evt_fast_reply_2', commentId: secondComment.id })
     const secondId = `feishu-task-${f.taskGuid}-evt_fast_reply_2`
-    assert.equal(f.aamp.sentTasks[1]?.dispatchContext?.trigger_comment_id, secondComment.id)
     // Late callbacks from the previous reply cannot acknowledge or finish this new reply.
     f.aamp.emitResult(f.childId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"旧回复","reply_written":false}' })
     f.aamp.emitHelp(secondId, { question: '还需要几点？' })
     await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[secondId]?.reportedExecutionState, 'BLOCKED'))
-    assert.deepEqual(f.feedback.states.map(({ state, trigger_comment_id }) => [state, trigger_comment_id]), [[2, 'reply_comment_1'], [2, 'reply_comment_2']])
+    assert.deepEqual(f.feedback.states, [
+      { task_guid: f.taskGuid, execution_id: f.executionId, state: 2 },
+      { task_guid: f.taskGuid, execution_id: f.executionId, state: 2 },
+    ])
     assert.equal(f.runtime.getStateSnapshot().tasks[f.rootId]?.status, 'help_needed')
     f.aamp.emitResult(secondId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"need_help","question":"还需要几点？"}' })
     await waitFor(() => assert.ok(f.runtime.getStateSnapshot().tasks[secondId]?.resultHandledTaskIds?.includes(secondId)))
     assert.equal(f.feedback.states.length, 2)
-  } finally { await f.cleanup() }
-})
-
-test('a new controlled START does not inherit the previous reply comment identity', async () => {
-  const f = await controlledReplyFixture()
-  try {
-    await f.feishu.emit(f.event)
-    f.aamp.emitResult(f.childId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"need_help","question":"具体是哪个日期？"}' })
-    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.childId]?.reportedExecutionState, 'BLOCKED'))
-    const newerExecutionId = 'execution_after_reply'
-    await f.feishu.emit({ eventId: 'evt_start_after_reply', taskGuid: f.taskGuid, eventTypes: ['task_agent_start'], executionId: newerExecutionId, action: 'START' })
-    const newerId = `feishu-task-${f.taskGuid}-${newerExecutionId}`
-    assert.equal(f.aamp.sentTasks[1]?.dispatchContext?.trigger_comment_id, undefined)
-    assert.equal(f.runtime.getStateSnapshot().tasks[newerId]?.triggerCommentId, undefined)
-    f.aamp.emitResult(newerId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"新的执行完成","reply_written":false}' })
-    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[newerId]?.reportedExecutionState, 'COMPLETED'))
-    const latest = f.feedback.states.at(-1)!
-    assert.equal(latest.execution_id, newerExecutionId)
-    assert.equal('trigger_comment_id' in latest, false)
   } finally { await f.cleanup() }
 })
 
@@ -609,7 +589,6 @@ test('controlled STOP after a reply cancels the latest child and ignores late ro
     await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.rootId]?.status, 'cancelled'))
     assert.deepEqual(f.feedback.states.map(({ state }) => state), [4])
     assert.equal(f.feedback.states[0]?.execution_id, f.executionId)
-    assert.equal(f.feedback.states[0]?.trigger_comment_id, f.humanComment.id)
   } finally { await f.cleanup() }
 })
 
