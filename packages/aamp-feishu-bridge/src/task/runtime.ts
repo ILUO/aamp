@@ -1142,6 +1142,9 @@ function getNonCommentExecutionIgnoreReason(
   eventKind: FeishuTaskEventKind,
   task: FeishuTaskDetails,
 ): FeishuTaskEventIgnoreReason | undefined {
+  // Task can publish a new START while a previously completed task still reads as done.
+  // Only controlled START events validated for action and execution ID reach this branch.
+  if (eventKind === 'task_agent_start') return undefined
   if (eventKind !== 'task_comment' && !isTaskActiveForExecution(task)) {
     return 'task_not_active'
   }

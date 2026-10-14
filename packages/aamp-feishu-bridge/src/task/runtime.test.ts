@@ -836,6 +836,35 @@ test('controlled START dispatches once by execution ID and reports acceptance wi
   }
 })
 
+test('controlled START dispatches a completed task while legacy create still ignores it', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-'))
+  const aamp = new FakeAampClient()
+  const feishu = new FakeFeishuTaskClient()
+  const feedback = controlledFeedbackRecords()
+  const taskGuid = 'task_completed_restart'
+  feishu.tasks[taskGuid] = { guid: taskGuid, summary: '重新执行', status: 'done', agentTaskStatus: 4 }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu,
+    controlledFeedbackTransport: feedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await runtime.start()
+    await feishu.emit({ eventId: 'evt_done_create', taskGuid, eventTypes: ['task_create'] })
+    assert.deepEqual(aamp.sentTasks, [])
+
+    await feishu.emit({
+      eventId: 'evt_done_start', taskGuid, eventTypes: ['task_agent_start'],
+      executionId: 'execution_new', action: 'START',
+    })
+    assert.deepEqual(aamp.sentTasks.map(({ taskId }) => taskId), [`feishu-task-${taskGuid}-execution_new`])
+    assert.deepEqual(feedback.commands, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('controlled STOP cancels only its execution and does not use legacy completion writes', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-'))
   const aamp = new FakeAampClient()
