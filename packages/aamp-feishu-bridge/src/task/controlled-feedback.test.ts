@@ -37,3 +37,23 @@ test('legacy tasks without an execution ID cannot report controlled feedback', a
   await assert.rejects(reporter.reportExecutionState({ taskGuid: 'task_1', executionId: ' ', state: 'RUNNING' }), /requires taskGuid and executionId/)
   assert.equal(calls, 0)
 })
+
+test('execution feedback carries its triggering comment without changing START or older state bodies', async () => {
+  const states: ReportAgentTaskExecutionStateBody[] = []
+  const commands: ReportAgentTaskCommandResultBody[] = []
+  const reporter = new ControlledTaskFeedbackReporter({
+    async reportCommandResult(body) { commands.push(body) },
+    async reportExecutionState(body) { states.push(body) },
+  })
+  await reporter.reportCommandResult({ taskGuid: 'task_1', executionId: 'run_1', action: 'START', result: 'ACCEPTED' })
+  await reporter.reportExecutionState({ taskGuid: 'task_1', executionId: 'run_1', state: 'RUNNING' })
+  for (const state of ['RUNNING', 'BLOCKED', 'COMPLETED', 'STOPPED', 'FAILED'] as const) {
+    await reporter.reportExecutionState({ taskGuid: 'task_1', executionId: 'run_1', state, triggerCommentId: ' comment_1 ' })
+  }
+  await reporter.reportExecutionState({ taskGuid: 'task_1', executionId: 'run_2', state: 'BLOCKED', triggerCommentId: ' ' })
+
+  assert.equal('trigger_comment_id' in commands[0]!, false)
+  assert.equal('trigger_comment_id' in states[0]!, false)
+  assert.ok(states.slice(1, 6).every(({ trigger_comment_id }) => trigger_comment_id === 'comment_1'))
+  assert.equal('trigger_comment_id' in states[6]!, false)
+})

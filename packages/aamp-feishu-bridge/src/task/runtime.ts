@@ -2480,9 +2480,12 @@ export class FeishuTaskBridgeRuntime {
       ...buildFeishuTaskDispatchOptions(this.config),
     })
     const now = new Date().toISOString()
+    const triggerCommentId = effectiveComment.id?.trim() || event.commentId?.trim() || getEventCommentId(event)?.trim()
     const taskState: BridgeTaskState = {
       taskGuid: owner.taskGuid, aampTaskId, executionId: owner.executionId,
-      startAccepted: owner.startAccepted, reportedExecutionState: 'BLOCKED',
+      ...(triggerCommentId ? { triggerCommentId } : {}),
+      // 续跑复用 execution_id，但首次真实反馈不能被上次 BLOCKED 的去重记录吞掉。
+      startAccepted: owner.startAccepted,
       feishuEventId: event.eventId, feishuEventKind: 'task_comment',
       ...(task.taskId ? { feishuTaskId: task.taskId } : {}),
       ...(task.subtasks?.length ? { childTaskGuids: task.subtasks.map((subtask) => subtask.guid) } : {}),
@@ -2500,6 +2503,7 @@ export class FeishuTaskBridgeRuntime {
         to: this.config.targetAgentEmail, taskId: aampTaskId, sessionKey: dispatch.sessionKey,
         title: dispatch.title, bodyText, rawBodyText: bodyText, promptRules: dispatch.promptRules,
         dispatchContext: { ...dispatch.dispatchContext, execution_id: owner.executionId,
+          ...(triggerCommentId ? { trigger_comment_id: triggerCommentId } : {}),
           [AAMP_CANCEL_RESULT_CONTEXT_KEY]: 'cancelled' },
         attachments: preparedAttachments.attachments.length ? preparedAttachments.attachments : undefined,
       })
@@ -2571,6 +2575,7 @@ export class FeishuTaskBridgeRuntime {
           await feedback.reportExecutionState({
             taskGuid: event.taskGuid, executionId, state: terminalState,
             ...(taskState.lastError ? { reason: taskState.lastError } : {}),
+            ...(taskState.triggerCommentId ? { triggerCommentId: taskState.triggerCommentId } : {}),
           })
         }
         this.rememberEvent(event, stopKey)
@@ -3040,6 +3045,7 @@ export class FeishuTaskBridgeRuntime {
       executionId: taskState.executionId,
       state,
       ...(reason ? { reason } : {}),
+      ...(taskState.triggerCommentId ? { triggerCommentId: taskState.triggerCommentId } : {}),
     })
     const latest = this.state.tasks[aampTaskId] ?? taskState
     this.state.tasks[aampTaskId] = { ...latest, reportedExecutionState: state, updatedAt: new Date().toISOString() }

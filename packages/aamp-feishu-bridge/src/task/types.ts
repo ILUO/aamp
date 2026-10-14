@@ -52,6 +52,8 @@ export interface BridgeTaskState {
   aampTaskId: string
   /** Set only for a controlled execution; legacy event dispatches leave this absent. */
   executionId?: string
+  /** User comment that triggered this continuation; absent on the original START. */
+  triggerCommentId?: string
   /** Root execution ownership survives replies; STOP targets this latest AAMP turn when set. */
   activeContinuationTaskId?: string
   startAccepted?: boolean

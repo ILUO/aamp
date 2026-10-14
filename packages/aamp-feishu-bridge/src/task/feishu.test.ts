@@ -69,10 +69,12 @@ test('controlled feedback uses the existing Feishu client identity, domain and e
   const feedback = client.createControlledFeedbackTransport(feedbackPaths)
   await feedback.reportCommandResult({ task_guid: 'task_1', execution_id: 'run_1', action: 1, result: 1 })
   await feedback.reportExecutionState({ task_guid: 'task_1', execution_id: 'run_1', state: 3 })
+  await feedback.reportExecutionState({ task_guid: 'task_1', execution_id: 'run_1', state: 2, trigger_comment_id: 'comment_1' })
 
   assert.deepEqual(requests, [
     { method: 'POST', url: `https://open.feishu-pre.cn${feedbackPaths.commandResultPath}`, params: {}, headers: { Authorization: 'Bearer app-token', 'x-tt-env': 'ppe_test' }, data: { task_guid: 'task_1', execution_id: 'run_1', action: 1, result: 1 } },
     { method: 'POST', url: `https://open.feishu-pre.cn${feedbackPaths.executionStatePath}`, params: {}, headers: { Authorization: 'Bearer app-token', 'x-tt-env': 'ppe_test' }, data: { task_guid: 'task_1', execution_id: 'run_1', state: 3 } },
+    { method: 'POST', url: `https://open.feishu-pre.cn${feedbackPaths.executionStatePath}`, params: {}, headers: { Authorization: 'Bearer app-token', 'x-tt-env': 'ppe_test' }, data: { task_guid: 'task_1', execution_id: 'run_1', state: 2, trigger_comment_id: 'comment_1' } },
   ])
 })
 
