@@ -300,7 +300,12 @@ function buildPromptDispatchFailureComment(
   ].join('\n')
 }
 
-function describeTaskResultFailure(disposition: Extract<FeishuTaskResultDisposition, { kind: 'failure' }>): string {
+function describeTaskResultFailure(disposition: Extract<FeishuTaskResultDisposition, { kind: 'failure' }>, controlled: boolean): string {
+  if (controlled) {
+    if (disposition.reason === 'agent_failed') return '本次执行失败。'
+    if (disposition.reason === 'bridge_output_write') return '智能体已返回结果，但部分交付内容写入失败。'
+    return '智能体返回的结果格式不符合任务协议，本次执行失败。'
+  }
   if (disposition.reason === 'agent_failed') {
     return '智能体处理失败，本次任务已结束。任务将流转为已完成。'
   }
@@ -310,8 +315,8 @@ function describeTaskResultFailure(disposition: Extract<FeishuTaskResultDisposit
   return '智能体返回的结果格式不符合任务协议，本次处理已结束。任务将流转为已完成。'
 }
 
-function buildTaskResultFailureComment(disposition: Extract<FeishuTaskResultDisposition, { kind: 'failure' }>): string {
-  return `${describeTaskResultFailure(disposition)}原因：${truncateForShortFailureReason(disposition.message)}`
+function buildTaskResultFailureComment(disposition: Extract<FeishuTaskResultDisposition, { kind: 'failure' }>, controlled: boolean): string {
+  return `${describeTaskResultFailure(disposition, controlled)}原因：${truncateForShortFailureReason(disposition.message)}`
 }
 
 function buildTaskLogCollectHint(aampTaskId: string): string {
@@ -3736,7 +3741,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     const comment = [
-      buildTaskResultFailureComment(disposition),
+      buildTaskResultFailureComment(disposition, Boolean(latestTaskState.executionId)),
       buildTaskLogCollectHint(aampTaskId),
     ].join('\n')
 

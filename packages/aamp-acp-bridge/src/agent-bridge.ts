@@ -532,6 +532,11 @@ function isClosedStreamAppendError(err: unknown): boolean {
     && message.includes('Task stream is already closed')
 }
 
+function isRateLimitedStreamAppendError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /^AAMP stream append failed: 429(?:\s|$)/.test(message)
+}
+
 function isStreamServiceUnavailableError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return message.includes('AAMP stream create failed: 503')
@@ -1306,6 +1311,20 @@ export class AgentBridge {
       timer?: ReturnType<typeof setTimeout>
     } | null = null
 
+    const handleStreamAppendFailure = (err: unknown): boolean => {
+      if (isClosedStreamAppendError(err)) {
+        streamClosed = true
+        return true
+      }
+      if (isRateLimitedStreamAppendError(err)) {
+        // 进度流限流时停用本轮展示，任务结果仍通过独立消息交付。
+        streamClosed = true
+        console.warn(`[${this.name}] AAMP stream rate limited for ${task.taskId}; continuing without realtime stream`)
+        return true
+      }
+      return false
+    }
+
     const queueStreamAppend = (
       type: 'text.delta' | 'todo' | 'tool_call' | 'artifact' | 'status',
       payload: Record<string, unknown>,
@@ -1322,10 +1341,7 @@ export class AgentBridge {
       })
         .then(() => undefined)
         .catch((err) => {
-          if (isClosedStreamAppendError(err)) {
-            streamClosed = true
-            return
-          }
+          if (handleStreamAppendFailure(err)) return
           console.warn(
             `[${this.name}] Failed to append ${type} stream event for ${task.taskId}: ${(err as Error).message}`,
           )
@@ -1434,10 +1450,7 @@ export class AgentBridge {
           payload,
         })
       } catch (err) {
-        if (isClosedStreamAppendError(err)) {
-          streamClosed = true
-          return
-        }
+        if (handleStreamAppendFailure(err)) return
         throw err
       }
     }
@@ -1447,11 +1460,18 @@ export class AgentBridge {
       await flushStreamWrites()
       const client = this.client
       if (!client || isBridgeStopping() || !activeStream || streamClosed) return
-      await client.closeStream({
-        streamId: activeStream.streamId,
-        payload,
-      })
-      streamClosed = true
+      try {
+        await client.closeStream({
+          streamId: activeStream.streamId,
+          payload,
+        })
+      } catch (err) {
+        // 关闭进度流失败不能阻断已经确定的结果、求助或取消消息。
+        const message = err instanceof Error ? err.message : String(err)
+        console.warn(`[${this.name}] Failed to close stream for ${task.taskId}; continuing terminal delivery: ${message}`)
+      } finally {
+        streamClosed = true
+      }
     }
 
     const finishCancelledTask = (): Promise<void> | null => {

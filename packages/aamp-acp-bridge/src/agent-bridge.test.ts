@@ -95,6 +95,8 @@ class FakeAampClient {
   gatePromptAppend = false
   gateHydrate = false
   gateDownload = false
+  appendFailure: Error | undefined
+  appendFailureSummary: string | undefined
   closeFailure: Error | undefined
   resultFailure: Error | undefined
   helpFailure: Error | undefined
@@ -202,6 +204,9 @@ class FakeAampClient {
       payload: options.payload,
     }
     this.streamEvents.push(event)
+    if (this.appendFailure && (this.appendFailureSummary === undefined || options.payload.summary === this.appendFailureSummary)) {
+      throw this.appendFailure
+    }
     if (this.gatePromptAppend && options.payload.summary === 'Prompt sent to ACP agent') {
       this.promptAppendStarted.resolve()
       await this.promptAppendGate.promise
@@ -1335,9 +1340,11 @@ async function assertTerminalClaimBeatsCancel(
   context: TestContext,
   outcome: TerminalOutcome,
   gate: 'close' | 'send',
+  closeFailure?: Error,
 ): Promise<void> {
   const taskId = `terminal-${outcome}-${gate}`
   const { events, fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeClient.closeFailure = closeFailure
   if (outcome === 'help_needed') {
     fakeAcpx.promptResult = {
       output: 'HELP: Please provide the missing decision.',
@@ -1431,6 +1438,80 @@ test('rejected send uses an atomic terminal claim against cancellation', async (
   await assertTerminalClaimBeatsCancel(context, 'rejected', 'send')
 })
 
+for (const outcome of ['completed', 'help_needed', 'rejected'] as const) {
+  test(`${outcome} is delivered once after stream close 429 despite a late cancel`, async (context) => {
+    await assertTerminalClaimBeatsCancel(context, outcome, 'close', new Error('AAMP stream close failed: 429 Too Many Requests'))
+  })
+}
+
+for (const phase of [
+  { name: 'startup', summary: undefined },
+  { name: 'before-prompt', summary: 'Prompt sent to ACP agent' },
+  { name: 'after-response', summary: 'ACP response received' },
+]) {
+  test(`stream append 429 ${phase.name} does not prevent the final result`, async (context) => {
+    const taskId = `append-rate-limited-${phase.name}`
+    const { events, fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+    fakeClient.appendFailure = new Error('AAMP stream append failed: 429 Too Many Requests')
+    fakeClient.appendFailureSummary = phase.summary
+    fakeClient.streamCloseGate.resolve()
+    fakeClient.resultGate.resolve()
+
+    await fakeClient.emitTaskDispatch(cancellationTask(taskId))
+
+    assert.equal(fakeAcpx.calls.filter((call) => call.method === 'prompt').length, 1)
+    assert.equal(fakeClient.results.length, 1)
+    assert.equal(fakeClient.results[0]?.status, 'completed')
+    assert.equal(fakeClient.results[0]?.output, 'remote agent response')
+    assert.deepEqual(fakeClient.helps, [])
+    assert.deepEqual(fakeClient.streamCloses, [])
+    if (phase.summary) assert.equal(fakeClient.streamEvents.at(-1)?.payload.summary, phase.summary)
+    else assert.equal(fakeClient.streamEvents.length, 1)
+    assert.deepEqual(events.filter((event) => event.type === 'task.completed').map((event) => event.status), ['completed'])
+  })
+}
+
+for (const code of [401, 403, 500]) {
+  test(`stream append ${code} retains the rejected outcome`, async (context) => {
+    const taskId = `append-failed-${code}`
+    const { events, fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+    fakeClient.appendFailure = new Error(`AAMP stream append failed: ${code} failure`)
+    fakeClient.streamCloseGate.resolve()
+    fakeClient.resultGate.resolve()
+
+    await fakeClient.emitTaskDispatch(cancellationTask(taskId))
+
+    assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt'), false)
+    assert.equal(fakeClient.results.length, 1)
+    assert.equal(fakeClient.results[0]?.status, 'rejected')
+    assert.match(fakeClient.results[0]?.errorMsg ?? '', new RegExp(`stream append failed: ${code}`))
+    assert.deepEqual(events.filter((event) => event.type === 'task.completed').map((event) => event.status), ['rejected'])
+  })
+}
+
+test('queued progress append 429 disables later progress without losing the result', async (context) => {
+  const taskId = 'queued-append-rate-limited'
+  const { events, fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeClient.streamCloseGate.resolve()
+  fakeClient.resultGate.resolve()
+  const prompt = fakeAcpx.prompt.bind(fakeAcpx)
+  fakeAcpx.prompt = async (agent, sessionName, text, handlers) => {
+    fakeClient.appendFailure = new Error('AAMP stream append failed: 429 Too Many Requests')
+    handlers?.onPlanUpdate?.([{ content: 'working', status: 'in_progress', priority: 'medium' }])
+    return prompt(agent, sessionName, text, handlers)
+  }
+
+  await fakeClient.emitTaskDispatch(cancellationTask(taskId))
+
+  assert.equal(fakeClient.results.length, 1)
+  assert.equal(fakeClient.results[0]?.status, 'completed')
+  assert.deepEqual(fakeClient.streamEvents.at(-1)?.payload, {
+    items: [{ id: 'plan-1', content: 'working', status: 'in_progress' }],
+  })
+  assert.deepEqual(fakeClient.streamCloses, [])
+  assert.deepEqual(events.filter((event) => event.type === 'task.completed').map((event) => event.status), ['completed'])
+})
+
 test('failed claimed completed send does not fall back to a rejected outcome', async (context) => {
   const taskId = 'terminal-send-failure'
   const { events, fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
@@ -1457,11 +1538,12 @@ test('failed claimed completed send does not fall back to a rejected outcome', a
   }
 })
 
-test('failed claimed completed close does not send or emit a fallback outcome', async (context) => {
+test('failed claimed completed close still sends the claimed result without a fallback outcome', async (context) => {
   const taskId = 'terminal-close-failure'
   const { events, fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
   fakeClient.closeFailure = new Error('stream close transport failed')
   fakeClient.streamCloseGate.resolve()
+  fakeClient.resultGate.resolve()
   const dispatch = fakeClient.emitTaskDispatch(cancellationTask(taskId))
 
   try {
@@ -1471,9 +1553,10 @@ test('failed claimed completed close does not send or emit a fallback outcome', 
       streamId: `stream-${taskId}`,
       payload: { reason: 'task.result', status: 'completed' },
     }])
-    assert.deepEqual(fakeClient.results, [])
+    assert.equal(fakeClient.results.length, 1)
+    assert.equal(fakeClient.results[0]?.status, 'completed')
     assert.deepEqual(fakeClient.helps, [])
-    assert.deepEqual(events.filter((event) => event.type === 'task.completed'), [])
+    assert.deepEqual(events.filter((event) => event.type === 'task.completed').map((event) => event.status), ['completed'])
     assert.equal(events.some((event) => event.type === 'task.rejected'), false)
   } finally {
     releaseCancellationGates(fakeClient, fakeAcpx)
@@ -1601,6 +1684,30 @@ test('controlled cancellation reports one terminal result after ACP settles and 
       output: '',
       inReplyTo: `<${taskId}@example.com>`,
     }])
+    assert.equal(fakeAcpx.calls.filter((call) => call.method === 'cancel').length, 1)
+  } finally {
+    releaseCancellationGates(fakeClient, fakeAcpx)
+    await dispatch.catch(() => undefined)
+  }
+})
+
+test('controlled cancellation still delivers only cancelled when stream close is rate limited', async (context) => {
+  const taskId = 'controlled-cancel-close-rate-limited'
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeAcpx.gatePrompt = true
+  fakeClient.closeFailure = new Error('AAMP stream close failed: 429 Too Many Requests')
+  fakeClient.streamCloseGate.resolve()
+  fakeClient.resultGate.resolve()
+  const dispatch = fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+  try {
+    await fakeAcpx.promptStarted.promise
+    await fakeClient.emitTaskCancel(cancellationEvent(taskId))
+    fakeAcpx.promptGate.resolve({ output: 'late success must be suppressed', events: [], streamedAssistantText: false })
+    await dispatch
+
+    assert.deepEqual(fakeClient.results.map(({ status }) => status), ['cancelled'])
+    assert.equal(fakeClient.results[0]?.output, '')
+    assert.deepEqual(fakeClient.helps, [])
     assert.equal(fakeAcpx.calls.filter((call) => call.method === 'cancel').length, 1)
   } finally {
     releaseCancellationGates(fakeClient, fakeAcpx)

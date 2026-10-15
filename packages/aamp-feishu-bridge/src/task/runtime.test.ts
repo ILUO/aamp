@@ -1306,6 +1306,48 @@ test('controlled rejected AAMP result before ACK reports START rejected without 
   }
 })
 
+test('controlled rejected result after ACK reports FAILED without promising legacy completion', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-'))
+  const aamp = new FakeAampClient()
+  const feishu = new FakeFeishuTaskClient()
+  const feedback = controlledFeedbackRecords()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu, controlledFeedbackTransport: feedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const taskGuid = 'task_controlled_failed'
+  const executionId = 'execution_failed'
+  const taskId = `feishu-task-${taskGuid}-${executionId}`
+  const reason = 'ACP agent error: AAMP stream append failed: 429 Too Many Requests'
+  try {
+    await runtime.start()
+    await feishu.emit({ eventId: 'evt_start_failed', taskGuid, eventTypes: ['task_agent_start'], executionId, action: 'START' })
+    aamp.emitAck(taskId)
+    await waitFor(() => assert.equal(feedback.commands.length, 1))
+
+    aamp.emitResult(taskId, { status: 'rejected', errorMsg: reason })
+
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[taskId]?.status, 'failed'))
+    assert.deepEqual(feedback.states, [{ task_guid: taskGuid, execution_id: executionId, state: 5, reason }])
+    assert.deepEqual(feishu.completedTaskGuids, [])
+    assert.equal(feishu.comments.length, 1)
+    assert.match(feishu.comments[0]?.content ?? '', /^本次执行失败。原因：/)
+    assert.doesNotMatch(feishu.comments[0]?.content ?? '', /已完成/)
+    assert.match(feishu.comments[0]?.content ?? '', /stream append failed: 429/)
+    assert.deepEqual(feishu.writes.map(({ method, executionId: writtenExecutionId }) => [method, writtenExecutionId]), [
+      ['commentTask', executionId],
+    ])
+
+    aamp.emitResult(taskId, { status: 'rejected', errorMsg: reason })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(feishu.comments.length, 1)
+    assert.equal(feedback.states.length, 1)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('controlled START without feedback transport never sends work to AAMP', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-'))
   const aamp = new FakeAampClient()
