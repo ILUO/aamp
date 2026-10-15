@@ -10,6 +10,26 @@ const feedbackPaths = {
   executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
 }
 
+test('Task detail preserves current app assignees separately from followers and missing members', async () => {
+  const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  const members = [
+    { id: 'cli_test', type: 'app', role: 'assignee' },
+    { id: 'cli_other', type: 'app', role: 'follower' },
+    { id: 'ou_human', type: 'user', role: 'assignee' },
+  ]
+  let includeMembers = true
+  ;(client as unknown as { client: unknown }).client = {
+    task: { v2: { task: { get: async () => ({ code: 0, data: { task: {
+      guid: 'task_1', summary: 'test', ...(includeMembers ? { members } : {}),
+    } } }) } } },
+  }
+  assert.deepEqual((await client.getTaskBase('task_1')).members, members)
+  includeMembers = false
+  assert.equal((await client.getTaskBase('task_1')).members, undefined)
+})
+
 test('Agent registration keeps the existing request payload', async () => {
   const requests: Array<{ method: string; url: string; data: Record<string, unknown> }> = []
   const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {

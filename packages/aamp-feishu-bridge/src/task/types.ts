@@ -229,6 +229,8 @@ export interface FeishuTaskDetails {
   url?: string
   status?: FeishuTaskStatus
   agentTaskStatus?: number
+  /** Current assignees and followers returned by Task; absent means ownership is unknown. */
+  members?: Array<{ id: string; type: string; role: string }>
   parentGuid?: string
   rrule?: string
   reminders?: unknown[]

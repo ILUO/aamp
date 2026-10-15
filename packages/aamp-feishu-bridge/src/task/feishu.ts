@@ -426,6 +426,13 @@ function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails 
   const attachments = mapV2Attachments(record.attachments, 'task_attachment')
   const attachmentDeliveries = mapV2Attachments(record.attachment_deliveries, 'task_delivery')
   const origin = mapV2Origin(record.origin)
+  const members = getArray(record.members)?.flatMap((value) => {
+    const member = asRecord(value)
+    const id = getString(member?.id)
+    const type = getString(member?.type)
+    const role = getString(member?.role)
+    return id && type && role ? [{ id, type, role }] : []
+  })
 
   return {
     guid: getString(record.guid) ?? fallbackGuid,
@@ -435,6 +442,7 @@ function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails 
     ...(getString(record.url) ? { url: getString(record.url) } : {}),
     ...(status ? { status } : {}),
     ...(agentTaskStatus !== undefined ? { agentTaskStatus } : {}),
+    ...(members !== undefined ? { members } : {}),
     ...(getString(record.parent_task_guid) ? { parentGuid: getString(record.parent_task_guid) } : {}),
     ...(rrule ? { rrule } : {}),
     ...(getArray(record.reminders) ? { reminders: getArray(record.reminders) } : {}),

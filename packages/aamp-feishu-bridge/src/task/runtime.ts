@@ -72,6 +72,8 @@ type FeishuTaskEventIgnoreReason =
   | 'duplicate_task_event'
   | 'invalid_controlled_command'
   | 'controlled_task_uses_commands'
+  | 'task_members_unavailable'
+  | 'agent_not_current_assignee'
 const MAX_STREAM_STEPS_PER_TASK = 32
 const STREAM_STEP_FLUSH_BATCH_SIZE = 4
 const STREAM_STEP_FLUSH_INTERVAL_MS = 5000
@@ -1682,6 +1684,7 @@ export class FeishuTaskBridgeRuntime {
 
     await this.ensureFeishuAgentRegistered()
     await this.ensureFeishuTaskEventsSubscribed()
+    await this.restoreStoppedCompletedHelpTurns()
 
     this.registerAampHandlers()
 
@@ -1895,6 +1898,19 @@ export class FeishuTaskBridgeRuntime {
     await this.persistState()
   }
 
+  private getTaskAssigneeIgnoreReason(task: FeishuTaskDetails): FeishuTaskEventIgnoreReason | undefined {
+    if (task.members === undefined) return 'task_members_unavailable'
+    const appId = this.config.feishu.appId.trim()
+    return task.members.some((member) => member.role === 'assignee'
+      && member.type === 'app' && member.id.trim() === appId)
+      ? undefined : 'agent_not_current_assignee'
+  }
+
+  private async verifyCurrentTaskAssignee(taskGuid: string): Promise<FeishuTaskEventIgnoreReason | undefined> {
+    const task = await withPromptDispatchFailure('read_task_details', () => this.feishu.getTaskBase(taskGuid))
+    return this.getTaskAssigneeIgnoreReason(task)
+  }
+
   private async loadTaskForDispatchEvent(
     event: FeishuTaskEvent,
     eventKind: FeishuTaskEventKind,
@@ -1907,6 +1923,8 @@ export class FeishuTaskBridgeRuntime {
     this.debugLog(`[feishu task ${event.taskGuid}] loading base details`, { taskId: aampTaskId })
     const baseTask = await withPromptDispatchFailure('read_task_details', () => this.feishu.getTaskBase(event.taskGuid))
     this.debugLog(`[feishu task ${baseTask.guid}] loaded base summary="${baseTask.summary}"`, { taskId: aampTaskId })
+    const assigneeIgnoreReason = this.getTaskAssigneeIgnoreReason(baseTask)
+    if (assigneeIgnoreReason) return { ignoreReason: assigneeIgnoreReason }
 
     const createIgnoreReason = getTaskCreateIgnoreReason(eventKind, baseTask)
     if (createIgnoreReason) return { ignoreReason: createIgnoreReason }
@@ -2214,9 +2232,7 @@ export class FeishuTaskBridgeRuntime {
       return
     }
     // The newest controlled round remains authoritative after finishing; comments cannot fall back to legacy.
-    const owner = Object.values(this.state.tasks)
-      .filter((task) => task.taskGuid === event.taskGuid && task.executionId && this.getControlledOwner(task) === task)
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
+    const owner = this.getLatestControlledOwner(event.taskGuid)
     if (owner) {
       if (eventKind === 'task_comment' && !['completed', 'failed', 'cancelled'].includes(owner.status)) {
         await this.handleControlledCommentEvent(event, owner, semanticEventKey)
@@ -2311,6 +2327,15 @@ export class FeishuTaskBridgeRuntime {
       }
       this.state.tasks[dispatch.taskId] = taskState
       await this.persistState()
+      // Preparing context can overlap START or assignee removal. Re-read immediately before sending.
+      const latestTask = await withPromptDispatchFailure('read_task_details', () => this.feishu.getTaskBase(event.taskGuid))
+      const dispatchIgnoreReason = this.getTaskAssigneeIgnoreReason(latestTask)
+        ?? (this.getLatestControlledOwner(event.taskGuid) ? 'controlled_task_uses_commands' : undefined)
+      if (dispatchIgnoreReason) {
+        delete this.state.tasks[dispatch.taskId]
+        await this.ignoreFeishuTaskEvent(event, dispatchIgnoreReason)
+        return
+      }
       const feishuCliProfile = this.config.feishu.cliProfile?.trim()
       this.logger.log([
         `[aamp dispatch ${dispatch.taskId}] sending`,
@@ -2418,6 +2443,46 @@ export class FeishuTaskBridgeRuntime {
     return this.state.tasks[rootId]
   }
 
+  private getLatestControlledOwner(taskGuid: string): BridgeTaskState | undefined {
+    return Object.values(this.state.tasks)
+      .filter((task) => task.taskGuid === taskGuid && task.executionId && this.getControlledOwner(task) === task)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
+  }
+
+  private async finishStoppedCompletedHelpTurn(aampTaskId: string): Promise<boolean> {
+    const task = this.state.tasks[aampTaskId]
+    // A BLOCKED marker alone may belong to a live continuation. Only this exact
+    // completed need_help turn can finish an already requested STOP without a new ACP result.
+    if (!task?.executionId || !task.stopRequested || task.status !== 'help_needed'
+      || task.reportedExecutionState !== 'BLOCKED' || !task.resultHandledTaskIds?.includes(aampTaskId)
+      || !this.isCurrentControlledTask(task)
+      || this.getLatestControlledOwner(task.taskGuid)?.executionId !== task.executionId) return false
+    await this.reportControlledExecutionState(aampTaskId, 'STOPPED')
+    const latest = this.state.tasks[aampTaskId] ?? task
+    this.state.tasks[aampTaskId] = { ...latest, status: 'cancelled', updatedAt: new Date().toISOString() }
+    this.syncControlledOwner(this.state.tasks[aampTaskId]!)
+    await this.persistState()
+    return true
+  }
+
+  private async restoreStoppedCompletedHelpTurns(): Promise<void> {
+    const owners = Object.values(this.state.tasks).filter((task) => task.executionId
+      && task.stopRequested && this.getControlledOwner(task) === task)
+    for (const owner of owners) {
+      const activeId = owner.activeContinuationTaskId ?? owner.aampTaskId
+      try {
+        if (await this.finishStoppedCompletedHelpTurn(activeId)) {
+          this.logger.log(`[task ${owner.taskGuid}] restored completed help STOP execution=${owner.executionId}`, { taskId: activeId })
+        }
+      } catch (error) {
+        // Keep the saved STOP and completion marker so another startup/manual STOP can retry it.
+        const message = formatUnknownError(error)
+        this.state.lastError = message
+        this.logger.error(`[task ${owner.taskGuid}] completed help STOP feedback failed: ${message}`, { taskId: activeId })
+      }
+    }
+  }
+
   private isCurrentControlledTask(taskState: BridgeTaskState): boolean {
     if (!taskState.executionId) return true
     const owner = this.getControlledOwner(taskState)
@@ -2496,6 +2561,8 @@ export class FeishuTaskBridgeRuntime {
     let sentToAamp = false
     try {
       await this.persistState()
+      const assigneeIgnoreReason = await this.verifyCurrentTaskAssignee(event.taskGuid)
+      if (assigneeIgnoreReason) throw new Error(`Task is not dispatchable: ${assigneeIgnoreReason}`)
       const bodyText = appendAttachmentNotes(dispatch.bodyText, preparedAttachments.notes)
       const sent = await this.aamp.sendTask({
         to: this.config.targetAgentEmail, taskId: aampTaskId, sessionKey: dispatch.sessionKey,
@@ -2609,6 +2676,7 @@ export class FeishuTaskBridgeRuntime {
       this.syncControlledOwner(this.state.tasks[activeId]!)
       await this.persistState()
       await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'ACCEPTED' })
+      await this.finishStoppedCompletedHelpTurn(activeId)
       this.rememberEvent(event, stopKey)
       await this.persistState()
       return
@@ -2662,6 +2730,8 @@ export class FeishuTaskBridgeRuntime {
       }
       this.state.tasks[aampTaskId] = taskState
       await this.persistState()
+      const assigneeIgnoreReason = await this.verifyCurrentTaskAssignee(event.taskGuid)
+      if (assigneeIgnoreReason) throw new Error(`Task is not dispatchable: ${assigneeIgnoreReason}`)
       const bodyText = appendAttachmentNotes(dispatch.bodyText, preparedAttachments.notes)
       const sent = await this.aamp.sendTask({
         to: this.config.targetAgentEmail,
