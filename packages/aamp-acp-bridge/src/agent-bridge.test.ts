@@ -7,6 +7,7 @@ import {
   AampClient,
   AAMP_CANCEL_RESULT_CONTEXT_KEY,
   type AampStreamEvent,
+  type AampThreadEvent,
   type CreateStreamResult,
   type HydratedTaskDispatch,
   type SendResultOptions,
@@ -100,6 +101,7 @@ class FakeAampClient {
   closeFailure: Error | undefined
   resultFailure: Error | undefined
   helpFailure: Error | undefined
+  threadHistory: AampThreadEvent[] = []
   private readonly handlers = new Map<string, StoredHandler[]>()
   private connected = false
   private readonly streams = new Map<string, CreateStreamResult>()
@@ -169,7 +171,7 @@ class FakeAampClient {
     if (this.gateHydrate) await this.hydrateGate.promise
     return {
       ...task,
-      threadHistory: [],
+      threadHistory: this.threadHistory,
       threadContextText: '',
     }
   }
@@ -1174,6 +1176,10 @@ function controlledCancellationTask(taskId: string): TaskDispatch {
   })
 }
 
+function historyEvent(intent: AampThreadEvent['intent'], from = 'sender@example.com', to = 'agent@meshmail.test'): AampThreadEvent {
+  return { intent, from, to, createdAt: '2026-10-16T09:32:59.863Z', messageId: `<history-${intent}@example.com>` }
+}
+
 function cancellationEvent(taskId: string): TaskCancel {
   return {
     protocolVersion: '1.1',
@@ -1962,6 +1968,99 @@ test('controlled STOP before START reports cancellation without starting ACP', a
   await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
 
   assert.deepEqual(fakeClient.results.map((result) => result.status), ['cancelled'])
+  assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt'), false)
+})
+
+test('controlled cancel already in the current dispatch history returns cancelled once without ACP startup', async (context) => {
+  const taskId = 'controlled-history-cancel'
+  const { bridge, fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeClient.resultGate.resolve()
+  fakeClient.threadHistory = [historyEvent('task.cancel', ' SENDER@example.com ', 'AGENT@meshmail.test')]
+  await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+  await fakeClient.emitTaskCancel(cancellationEvent(taskId))
+  await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+  assert.deepEqual(fakeClient.results.map(({ status, taskId }) => ({ status, taskId })), [{ status: 'cancelled', taskId }])
+  assert.deepEqual(fakeClient.createdStreams, [])
+  assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt' || call.method === 'cancel'), false)
+  assert.equal(activeTaskSessionCount(bridge), 0)
+})
+
+test('controlled cancel during hydration still returns one cancelled receipt on the early return', async (context) => {
+  const taskId = 'controlled-hydration-cancel'
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeClient.gateHydrate = true
+  fakeClient.resultGate.resolve()
+  const dispatch = fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+  await fakeClient.hydrateStarted.promise
+  await fakeClient.emitTaskCancel(cancellationEvent(taskId))
+  fakeClient.hydrateGate.resolve()
+  await dispatch
+  assert.deepEqual(fakeClient.results.map(({ status }) => status), ['cancelled'])
+  assert.deepEqual(fakeClient.createdStreams, [])
+  assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt' || call.method === 'cancel'), false)
+})
+
+test('controlled cancellation while waiting for the session mutex reports only the queued turn cancelled', async (context) => {
+  const firstId = 'controlled-mutex-owner'
+  const nextId = 'controlled-mutex-queued'
+  const { bridge, fakeClient, fakeAcpx } = await cancellationHarness(context, firstId)
+  fakeAcpx.gatePrompt = true
+  fakeClient.streamCloseGate.resolve()
+  fakeClient.resultGate.resolve()
+  const first = fakeClient.emitTaskDispatch(controlledCancellationTask(firstId))
+  await fakeAcpx.promptStarted.promise
+  const queuedTask = controlledCancellationTask(nextId)
+  queuedTask.sessionKey = `conversation:${firstId}`
+  const queued = fakeClient.emitTaskDispatch(queuedTask)
+  await until(() => [...sessionMutexQueues(bridge).values()].some((queue) => queue.length === 1), 'second turn should wait for the session mutex')
+  await fakeClient.emitTaskCancel(cancellationEvent(nextId))
+  await queued
+  assert.deepEqual(fakeClient.results.map(({ taskId, status }) => ({ taskId, status })), [{ taskId: nextId, status: 'cancelled' }])
+  assert.equal(fakeAcpx.calls.filter((call) => call.method === 'prompt').length, 1)
+  assert.equal(fakeAcpx.calls.some((call) => call.method === 'cancel'), false)
+  fakeAcpx.promptGate.resolve(fakeAcpx.promptResult)
+  await first
+})
+
+for (const intent of ['task.result', 'task.help_needed'] as const) {
+  test(`a historical ${intent} prevents a later cancel from producing a conflicting receipt`, async (context) => {
+    const taskId = `controlled-history-${intent}`
+    const { fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+    fakeClient.resultGate.resolve()
+    fakeClient.threadHistory = [historyEvent(intent, 'agent@meshmail.test', 'sender@example.com'), historyEvent('task.cancel')]
+    await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+    await fakeClient.emitTaskCancel(cancellationEvent(taskId))
+    assert.deepEqual(fakeClient.results, [])
+    assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt' || call.method === 'cancel'), false)
+  })
+}
+
+for (const [name, from, to] of [
+  ['foreign-sender', 'intruder@example.com', 'agent@meshmail.test'],
+  ['foreign-recipient', 'sender@example.com', 'different-agent@meshmail.test'],
+] as const) {
+  test(`controlled history cancel from ${name} cannot suppress the dispatch or return cancellation`, async (context) => {
+    const taskId = `controlled-history-${name}`
+    const { fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+    fakeClient.streamCloseGate.resolve()
+    fakeClient.resultGate.resolve()
+    fakeClient.threadHistory = [historyEvent('task.cancel', from, to)]
+    await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+    assert.deepEqual(fakeClient.results.map(({ status }) => status), ['completed'])
+    assert.equal(fakeAcpx.calls.filter((call) => call.method === 'prompt').length, 1)
+  })
+}
+
+test('failed controlled cancel result delivery is attempted once and still releases local registration', async (context) => {
+  const taskId = 'controlled-history-cancel-delivery-failure'
+  const { bridge, fakeClient, fakeAcpx } = await cancellationHarness(context, taskId)
+  fakeClient.resultGate.resolve()
+  fakeClient.resultFailure = new Error('uncertain cancellation result delivery')
+  fakeClient.threadHistory = [historyEvent('task.cancel')]
+  await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+  await fakeClient.emitTaskCancel(cancellationEvent(taskId))
+  assert.deepEqual(fakeClient.results.map(({ status }) => status), ['cancelled'])
+  assert.equal(activeTaskSessionCount(bridge), 0)
   assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt'), false)
 })
 

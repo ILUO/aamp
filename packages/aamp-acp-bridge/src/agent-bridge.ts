@@ -1367,6 +1367,39 @@ export class AgentBridge {
     let releaseSessionMutex: SessionMutexRelease | undefined
     let activeTaskCounted = false
     let incomingAttachmentDirectory: string | undefined
+    let historicalTerminalResult = false
+    let cancellationResult: Promise<void> | undefined
+    const mayReportCancellation = () => reportCancellation && activeTaskSession.phase === 'cancelled'
+      && !historicalTerminalResult && !isBridgeStopping()
+    const reportCancellationOnce = (): Promise<void> => {
+      if (!mayReportCancellation()) return Promise.resolve()
+      cancellationResult ??= (async () => {
+        try {
+          // Before prompt startup there is no process to stop. After startup,
+          // never claim STOPPED if targeted cancellation could not finish.
+          await activeTaskSession.cancelPromise
+        } catch (error) {
+          console.warn(`[${this.name}] ACP cancellation failed for ${task.taskId}: ${(error as Error).message}`)
+          return
+        }
+        const resultClient = this.client
+        if (!resultClient || !mayReportCancellation()) return
+        try {
+          await waitUnlessSuperseded(resultClient.sendResult({
+            to: task.from,
+            taskId: task.taskId,
+            status: 'cancelled',
+            output: '',
+            inReplyTo: task.messageId,
+          }))
+        } catch (error) {
+          // One delivery attempt per local lifecycle, including uncertain network
+          // failures; finally must not duplicate a possibly accepted result.
+          console.error(`[${this.name}] Cancelled result delivery failed for ${task.taskId}: ${(error as Error).message}`)
+        }
+      })()
+      return cancellationResult
+    }
 
     try {
       const hydratedTask = await waitUnlessSuperseded(this.client.hydrateTaskDispatch(task).catch((err) => {
@@ -1385,11 +1418,19 @@ export class AgentBridge {
         throw error
       })
 
+      historicalTerminalResult = (hydratedTask?.threadHistory ?? []).some((event) =>
+        event.intent === 'task.result' || event.intent === 'task.help_needed')
       if (!hydratedTask || shouldStopTask()) {
         return
       }
 
-      if (threadAlreadyTerminal(hydratedTask.threadHistory)) {
+      const terminalHistory = reportCancellation
+        ? hydratedTask.threadHistory.filter((event) => event.intent !== 'task.cancel'
+          || this.normalizeEmail(event.from) === this.normalizeEmail(task.from)
+            && this.normalizeEmail(event.to) === this.normalizeEmail(task.to))
+        : hydratedTask.threadHistory
+      if (threadAlreadyTerminal(terminalHistory)) {
+        if (reportCancellation && !historicalTerminalResult) activeTaskSession.phase = 'cancelled'
         if (shouldLogTask) {
           console.log(`[${this.name}] Skipping task ${task.taskId} because the thread already reached a terminal state`)
         }
@@ -1677,20 +1718,7 @@ export class AgentBridge {
           console.warn(`[${this.name}] Failed to close cancelled stream for ${task.taskId}: ${(error as Error).message}`)
           return
         }
-        if (!cancelForwarded || !reportCancellation) return
-        const resultClient = this.client
-        if (!resultClient || isBridgeStopping()) return
-        try {
-          await waitUnlessSuperseded(resultClient.sendResult({
-            to: task.from,
-            taskId: task.taskId,
-            status: 'cancelled',
-            output: '',
-            inReplyTo: task.messageId,
-          }))
-        } catch (error) {
-          console.error(`[${this.name}] Cancelled result delivery failed for ${task.taskId}: ${(error as Error).message}`)
-        }
+        if (cancelForwarded) await reportCancellationOnce()
       })()
     }
 
@@ -2052,6 +2080,9 @@ export class AgentBridge {
       activeTaskSession.clearPendingText = undefined
     }
     } finally {
+      // Hydration, terminal-history checks and mutex waits can all return before
+      // finishCancelledTask is in scope. They still owe the controlled STOP receipt.
+      await reportCancellationOnce()
       if (activeTaskCounted) {
         this.activeTaskCount = Math.max(0, this.activeTaskCount - 1)
       }
