@@ -633,3 +633,32 @@ function Get-FixtureNativeProcess {
     await assert.rejects(run('missing'), /unable to read process executable path/)
   })
 }
+
+test('PowerShell cancellation kills its helper and rejects with the operation stage',async()=>{
+ const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();let killed=false
+ child.kill=()=>{killed=true;queueMicrotask(()=>child.emit('close',1));return true}
+ const abort=new AbortController()
+ const pending=runWindowsPowerShell('unused',{}, {spawnProcess:()=>child,signal:abort.signal,operation:'list-process-tree'})
+ abort.abort(new Error('stop requested'))
+ await assert.rejects(pending,/list-process-tree.*stop requested/)
+ assert.equal(killed,true)
+})
+
+test('native shared snapshot identifies two owned roots in one query', {skip:process.platform!=='win32'},async t=>{
+ const {snapshotOwnedWindowsTrees}=await import('../bin/windows-platform.mjs')
+ const children=[spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,stdio:'ignore'}),spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,stdio:'ignore'})]
+ t.after(()=>{for(const child of children)child.kill()})
+ const roots=await Promise.all(children.map(child=>readWindowsProcessIdentity(child.pid)))
+ const snapshots=await snapshotOwnedWindowsTrees(roots)
+ for(const root of roots)assert.ok(snapshots.get(root.pid).some(i=>i.pid===root.pid))
+})
+
+test('native cancelled PowerShell helper actually exits', {skip:process.platform!=='win32'},async()=>{
+ let child,closed,deadlineTimer
+ const abort=new AbortController()
+ const pending=runWindowsPowerShell('Start-Sleep -Seconds 30; @{ok=$true}|ConvertTo-Json',{}, {
+ signal:abort.signal,operation:'native-cancel-probe',spawnProcess:(...args)=>{child=spawn(...args);closed=new Promise(resolve=>child.once('close',resolve));return child},
+ })
+ const timer=setTimeout(()=>abort.abort(new Error('cancel probe')),150)
+ try {await assert.rejects(pending,/native-cancel-probe/);await Promise.race([closed,new Promise((resolve,reject)=>{deadlineTimer=setTimeout(()=>reject(Error('helper remained alive')),3000)})]);assert.ok(child.exitCode!==null || child.signalCode!==null)}finally{clearTimeout(timer);clearTimeout(deadlineTimer);child?.kill()}
+})

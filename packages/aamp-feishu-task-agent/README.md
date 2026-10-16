@@ -256,6 +256,20 @@ including extensionless Node bins. Open `codebuddy` (or `cbc`) in a terminal and
 complete its login/model setup before binding. No automatic login, installation,
 or upgrade is performed for this Agent.
 
+Bridge package preparation on both macOS and Windows checks executable entries
+and runs a bounded `--help` health check. Missing modules reported inside the
+managed npm cache, as well as missing executable entries, trigger one retry in a separate, reusable cache
+for the same package specification, leaving the original cache intact for any
+running processes. Standard Windows npm Node shims are also checked for a missing
+target script. Download, authentication, cancellation, and task execution errors
+do not trigger this recovery. If the recovery attempt fails, startup reports the
+failure rather than continuing to retry or claiming success.
+Before ACP Bridge initialization, `acpx` is also checked. A healthy command already
+on PATH retains priority; otherwise a managed installation is prepared and its
+PATH is passed to the Bridge. Explicit local Agent session initialization failures
+are reported as startup failures even if the mailbox connection succeeded.
+The health check does not exercise every lazy-loaded feature or Agent task.
+
 `aime` is the ByteDance-internal remote AIME Agent. The launcher authorizes the
 Bot, creates or reuses its `lark-cli` profile, completes user login, and reads
 `tenant_key` before showing the Agent menu. It offers AIME only when that
@@ -494,3 +508,9 @@ Useful diagnostics commands:
 ~/.aamp/bin/aamp-logs list-runs
 ~/.aamp/bin/aamp-logs tail -f
 ```
+
+### Windows 进程跟踪与停止
+
+Windows 控制器统一采样所属进程树，正常间隔 5 秒，同一轮共享系统快照。首次进程身份登记失败仍阻止启动；运行中的采样失败只进入“进程跟踪降级”，不会停止 Bridge。失败后按 10、20、40、60 秒退避，成功后恢复。只有记录变化才写入，临时写入失败会重试；日志对连续故障限频记录。
+
+停止时取消采样与查询，控制器进程清理共用 60 秒预算。外层停止在计划任务禁用/权限准备完成后共用 75 秒预算。无法核验或清理的进程会保留记录并报告“停止未完成”，不将清理失败显示为成功。旧控制器缺少清理确认时，仅在对应进程日志核验恢复成功后确认停止。macOS 的进程组行为不变。

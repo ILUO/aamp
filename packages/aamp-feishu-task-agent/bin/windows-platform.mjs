@@ -201,9 +201,10 @@ $owner = $verified.owner
 `,
   'list-process-tree': POWERSHELL_PREAMBLE + POWERSHELL_SNAPSHOT_OWNER + String.raw`
 $rootPid = [int]$config.pid
+Write-Output 'AAMP_STAGE:enumerate-processes'
 $all = @(Get-CimInstance -ClassName Win32_Process)
 $selected = New-Object 'System.Collections.Generic.HashSet[int]'
-[void]$selected.Add($rootPid)
+if ($config.pids) { foreach ($id in $config.pids) { [void]$selected.Add([int]$id) } } else { [void]$selected.Add($rootPid) }
 do {
   $changed = $false
   foreach ($process in $all) {
@@ -213,6 +214,7 @@ do {
   }
 } while ($changed)
 $identities = @()
+Write-Output 'AAMP_STAGE:verify-process-identities'
 foreach ($process in $all) {
   if (-not $selected.Contains([int]$process.ProcessId)) { continue }
   $verified = Read-VerifiedSnapshot $process
@@ -232,7 +234,7 @@ foreach ($process in $all) {
 `,
 })
 
-function collectProcess(child, { timeoutMs = 30_000, maxOutputBytes = 1024 * 1024 } = {}) {
+function collectProcess(child, { timeoutMs = 30_000, maxOutputBytes = 1024 * 1024, signal, operation = 'Windows process' } = {}) {
   return new Promise((resolve, reject) => {
     let stdout = ''
     let stderr = ''
@@ -242,11 +244,19 @@ function collectProcess(child, { timeoutMs = 30_000, maxOutputBytes = 1024 * 102
       if (settled) return
       settled = true
       clearTimeout(timeout)
+      signal?.removeEventListener('abort', cancel)
       callback(value)
+    }
+    const cancel = () => {
+      child.kill?.()
+      child.stdout?.destroy?.(); child.stderr?.destroy?.(); child.unref?.()
+      finish(reject, new Error(operation + ': ' + (signal?.reason?.message || 'cancelled')))
     }
     const timeout = setTimeout(() => {
       child.kill?.()
-      finish(reject, new Error(`Windows process timed out after ${timeoutMs}ms`))
+      child.stdout?.destroy?.(); child.stderr?.destroy?.(); child.unref?.()
+      const stage = [...stdout.matchAll(/^AAMP_STAGE:([a-z-]+)\r?$/gm)].at(-1)?.[1]
+      finish(reject, new Error(operation + (stage ? '/' + stage : '') + ': Windows process timed out after ' + timeoutMs + 'ms'))
     }, timeoutMs)
     timeout.unref?.()
     const append = (stream, chunk) => {
@@ -264,6 +274,8 @@ function collectProcess(child, { timeoutMs = 30_000, maxOutputBytes = 1024 * 102
     child.stderr?.on('data', (chunk) => { stderr = append(stderr, chunk) })
     child.once('error', (error) => finish(reject, error))
     child.once('close', (code) => finish(resolve, { code, stdout, stderr }))
+    signal?.addEventListener('abort', cancel, {once:true})
+    if (signal?.aborted) cancel()
   })
 }
 
@@ -273,7 +285,9 @@ export async function runWindowsPowerShell(script, input, {
   executable = 'powershell.exe',
   timeoutMs = 30_000,
   maxOutputBytes = 1024 * 1024,
+  signal, operation,
 } = {}) {
+  signal?.throwIfAborted()
   const payload = Buffer.from(JSON.stringify(input), 'utf8').toString('base64')
   const child = spawnProcess(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
     env: { ...environment, [POWERSHELL_INPUT_KEY]: payload },
@@ -281,7 +295,7 @@ export async function runWindowsPowerShell(script, input, {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  const result = await collectProcess(child, { timeoutMs, maxOutputBytes })
+  const result = await collectProcess(child, { timeoutMs, maxOutputBytes, signal, operation })
   if (result.code !== 0) {
     throw new Error(`Windows PowerShell operation failed: ${result.stderr.trim() || `PowerShell exited ${result.code}`}`)
   }
@@ -297,7 +311,7 @@ export async function runWindowsPowerShell(script, input, {
 async function runFixedPowerShell(operation, input, options) {
   const script = POWERSHELL_SCRIPTS[operation]
   if (!script) throw new Error(`unsupported Windows platform operation: ${operation}`)
-  return runWindowsPowerShell(script, input, options)
+  return runWindowsPowerShell(script, input, {...options, operation})
 }
 
 export async function ensurePrivateWindowsDirectory(directory, {
@@ -343,6 +357,7 @@ export async function readWindowsProcessIdentity(pid, {
   platform = process.platform,
   runPowerShell = runFixedPowerShell,
   exitedBefore,
+  signal, timeoutMs,
 } = {}) {
   if (platform !== 'win32') throw new Error('Windows process identity requires Windows')
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('process pid must be a positive integer')
@@ -351,7 +366,7 @@ export async function readWindowsProcessIdentity(pid, {
   }
   const value = await runPowerShell('read-process-identity', {
     pid, ...(exitedBefore === undefined ? {} : {exitedBefore:new Date(exitedBefore).toISOString()}),
-  })
+  }, {signal,timeoutMs})
   if (value?.found === false) return undefined
   const startedAt = new Date(value?.creationDate)
   if (value?.found !== true || value.pid !== pid || !Number.isFinite(startedAt.getTime())
@@ -369,11 +384,12 @@ export async function readWindowsProcessIdentity(pid, {
 }
 
 export async function getCurrentWindowsSid({
+  signal, timeoutMs,
   platform = process.platform,
   runPowerShell = runFixedPowerShell,
 } = {}) {
   if (platform !== 'win32') throw new Error('Windows user identity requires Windows')
-  const value = await runPowerShell('current-user-sid', {})
+  const value = await runPowerShell('current-user-sid', {}, {signal,timeoutMs})
   if (typeof value?.ownerSid !== 'string' || !/^S-\d(?:-\d+)+$/i.test(value.ownerSid)) {
     throw new Error('PowerShell returned an invalid current user SID')
   }
@@ -534,13 +550,13 @@ export async function snapshotOwnedWindowsTree(rootIdentity, {
   return [...selected.values()]
 }
 
-async function defaultTaskkill(args) {
+async function defaultTaskkill(args, options) {
   const child = spawn('taskkill.exe', args, {
     shell: false,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  const result = await collectProcess(child)
+  const result = await collectProcess(child, {...options,operation:'taskkill'})
   if (result.code !== 0) throw new Error(`taskkill failed: ${result.stderr.trim() || result.stdout.trim()}`)
 }
 
@@ -550,6 +566,7 @@ export async function stopOwnedWindowsTree(identity, {
   readIdentity = readWindowsProcessIdentity,
   runTaskkill = defaultTaskkill,
   allowExitedIdentity = false,
+  signal, timeoutMs,
 } = {}) {
   if (platform !== 'win32') throw new Error('Windows process tree cleanup requires Windows')
   if (!identity || !Number.isSafeInteger(identity.pid) || identity.pid <= 0
@@ -558,11 +575,12 @@ export async function stopOwnedWindowsTree(identity, {
     || typeof identity.ownerSid !== 'string' || !identity.ownerSid) {
     throw new Error('verified Windows process identity is required')
   }
-  const currentSid = await getCurrentSid()
+  const currentSid = await getCurrentSid({signal,timeoutMs})
   if (currentSid.toLowerCase() !== identity.ownerSid.toLowerCase()) {
     throw new Error(`process ${identity.pid} belongs to another Windows user; refusing taskkill`)
   }
-  const current = await readIdentity(identity.pid, allowExitedIdentity ? {exitedBefore:identity.startedAt} : {})
+  signal?.throwIfAborted()
+  const current = await readIdentity(identity.pid, {signal,timeoutMs,...(allowExitedIdentity ? {exitedBefore:identity.startedAt} : {})})
   if (!current) return
   if (!sameWindowsIdentity(identity, current)) {
     // Recovery journals retain exited descendants. A newer creation time for
@@ -573,11 +591,28 @@ export async function stopOwnedWindowsTree(identity, {
       && Date.parse(current.startedAt) > Date.parse(identity.startedAt)) return
     throw new Error(`process ${identity.pid} identity changed; refusing taskkill`)
   }
-  await runTaskkill(['/PID', String(identity.pid), '/T', '/F'])
-  const remaining = await readIdentity(identity.pid)
+  signal?.throwIfAborted()
+  await runTaskkill(['/PID', String(identity.pid), '/T', '/F'], {signal,timeoutMs})
+  const remaining = await readIdentity(identity.pid, {signal,timeoutMs})
   if (remaining && sameWindowsIdentity(identity, remaining)) {
     throw new Error(`process ${identity.pid} remained after taskkill`)
   }
 }
 
 export const __test = Object.freeze({ runFixedPowerShell, powershellScripts: POWERSHELL_SCRIPTS })
+
+// A single system enumeration supplies all roots in a controller sampling round.
+export async function snapshotOwnedWindowsTrees(roots, {
+  signal, timeoutMs=30000, currentSid, runPowerShell=runFixedPowerShell,
+}={}) {
+  signal?.throwIfAborted()
+  const sid=currentSid || await getCurrentWindowsSid({signal,timeoutMs})
+  const value=await runPowerShell('list-process-tree',{pids:roots.map(r=>r.pid)},{signal,timeoutMs})
+  if(!Array.isArray(value?.processes))throw Error('CIM returned an invalid Windows process tree')
+  const listed=value.processes.map(normalizeListedIdentity)
+  const result=new Map()
+  for(const root of roots)result.set(root.pid,await snapshotOwnedWindowsTree(root,{
+    getCurrentSid:async()=>sid,listIdentities:async()=>listed,
+  }))
+  return result
+}

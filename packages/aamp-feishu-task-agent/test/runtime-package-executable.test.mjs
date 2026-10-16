@@ -11,9 +11,176 @@ import {
   npmExecutableResolverArgs,
   npmExecutableResolverCommand,
   parseResolvedPackageExecutable,
+  isMissingCachedModule,
+  prepareRuntimeExecutableEnvironment,
 } from '../bin/runtime-package-executable.mjs'
 
 const execFileAsync = promisify(execFile)
+
+test('missing dependency in a real-path cache is recognized through a directory alias', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-cache-alias-'))
+  const real = path.join(root, 'real')
+  const alias = path.join(root, 'alias')
+  try {
+    await fsp.mkdir(path.join(real, '_npx', 'abc', 'node_modules', 'zod'), {recursive:true})
+    await fsp.symlink(real, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    const missing = path.join(real, '_npx', 'abc', 'node_modules', 'zod', 'index.js')
+    assert.equal(isMissingCachedModule({stderr:`ERR_MODULE_NOT_FOUND: Cannot find module '${missing}'`}, alias), true)
+    assert.equal(isMissingCachedModule({stderr:`ERR_MODULE_NOT_FOUND: Cannot find module '${path.join(alias, '_npx', 'abc', 'node_modules', 'zod', 'index.js')}'`}, real), true)
+  } finally {
+    await fsp.unlink(alias).catch(() => {})
+    await fsp.rm(root, {recursive:true,force:true})
+  }
+})
+
+test('cache dependency classification excludes user projects, sibling paths and non-module failures', () => {
+  for (const [platform, cache, owned, outside] of [
+    ['win32', 'C:\\cache', 'C:\\cache\\_npx\\abc\\node_modules\\zod\\index.js', 'C:\\cache-other\\_npx\\abc\\index.js'],
+    ['darwin', '/tmp/cache', '/tmp/cache/_npx/abc/node_modules/zod/index.js', '/tmp/cache-other/_npx/abc/index.js'],
+  ]) {
+    assert.equal(isMissingCachedModule({stderr:`Error [ERR_MODULE_NOT_FOUND]: Cannot find module '${owned}'`}, cache, platform), true)
+    assert.equal(isMissingCachedModule({stderr:`Error [ERR_MODULE_NOT_FOUND]: Cannot find module '${outside}' imported from ${owned}`}, cache, platform), false)
+    assert.equal(isMissingCachedModule({stderr:`Error: Cannot find module 'zod'\nRequire stack:\n- ${owned}\ncode: 'MODULE_NOT_FOUND'`}, cache, platform), true)
+    assert.equal(isMissingCachedModule({stderr:`Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'zod' imported from ${outside}`}, cache, platform), false)
+    assert.equal(isMissingCachedModule({stderr:`EACCES ${owned}`}, cache, platform), false)
+  }
+})
+
+test('runtime command keeps healthy PATH choice and exposes recovered executable to child processes', async () => {
+  const environment = { Path: 'C:\\original', SENTINEL: 'preserved' }
+  let resolutions = 0
+  const base = { executable: 'acpx', kind: 'cmd', command: 'C:\\original\\acpx.cmd', pathValue: environment.Path, environment: {} }
+  const options = { executable: 'acpx', environment, platform: 'win32', cacheDir: 'C:\\cache',
+    find: async () => base, probe: async () => {},
+    resolve: async () => { resolutions++; return {...base,pathValue:'C:\\recovered;C:\\original'} },
+  }
+  assert.deepEqual(await prepareRuntimeExecutableEnvironment(options), environment)
+  assert.equal(resolutions, 0)
+  const result = await prepareRuntimeExecutableEnvironment({...options, find: async () => {
+    throw Object.assign(new Error('missing'), {code:78,stderr:'unable to resolve npm executable shim: acpx\n'})
+  }})
+  assert.equal(result.Path, 'C:\\recovered;C:\\original')
+  assert.equal(result.SENTINEL, 'preserved')
+  assert.equal(resolutions, 1)
+  await assert.rejects(prepareRuntimeExecutableEnvironment({...options, probe: async () => { throw new Error('user installation failed') }}), /user installation failed/)
+  assert.equal(resolutions, 1)
+})
+
+test('damaged npm cache is recovered once without deleting old files, and recovery cache is reusable', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-cache-recovery-'))
+  const cacheDir = path.join(root, 'cache')
+  try {
+    const pkg = path.join(root, 'package')
+    await writePackage(pkg, {
+      name: 'fixture-recovery-bridge', version: '1.0.0',
+      bin: { 'fixture-recovery-bridge': 'bin/run.mjs' },
+    }, { 'run.mjs': '#!/usr/bin/env node\nconsole.log("recovered")\n' })
+    const packed = JSON.parse((await npmRun(['pack', '--json', '--pack-destination', root, pkg], { timeout: 15_000 })).stdout)
+    const spec = path.join(root, packed[0].filename)
+    const initial = await npmMaterialize(spec, 'fixture-recovery-bridge', cacheDir)
+    const binDir = path.dirname(initial.command)
+    for (const file of await fsp.readdir(binDir)) await fsp.unlink(path.join(binDir, file))
+    const entry = path.join(binDir, '..', 'fixture-recovery-bridge', 'bin', 'run.mjs')
+    await fsp.unlink(entry)
+    // Local tarball npm specs reinstall eagerly, unlike an already-satisfied
+    // registry version. Run the real resolver in the retained broken bin PATH.
+    const probeBrokenCache = async () => {
+      const env = { ...process.env }
+      for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+      env[process.platform === 'win32' ? 'Path' : 'PATH'] = binDir
+      const { stdout } = await execFileAsync(process.execPath, npmExecutableResolverArgs('fixture-recovery-bridge'), { env, timeout: 10_000 })
+      return parseResolvedPackageExecutable(stdout, 'fixture-recovery-bridge')
+    }
+    await assert.rejects(probeBrokenCache(), /unable to resolve npm executable shim/)
+    const notices = []
+    const makeLauncher = () => createPackageExecutableLauncher({
+      cacheDir,
+      onCacheRecovery: (event) => notices.push(event),
+      materialize: (packageSpec, executable, context) => context.npmCacheDir
+        ? npmMaterialize(packageSpec, executable, context.npmCacheDir)
+        : probeBrokenCache(),
+    })
+    const launcher = makeLauncher()
+    const descriptor = await launcher.resolve(spec, 'fixture-recovery-bridge')
+    const result = await collectOutput(launcher.launchPrepared({ preparedExecutable: descriptor, spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] } }))()
+    assert.equal(result.code, 0)
+    assert.equal(result.stdout.trim(), 'recovered')
+    assert.notEqual(path.dirname(descriptor.command), binDir)
+    assert.equal(await fsp.readFile(path.join(binDir, '..', 'fixture-recovery-bridge', 'package.json'), 'utf8').then(() => true), true)
+    assert.equal(notices.length, 1)
+    const again = await makeLauncher().resolve(spec, 'fixture-recovery-bridge')
+    assert.equal(again.command, descriptor.command)
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('cache recovery stops after one retry and does not retry unrelated failures', async () => {
+  for (const [code, stderr, expectedAttempts] of [
+    [78, 'unable to resolve npm executable shim: fixture-bridge\n', 2],
+    [78, 'npm warn config deprecated option\nunable to resolve npm executable shim: fixture-bridge\n', 2],
+    [1, 'unable to resolve npm executable shim: fixture-bridge\n', 1],
+    [78, 'network or authentication failure\n', 1],
+  ]) {
+    let attempts = 0
+    const failure = Object.assign(new Error('fixture failure'), {
+      code, stderr,
+    })
+    const launcher = createPackageExecutableLauncher({
+      cacheDir: path.join(os.tmpdir(), 'aamp-unused-cache'),
+      materialize: async () => { attempts++; throw failure },
+    })
+    await assert.rejects(launcher.resolve('fixture@1.0.0', 'fixture-bridge'), /fixture failure/)
+    assert.equal(attempts, expectedAttempts)
+  }
+})
+
+test('Windows resolver rejects a retained npm shim whose JavaScript entry was removed', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-dangling-shim-'))
+  try {
+    await fsp.writeFile(path.join(root, 'fixture-missing.cmd'), '@SET "dp0=%~dp0"\r\n"%_prog%" "%dp0%\\missing.js" %*\r\n')
+    const env = { ...process.env }
+    for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+    env.Path = root
+    await assert.rejects(execFileAsync(process.execPath, npmExecutableResolverArgs('fixture-missing'), { env }), (error) => error.code === 78)
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('retained executable with a missing dependency recovers before it is returned as ready', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-missing-dependency-'))
+  const cacheDir = path.join(root, 'cache')
+  try {
+    const pkg = path.join(root, 'package')
+    await writePackage(pkg, { name: 'fixture-dependency-bridge', version: '1.0.0',
+      bin: { 'fixture-dependency-bridge': 'bin/run.mjs' },
+    }, { 'run.mjs': '#!/usr/bin/env node\nimport "./dependency.mjs"; console.log("healthy");\n',
+      'dependency.mjs': 'export const healthy = true;\n' })
+    const packed = JSON.parse((await npmRun(['pack', '--json', '--pack-destination', root, pkg], { timeout: 15_000 })).stdout)
+    const spec = path.join(root, packed[0].filename)
+    const initial = await npmMaterialize(spec, 'fixture-dependency-bridge', cacheDir)
+    await fsp.unlink(path.join(path.dirname(initial.command), '..', 'fixture-dependency-bridge', 'bin', 'dependency.mjs'))
+    const probe = async descriptor => {
+      const entry = path.join(path.dirname(descriptor.command), '..', 'fixture-dependency-bridge', 'bin', 'run.mjs')
+      return execFileAsync(process.execPath, [entry, '--help'], { timeout: 10_000 })
+    }
+    await assert.rejects(probe(initial), /ERR_MODULE_NOT_FOUND/)
+    let notices = 0
+    const launcher = createPackageExecutableLauncher({ cacheDir,
+      onCacheRecovery: () => { notices++ },
+      validate: probe,
+      materialize: (s, e, context) => context.npmCacheDir ? npmMaterialize(s, e, context.npmCacheDir) : initial,
+    })
+    const descriptor = await launcher.resolve(spec, 'fixture-dependency-bridge')
+    assert.equal((await probe(descriptor)).stdout.trim(), 'healthy')
+    assert.equal(notices, 1)
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true })
+  }
+})
 const NPM_EXEC_CONTEXT_KEYS = [
   'npm_lifecycle_event',
   'npm_package_json',

@@ -1,3 +1,5 @@
+import {recoverWindowsProcessJournals} from './windows-process-journal.mjs'
+import {withWindowsCleanupDeadline} from './windows-process-cleanup.mjs'
 import {taskCommand, globalInstallHint} from './platform-hints.mjs'
 import { withWindowsOperationLock } from './windows-operation-lock.mjs'
 import {startupProgress} from './startup-progress.mjs'
@@ -115,7 +117,7 @@ try {
     throw new Error('计划任务权限修复未完成；请使用同一账号确认管理员授权后重试。',{cause:error})
   }
 }
-async function nativeScheduler(operation, config, {execute=execFileAsync,repair=repairWindowsTaskPermissions,onProgress=()=>{}}={}) {
+async function nativeScheduler(operation, config, {execute=execFileAsync,repair=repairWindowsTaskPermissions,onProgress=()=>{},signal,timeoutMs=30000}={}) {
   const run=async()=>{
   const { stdout } = await execute(
     'powershell.exe',
@@ -127,7 +129,8 @@ async function nativeScheduler(operation, config, {execute=execFileAsync,repair=
       },
       encoding: 'utf8',
       windowsHide: true,
-      timeout: 30000,
+      timeout: timeoutMs,
+      signal,
       maxBuffer: 1024 * 1024,
     },
   )
@@ -196,17 +199,19 @@ export function createWindowsServiceManager({
   ),
   environment = process.env,
   currentSid: getSid = currentSid,
-  scheduler = (operation, config) => nativeScheduler(operation, config, {onProgress}),
-  readIdentity = async (pid) =>
-    (await platform()).readWindowsProcessIdentity(pid),
+  scheduler = (operation, config, options) => nativeScheduler(operation, config, {onProgress,...options}),
+  readIdentity = async (pid, options) =>
+    (await platform()).readWindowsProcessIdentity(pid, options),
   ensurePrivateDirectory = async (dir) =>
     (await platform()).ensurePrivateWindowsDirectory(dir),
-  stopTree = async (identity) =>
-    (await platform()).stopOwnedWindowsTree(identity),
+  stopTree = async (identity, options) =>
+    (await platform()).stopOwnedWindowsTree(identity, options),
   wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   startupAttempts = 600,
   onProgress = () => {},
-  stopAttempts = 100,
+  stopAttempts = 600,
+  stopTimeoutMs = 75000,
+  stopGraceMs = 60000,
 } = {}) {
   if (!runtimeHome) throw new Error('Windows service runtimeHome is required')
   const serviceHome = path.join(runtimeHome, 'windows-service-v1')
@@ -275,6 +280,8 @@ export function createWindowsServiceManager({
     )
       return { ...base, state: 'stopped' }
     base.pid = controller.pid
+    const tracking=await readJson(path.join(serviceHome,'process-tracking.json'))
+    if(tracking?.generation===selected.generation && tracking?.pid===controller.pid) base.processTracking=tracking
     if (
       ready?.version === 1 &&
       ready.state === 'ready' &&
@@ -313,57 +320,77 @@ export function createWindowsServiceManager({
     const c = await config()
     const task = await scheduler('status', c)
     await scheduler('disable', c)
+    return withWindowsCleanupDeadline(async budget => {
     const selected = await selectionSnapshot()
     let owner = await readJson(paths.ownerFile)
+    budget.signal.throwIfAborted()
     await writeJson(paths.stopFile, { generation: selected.generation })
     // A scheduled worker may not have published owner.json yet. Do not report a successful stop during that gap.
     const acknowledged = async () =>
       owner?.generation === selected.generation &&
       owner.worker &&
-      sameIdentity(await readIdentity(owner.worker.pid), owner.worker, c.sid)
+      sameIdentity(await readIdentity(owner.worker.pid, budget.options()), owner.worker, c.sid)
     for (let i = 0; !(await acknowledged()) && i < stopAttempts; i++) {
-      const state = await scheduler('status', c)
+      const state = await scheduler('status', c, budget.options())
       if (String(state.state).toLowerCase() !== 'running') break
       await wait(100)
       owner = await readJson(paths.ownerFile)
     }
     if (!(await acknowledged())) {
-      const state = await scheduler('status', c)
+      const state = await scheduler('status', c, budget.options())
       if (String(state.state).toLowerCase() === 'running')
         throw new Error(
           `后台进程尚未确认停止；请执行 ${taskCommand('status', 'win32')} 检查状态后重试。`,
         )
     }
     if (owner?.generation === selected.generation) {
-      for (let i = 0; i < stopAttempts; i++) {
-        if (!owner.controller || !(await readIdentity(owner.controller.pid)))
+      const graceDeadline=Date.now()+Math.min(stopGraceMs,Math.max(0,stopTimeoutMs-15000))
+      for (let i = 0; i < stopAttempts && Date.now()<graceDeadline; i++) {
+        if (!owner.controller || !(await readIdentity(owner.controller.pid, budget.options())))
           break
         await wait(100)
       }
       for (const recorded of [owner.controller, owner.worker]) {
         if (!recorded) continue
-        const live = await readIdentity(recorded.pid)
+        const live = await readIdentity(recorded.pid, budget.options())
         if (!live) continue
         if (!sameIdentity(live, recorded, c.sid))
           throw new Error('Refusing to stop a changed Windows process identity')
-        await stopTree(recorded)
+        await stopTree(recorded, budget.options())
       }
     }
-    let after = await scheduler('status', c)
+    let after = await scheduler('status', c, budget.options())
     for (
       let i = 0;
       String(after.state).toLowerCase() === 'running' && i < stopAttempts;
       i++
     ) {
       await wait(100)
-      after = await scheduler('status', c)
+      after = await scheduler('status', c, budget.options())
     }
     if (String(after.state).toLowerCase() === 'running')
       throw new Error(
         `后台进程尚未确认停止；请执行 ${taskCommand('status', 'win32')} 检查状态后重试。`,
       )
+    budget.signal.throwIfAborted()
+    const cleanup=await readJson(path.join(serviceHome,'cleanup-result.json'))
+    budget.signal.throwIfAborted()
+    const acknowledgedCleanup=cleanup?.generation===selected.generation && cleanup?.pid===owner?.controller?.pid
+    if(acknowledgedCleanup && cleanup.ok===false) throw new Error('后台停止未完成：控制器未能清理全部进程，请查看日志。')
+    if(owner?.generation===selected.generation && owner.controller && !(acknowledgedCleanup && cleanup.ok===true)) {
+      const recovered=await recoverWindowsProcessJournals(path.join(runtimeHome,'windows-process-journals-v1'),{
+        controllerIdentity:owner.controller,signal:budget.signal,
+        readIdentity:(pid,options)=>readIdentity(pid,{...options,...budget.options()}),
+        stopTree:(identity,options)=>stopTree(identity,{...options,...budget.options()}),
+      }).catch(error=>{if(error.code==='ENOENT')return 0;throw error})
+      if(!recovered) throw new Error('后台停止未完成：缺少控制器清理确认及可恢复的进程记录。')
+      budget.signal.throwIfAborted()
+      await writeJson(path.join(serviceHome,'cleanup-result.json'),{generation:selected.generation,pid:owner.controller.pid,ok:true})
+    }
+    budget.signal.throwIfAborted()
     await fs.rm(paths.readinessFile, { force: true })
     return { stopped: true, wasLoaded: Boolean(task.loaded) }
+    }, {timeoutMs:stopTimeoutMs})
   }
   async function startUnlocked(bindingIds = [], options = {}) {
     const finish = startupProgress('正在启动后台服务')

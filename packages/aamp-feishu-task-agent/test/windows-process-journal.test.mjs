@@ -135,3 +135,18 @@ for (const state of ['reused', 'live', 'inaccessible']) {
     assert.equal(await fsp.stat(journal.file).then(() => true, () => false), state !== 'reused')
   })
 }
+
+test('journal skips unchanged identities and recovers after a failed write', async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-journal-retry-'))
+  t.after(() => fsp.rm(root, {recursive:true,force:true}))
+  let writes=0,fail=false
+  const journal=await createWindowsProcessJournal(root,controller,{
+    ensurePrivateDirectory:async()=>{},atomicReplace:async(a,b)=>{writes++;if(fail)throw Error('temporary write failure');await fsp.rename(a,b)},
+  })
+  await journal.record([child]);const baseline=writes
+  await journal.record([child]);assert.equal(writes,baseline)
+  fail=true;await assert.rejects(journal.record([{...child,pid:102}]),/temporary write failure/)
+  fail=false;await journal.record([{...child,pid:102}])
+  const value=JSON.parse(await fsp.readFile(journal.file,'utf8'))
+  assert.equal(value.descendants.length,2)
+})

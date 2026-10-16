@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import {createWindowsProcessSampler} from './windows-process-sampler.mjs';
+import {cleanupWindowsProcesses} from './windows-process-cleanup.mjs';
+import {snapshotOwnedWindowsTrees} from './windows-platform.mjs';
 
 import {taskCommand, displayAction, logCommand, existingRuntimeHint} from './platform-hints.mjs';
 import fs, { promises as fsp } from 'node:fs';
@@ -27,10 +30,12 @@ import {
   npmExecutableResolverArgs,
   npmExecutableResolverCommand,
   parseResolvedPackageExecutable,
+  prepareRuntimeExecutableEnvironment,
+  withExecutableProbeDeadline,
 } from './runtime-package-executable.mjs';
 import {
   agentStartRetryError,
-  codexSessionFailure,
+  localAgentSessionFailure,
   agentStartFailureMessage,
   bridgeAuthenticationRetryError,
   classifyNetworkError,
@@ -346,7 +351,7 @@ function projectTrustedLocalAgentEvent(document, options = {}) {
   if (!document || typeof document !== 'object' || Array.isArray(document)) return undefined;
   const type = typeof document.type === 'string' ? document.type : '';
   const agent = trustedAgentIdentity(document.agent, options, 'local');
-  if (agent === 'codex' && ['agent.session.deferred', 'agent.session.ready'].includes(type)) {
+  if (agent && ['agent.session.deferred', 'agent.session.ready'].includes(type)) {
     return {type, agent, ...(type === 'agent.session.deferred' ? {message:redact(document.message || '适配器未就绪')} : {})};
   }
   if (!agent || !['agent.starting', 'agent.started', 'agent.identity', 'agent.failed'].includes(type)) {
@@ -1623,16 +1628,16 @@ async function runWindowsBootstrapHelper(action, bindingOrAgent, extraEnv = {}) 
   return response.payload;
 }
 
-function npmExecArgs(packageSpec, executable, args) {
+function npmExecArgs(packageSpec, executable, args, cacheDir = NPM_CACHE_DIR) {
   return [
-    'exec', '--yes', '--registry', NPM_REGISTRY, '--cache', NPM_CACHE_DIR,
+    'exec', '--yes', '--registry', NPM_REGISTRY, '--cache', cacheDir,
     '--package', packageSpec, '--', executable, ...args,
   ];
 }
 
 async function runNpmExecCapture(packageSpec, executable, args, options = {}) {
   throwIfStopping();
-  const child = spawn(NPM_BIN, [...NPM_ARGS_PREFIX, ...npmExecArgs(packageSpec, executable, args)], {
+  const child = spawn(NPM_BIN, [...NPM_ARGS_PREFIX, ...npmExecArgs(packageSpec, executable, args, options.npmCacheDir)], {
     env: options.env || process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
@@ -1657,12 +1662,22 @@ async function runNpmExecCapture(packageSpec, executable, args, options = {}) {
       stderr.trim() || stdout.trim() || exit.error?.message || `exit ${exit.code}`,
       options,
     );
-    throw new Error(`${executable} failed: ${detail.split('\n').slice(-8).join('\n')}`);
+    throw Object.assign(new Error(`${executable} failed: ${detail.split('\n').slice(-8).join('\n')}`), {
+      code: exit.code, stderr,
+    });
   }
   return { stdout, stderr };
 }
 
 const packageExecutableLauncher = createPackageExecutableLauncher({
+  cacheDir: NPM_CACHE_DIR,
+  onCacheRecovery: ({ packageSpec }) => {
+    throwIfStopping();
+    console.log(`[aamp-one-click] ${packageSpec}：执行入口或依赖文件缺失，正在使用独立缓存重新准备（仅重试一次）...`);
+  },
+  validate: (descriptor, options) => capturePreparedExecutable(descriptor, ['--help'], {
+    ...options, input: undefined, logFile: undefined, timeoutMs: 30_000,
+  }),
   materialize: async (packageSpec, executable, options = {}) => {
     const result = await runNpmExecCapture(
       packageSpec,
@@ -1681,6 +1696,27 @@ async function runCapture(packageSpec, executable, args, options = {}) {
     executable,
     options,
   );
+  return capturePreparedExecutable(preparedExecutable, args, options);
+}
+
+async function prepareAcpxEnvironment(env) {
+  console.log('[aamp-one-click] 正在检查 acpx 执行程序及运行依赖...');
+  return prepareRuntimeExecutableEnvironment({
+    executable: 'acpx', environment: env, cacheDir: NPM_CACHE_DIR,
+    find: async (executable, environment) => {
+      const pathValue = Object.entries(environment).find(([key]) => key.toLowerCase() === 'path')?.[1] || path.dirname(process.execPath);
+      const result = await capturePreparedExecutable({ executable: 'node', kind: 'direct',
+        command: process.execPath, pathValue, environment: {},
+      }, npmExecutableResolverArgs(executable), { env: environment, timeoutMs: 30_000 });
+      return parseResolvedPackageExecutable(result.stdout, executable);
+    },
+    resolve: (spec, executable, context) => packageExecutableLauncher.resolve(spec, executable, context),
+    probe: (descriptor, environment) => capturePreparedExecutable(descriptor, ['--help'], { env: environment, timeoutMs: 30_000 }),
+  });
+}
+
+async function capturePreparedExecutable(preparedExecutable, args, options = {}) {
+  const executable = preparedExecutable.executable;
   throwIfStopping();
   const child = packageExecutableLauncher.launchPrepared({
     preparedExecutable,
@@ -1689,6 +1725,7 @@ async function runCapture(packageSpec, executable, args, options = {}) {
       env: options.env || process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
+      windowsHide: true,
     },
   });
   const processRecord = trackTransientProcess(child, executable, process.platform !== 'win32');
@@ -1701,7 +1738,10 @@ async function runCapture(packageSpec, executable, args, options = {}) {
   if (options.input !== undefined) child.stdin.end(options.input);
   else child.stdin.end();
   if (stopRequested) await stopManagedProcess(processRecord);
-  const exit = await processRecord.exitPromise;
+  const exit = await withExecutableProbeDeadline(processRecord.exitPromise, {
+    timeoutMs: options.timeoutMs, label: executable,
+    onTimeout: () => stopManagedProcess(processRecord),
+  });
   throwIfStopping();
   if (options.logFile) {
     await appendPrivate(options.logFile, safeCapturedLog(stdout, stderr, options));
@@ -1711,7 +1751,9 @@ async function runCapture(packageSpec, executable, args, options = {}) {
       stderr.trim() || stdout.trim() || exit.error?.message || `exit ${exit.code}`,
       options,
     );
-    throw new Error(`${executable} failed: ${detail.split('\n').slice(-8).join('\n')}`);
+    throw Object.assign(new Error(`${executable} failed: ${detail.split('\n').slice(-8).join('\n')}`), {
+      code: exit.code, stderr,
+    });
   }
   return { stdout, stderr };
 }
@@ -1934,36 +1976,44 @@ async function sampleWindowsProcessTree(record, journal = windowsProcessJournal,
   await journal?.record(record.windowsDescendants.values());
 }
 
+let windowsSampler;
+let windowsCleanupResult;
+let windowsTrackingWrite=Promise.resolve();
+function getWindowsSampler() {
+  if (windowsSampler) return windowsSampler;
+  let sid;
+  windowsSampler = createWindowsProcessSampler({
+    snapshot: async (roots, options) => {
+      sid ||= await getCurrentWindowsSid(options);
+      return snapshotOwnedWindowsTrees(roots, {...options, currentSid:sid});
+    },
+    persist: items => windowsProcessJournal?.record(items),
+    onState: state => {
+      const status={...state,...(state.message ? {message:redact(state.message)} : {}),pid:process.pid,generation:process.env.AAMP_WINDOWS_SERVICE_GENERATION};
+      windowsTrackingWrite=windowsTrackingWrite.catch(()=>{}).then(()=>writeJsonAtomic(path.join(RUNTIME_HOME,'windows-service-v1','process-tracking.json'),status));
+      void windowsTrackingWrite.catch(()=>{});
+      if (state.state === 'degraded') {
+        const reason=redact(state.message);
+        console.error('⚠ Windows 进程跟踪降级，任务继续运行；将自动重试：'+reason);
+        void recordError('windows-process-sampling',reason).catch(()=>{});
+      } else console.log('Windows 进程跟踪已恢复。');
+    },
+  });
+  return windowsSampler;
+}
 function trackWindowsProcess(record) {
   record.windowsDescendants = new Map();
-  record.windowsIdentity = readWindowsProcessIdentity(record.child.pid).catch((error) => {
-    record.windowsIdentityError = error;
-    return undefined;
+  record.windowsIdentityAbort = new AbortController();
+  record.windowsIdentity = readWindowsProcessIdentity(record.child.pid,{signal:record.windowsIdentityAbort.signal}).catch(error => {
+    record.windowsIdentityError=error; return undefined;
   });
-  let sampling = false;
-  const sample = async () => {
-    if (sampling) return;
-    sampling = true;
-    try {
-      await sampleWindowsProcessTree(record);
-    } finally { sampling = false; }
-  };
-  const handleJournalFailure = (error) => {
-    if (stopRequested) return;
-    stopRequested = true;
-    stopSignal = 'Windows process journal failure';
-    process.exitCode = 1;
-    const reason = redact(error?.message || error);
-    void recordError('windows-process-journal', reason).catch(() => {});
-    console.error(`\n🔴 Windows 进程记录失败：${reason}`);
-    void cleanupAll().catch(() => {});
-  };
-  record.sampleWindowsTree = sample;
-  record.windowsSampleTimer = setInterval(() => {void sample().catch(handleJournalFailure);}, 1000);
-  record.windowsSampleTimer.unref();
-  record.child.once('exit', () => clearInterval(record.windowsSampleTimer));
-  record.windowsSampleReady = sample();
-  void record.windowsSampleReady.catch(handleJournalFailure);
+  record.windowsSampleReady = getWindowsSampler().register(record);
+  void record.windowsSampleReady.catch(error => {
+    if (record.exited || stopRequested) return;
+    stopRequested=true; stopSignal='Windows initial process registration failure'; process.exitCode=1;
+    console.error('🔴 Windows 初始进程登记失败：'+redact(error.message));
+    void cleanupAll().catch(()=>{});
+  });
 }
 
 function signalProcess(record, signal) {
@@ -1980,14 +2030,8 @@ async function stopManagedProcess(record) {
   if (!record || (record.exited && process.platform !== 'win32')) return;
   record.expectedStop = true;
   if (process.platform === 'win32') {
-    clearInterval(record.windowsSampleTimer);
-    await record.sampleWindowsTree?.().catch(() => {});
-    const identity = await record.windowsIdentity;
-    if (!identity && !record.exited) throw new Error(`Cannot verify Windows process ${record.child.pid}; refusing cleanup`);
-    const known = [...(record.windowsDescendants?.values() || [])].reverse();
-    if (identity && !known.some(item => item.pid === identity.pid)) known.push(identity);
-    for (const owned of known) await stopOwnedWindowsTree(owned);
-    await Promise.race([record.exitPromise, delay(2_000)]);
+    const result=await cleanupWindowsProcesses([record]);
+    if (!result.ok) throw new Error('Windows 进程停止未完成：'+result.errors.join('; '));
     return;
   }
   signalProcess(record, 'SIGTERM');
@@ -2228,6 +2272,7 @@ async function initializeAgentGroups(bindings, operations = {}) {
     group.executionLocation = groupProcessExecutionLocation(agents);
     try {
       throwIfStopping();
+      Object.assign(bridgeEnv, await prepareAcpxEnvironment(bridgeEnv));
       const initResult = await runNetworkStage(async () => {
         return runCapture(
           ACP_PACKAGE,
@@ -2336,9 +2381,10 @@ async function startAgentGroups(groups) {
       throwIfStopping();
       const running = started.running;
       throwIfStopping();
-      const codexFailure = codexSessionFailure(group.process.events);
+      const sessionFailures = new Map(agents.filter(agent => resolveTaskAgentMetadata(agent.name).executionLocation === 'local')
+        .map(agent => [agent.name, localAgentSessionFailure(group.process.events, agent.name)]));
       for (const agent of running.agents || []) {
-        if (agent.name !== 'codex' || !codexFailure) group.availableAgents.add(agent.name);
+        if (!sessionFailures.get(agent.name)) group.availableAgents.add(agent.name);
       }
       for (const agent of agents) {
         if (!group.availableAgents.has(agent.name)) {
@@ -2346,7 +2392,7 @@ async function startAgentGroups(groups) {
           recordStableAgentFailure(
             group,
             agent.name,
-            (agent.name === 'codex' && codexFailure) || failed?.message || `${agent.name} Agent Bridge 启动失败`,
+            sessionFailures.get(agent.name) || failed?.message || `${agent.name} Agent Bridge 启动失败`,
           );
           await releaseLease(group.leases.get(agent.name));
           group.leases.delete(agent.name);
@@ -3480,6 +3526,32 @@ async function shutdownGroups(groups) {
 }
 
 const cleanupRuntimeResources = createResourceCleanup(async () => {
+  if (process.platform === 'win32') {
+    if (windowsCleanupResult) return;
+    const records=[...managedProcesses,...transientProcesses];
+    for (const record of records) record.expectedStop=true;
+    windowsCleanupResult=await cleanupWindowsProcesses(records,{beforeStop:()=>{
+      for (const record of records) record.windowsIdentityAbort?.abort(new Error('Windows cleanup started'));
+      return windowsSampler?.stop();
+    }});
+    if (process.env.AAMP_WINDOWS_SERVICE_GENERATION) {
+      await writeJsonAtomic(path.join(RUNTIME_HOME,'windows-service-v1','cleanup-result.json'),{
+        pid:process.pid,generation:process.env.AAMP_WINDOWS_SERVICE_GENERATION,ok:windowsCleanupResult.ok,
+      }).catch(()=>{windowsCleanupResult.ok=false;windowsCleanupResult.errors.push('Cannot persist cleanup result');});
+    }
+    if (!windowsCleanupResult.ok) {
+      process.exitCode=1;
+      console.error('🔴 停止未完成：'+redact(windowsCleanupResult.errors.join('; '))+'；保留进程记录供下次恢复。');
+      // A remaining business process is not an owned query helper. Do not kill it
+      // without identity verification; disconnect local pipes so the CLI can exit.
+      for (const record of records) {
+        record.child.stdout?.destroy(); record.child.stderr?.destroy(); record.child.stdin?.destroy(); record.child.unref?.();
+      }
+    }
+    managedProcesses.clear(); transientProcesses.clear();
+    for (const lease of [...heldLeases]) await releaseLease(lease).catch(()=>{});
+    return;
+  }
   while (managedProcesses.size || transientProcesses.size || heldLeases.size) {
     const records = [...managedProcesses].reverse();
     for (const record of records) {
@@ -4006,6 +4078,7 @@ async function handoffToBackground(bindings, operations = {}) {
   const withControlLock = operations.withControlLock || withServiceControlLock;
   return withControlLock(async () => {
     await cleanupRuntime();
+    if (windowsCleanupResult?.ok === false) throw new Error('Windows 停止未完成，拒绝启动新的后台实例');
     return startService(bindings.map((binding) => binding.binding_id));
   });
 }
@@ -4015,7 +4088,7 @@ async function continueStartedRuntime(runtime, operations = {}) {
   const superviseRuntime = operations.superviseRuntime || supervise;
   if (runtime.background) {
     const service = await handoff(runtime.bindings);
-    return { mode: 'background', state: service.state, pid: service.pid };
+    return { mode: 'background', state: service.state, pid: service.pid, ...(service.processTracking ? {processTracking:service.processTracking} : {}) };
   }
   if (runtime.serviceWorker) {
     const markServiceReady = operations.markServiceReady
@@ -4045,6 +4118,7 @@ async function resolveManagedRuntimeStatus(operations = {}) {
     return {
       mode: 'background',
       state: service.state,
+      ...(service.processTracking ? {processTracking:service.processTracking} : {}),
       pid: service.pid,
       pids,
     };
@@ -4129,6 +4203,7 @@ async function runServiceLifecycleCommand(command, operations = {}) {
     if (status.mode === 'background') {
       if (status.state === 'running' && status.pid) {
         log(`🟢 Task Agent 正在后台运行（PID ${status.pid}），终端可以关闭。`);
+        if (status.processTracking?.state === 'degraded') log('⚠ Windows 进程跟踪降级，任务仍在运行，正在自动重试。');
       } else {
         log(`🟡 Task Agent 后台服务已加载但未运行（状态：${status.state}）；请执行 ${taskCommand('logs')} 查看原因。`);
       }
@@ -4389,7 +4464,7 @@ if (isMainModule) {
     .finally(async () => {
       if (stopPoll) clearInterval(stopPoll);
       await cleanupAll();
-      if (stopRequested && stopSignal) console.log(`\n已收到 ${stopSignal}，本次启动的 Bridge 已停止。`);
+      if (stopRequested && stopSignal && windowsCleanupResult?.ok !== false) console.log(`\n已收到 ${stopSignal}，本次启动的 Bridge 已停止。`);
     });
 }
 
@@ -4416,6 +4491,7 @@ export {
   removeUnboundBindings,
   installHasOnlyCancellations,
   initializeAgentGroups,
+  prepareAcpxEnvironment,
   orderStartupItems,
   prepareBindingStart,
   prepareWindowsBackgroundBindings,

@@ -48,13 +48,15 @@ export async function createWindowsProcessJournal(directory, controller, {
     file,
     stopFile,
     record(identities) {
-      tail = tail.then(async () => {
+      tail = tail.catch(() => {}).then(async () => {
         const merged = new Map(state.descendants.map((identity) => [`${identity.pid}:${identity.startedAt}`, identity]))
         for (const identity of identities || []) {
           if (!sameIdentity(identity, controller)) merged.set(`${identity.pid}:${identity.startedAt}`, identity)
         }
-        state = { ...state, descendants: [...merged.values()] }
-        await writeAtomic(file, state, atomicReplace)
+        const next = { ...state, descendants: [...merged.values()] }
+        if (JSON.stringify(next) === JSON.stringify(state)) return
+        await writeAtomic(file, next, atomicReplace)
+        state = next
       })
       return tail
     },
@@ -71,20 +73,28 @@ export async function createWindowsProcessJournal(directory, controller, {
 export async function recoverWindowsProcessJournals(directory, {
   readIdentity = async (pid, options) => (await platform()).readWindowsProcessIdentity(pid, options),
   stopTree = async (identity, options) => (await platform()).stopOwnedWindowsTree(identity, options),
+  controllerIdentity, signal,
 } = {}) {
+  let recovered=0
   for (const file of await journalFiles(directory)) {
     const journal = await readJson(file)
     if (journal?.version !== 1 || !journal.controller || !Array.isArray(journal.descendants)) {
       throw new Error(`invalid Windows process journal: ${file}`)
     }
-    const liveController = await readIdentity(journal.controller.pid, {exitedBefore:journal.controller.startedAt})
+    signal?.throwIfAborted()
+    if (controllerIdentity && !sameIdentity(journal.controller,controllerIdentity)) continue
+    const liveController = await readIdentity(journal.controller.pid, {exitedBefore:journal.controller.startedAt,...(signal ? {signal} : {})})
     if (sameIdentity(liveController, journal.controller)) continue
     for (const identity of [...journal.descendants].reverse()) {
-      await stopTree(identity, { allowExitedIdentity: true })
+      await stopTree(identity, { allowExitedIdentity: true, ...(signal ? {signal} : {}) })
     }
+    signal?.throwIfAborted()
     await fsp.rm(`${file}.stop`, { force: true })
+    signal?.throwIfAborted()
     await fsp.rm(file)
+    recovered++
   }
+  return recovered
 }
 
 export async function requestWindowsControllerStop(directory, pid, {

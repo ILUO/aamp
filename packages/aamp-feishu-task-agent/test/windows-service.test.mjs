@@ -80,16 +80,17 @@ test('startup reports current worker terminal failure without waiting for readin
  await assert.rejects(manager.start(['b1']),/后台启动失败.*EACCES/);
  assert.equal(waits,0);
 });
-async function fixture(t) {
+async function fixture(t, overrides={}) {
   assert.equal(typeof mod.createWindowsServiceManager,'function');
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-service-'));
   t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const identities=new Map([[101,{pid:101,startedAt:'2026-09-07T00:00:00.000Z',ownerSid:'S-1-5-21-1',executablePath:process.execPath,command:'node worker'}],[102,{pid:102,startedAt:'2026-09-07T00:00:01.000Z',ownerSid:'S-1-5-21-1',executablePath:process.execPath,command:'node controller'}]]);
   const calls=[];
-  const manager=mod.createWindowsServiceManager({runtimeHome:root,controllerPath:'controller',workerPath:'worker',currentSid:async()=>'S-1-5-21-1',readIdentity:async pid=>identities.get(pid),ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),scheduler:async action=>{calls.push(action);return {loaded:true,state:identities.size ? 'Running' : 'Ready',ownerSid:'S-1-5-21-1'};},stopTree:async identity=>{identities.delete(identity.pid);},wait:async()=>{},stopAttempts:1,startupAttempts:1});
+  const manager=mod.createWindowsServiceManager({runtimeHome:root,controllerPath:'controller',workerPath:'worker',currentSid:async()=>'S-1-5-21-1',readIdentity:async pid=>identities.get(pid),ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),scheduler:async action=>{calls.push(action);return {loaded:true,state:identities.size ? 'Running' : 'Ready',ownerSid:'S-1-5-21-1'};},stopTree:async identity=>{identities.delete(identity.pid);},wait:async()=>{},stopAttempts:1,startupAttempts:1,...overrides});
   await fs.mkdir(manager.paths.serviceHome,{recursive:true});
   await fs.writeFile(manager.paths.selectionFile,JSON.stringify({version:1,generation:'g1',binding_ids:['b1']}));
   await fs.writeFile(manager.paths.ownerFile,JSON.stringify({generation:'g1',worker:identities.get(101),controller:identities.get(102)}));
+  await fs.writeFile(path.join(manager.paths.serviceHome,'cleanup-result.json'),JSON.stringify({generation:'g1',pid:102,ok:true}));
   return {manager,identities,calls};
 }
 test('Windows scheduler running is not ready without matching controller readiness',async t=>{
@@ -195,4 +196,45 @@ test('background config preserves explicit preparation policies and proxies but 
   assert.equal(config.env.AAMP_TASK_CODEX_ACP_HOME,path.join(os.homedir(),'.aamp','feishu-task-agent','codex-acp'))
   assert.ok(progress.some(message=>message.includes('后台任务')))
   assert.ok(progress.some(message=>message.includes('等待智能体')))
+})
+
+test('stop refuses success when controller reports incomplete cleanup',async t=>{
+ const {manager}=await fixture(t)
+ await fs.writeFile(path.join(manager.paths.serviceHome,'cleanup-result.json'),JSON.stringify({generation:'g1',pid:102,ok:false}))
+ await assert.rejects(manager.stop(),/停止未完成/)
+})
+
+test('outer stop deadline cancels a stuck identity query',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-stop-deadline-'));t.after(()=>fs.rm(root,{recursive:true,force:true}))
+ let cancelled=false
+ const manager=mod.createWindowsServiceManager({runtimeHome:root,currentSid:async()=>'S-1-5-21-1',ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),
+ scheduler:async()=>({loaded:true,state:'Running'}),stopTimeoutMs:30,
+ readIdentity:async(pid,{signal})=>new Promise((resolve,reject)=>signal.addEventListener('abort',()=>{cancelled=true;reject(signal.reason)},{once:true}))})
+ await fs.mkdir(manager.paths.serviceHome,{recursive:true})
+ await fs.writeFile(manager.paths.selectionFile,JSON.stringify({generation:'g'}))
+ await fs.writeFile(manager.paths.ownerFile,JSON.stringify({generation:'g',worker:{pid:10}}))
+ await assert.rejects(manager.stop(),/停止未完成/);assert.equal(cancelled,true)
+})
+
+test('stop refuses success without acknowledgement or recoverable journal',async t=>{
+ const {manager}=await fixture(t)
+ await fs.rm(path.join(manager.paths.serviceHome,'cleanup-result.json'))
+ await assert.rejects(manager.stop(),/缺少控制器清理确认/)
+})
+
+test('legacy journal recovery remains stoppable on a second call',async t=>{
+ const {manager,identities}=await fixture(t)
+ await fs.rm(path.join(manager.paths.serviceHome,'cleanup-result.json'))
+ const {createWindowsProcessJournal}=await import('../bin/windows-process-journal.mjs')
+ const journal=await createWindowsProcessJournal(path.join(path.dirname(manager.paths.serviceHome),'windows-process-journals-v1'),identities.get(102),{ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),atomicReplace:fs.rename})
+ await journal.record([identities.get(101)])
+ await manager.stop()
+ await manager.stop()
+})
+
+test('cooperative stop reserves time for verified forced cleanup',async t=>{
+ let polls=0
+ const {manager}=await fixture(t,{stopAttempts:100,stopGraceMs:0,wait:async()=>{polls++}})
+ await manager.stop()
+ assert.equal(polls,0)
 })
