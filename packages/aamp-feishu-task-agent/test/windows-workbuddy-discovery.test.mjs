@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import {test} from 'node:test'
-import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises'
+import {mkdtemp,mkdir,writeFile,rm,realpath} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import path from 'node:path'
 import {findWindowsAgent,prepareWindowsNativeAgent,discoverWindowsAgents} from '../bootstrap/windows-agents.mjs'
@@ -55,7 +55,7 @@ test('unrecognized bundled files are rejected and existing PATH shim remains sup
   assert.equal(await findWindowsAgent('workbuddy',env),undefined)
   const js=path.join(root,'entry.js');await writeFile(js,'')
   await writeFile(path.join(root,'workbuddy.cmd'),'@echo off\r\nnode "%~dp0\\entry.js" %*\r\n')
-  assert.deepEqual(await findWindowsAgent('workbuddy',{...env,PATH:root,Path:root}),{command:process.execPath,argsPrefix:[js]})
+  assert.deepEqual(await findWindowsAgent('workbuddy',{...env,PATH:root,Path:root}),{command:process.execPath,argsPrefix:[await realpath(js)]})
 })
 
 test('native and x86 Program Files roots are supported without changing product identity',async t=>{

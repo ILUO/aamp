@@ -1155,6 +1155,10 @@ test('AIME initialization sends the exact remote Agent object to ACP init', asyn
   const captureFile = path.join(root, 'acp-init.json')
   const fakeNpm = path.join(root, 'npm')
   const fakeAcp = path.join(root, 'aamp-acp-bridge')
+  const fakeAcpx = path.join(root, 'acpx')
+  // The controller now probes acpx before initializing ACP. Keep that probe
+  // local to this fixture rather than using the developer's installed acpx.
+  writeExecutable(fakeAcpx, 'if [ "$1" = "--help" ]; then exit 0; fi\nexit 64')
   const legacyConfigDir = path.join(root, 'legacy-lark-config')
   const legacyProfileFile = path.join(legacyConfigDir, 'profiles', 'aime-legacy-profile.json')
   const legacySentinel = Buffer.from('{"legacy":"retained-aime-profile-sentinel"}\n')
@@ -1169,6 +1173,7 @@ test('AIME initialization sends the exact remote Agent object to ACP init', asyn
     'node -e \'process.stdout.write(JSON.stringify({ executable: "aamp-acp-bridge", kind: "direct", command: process.env.FAKE_ACP_BIN, pathValue: process.env.PATH, environment: {} }))\'',
   ].join('\n'))
   writeExecutable(fakeAcp, [
+    'if [ "$1" = "--help" ]; then exit 0; fi',
     "printf '%s\\n' 'password=acp-password-sentinel --cwd /Users/acp/private --agent /safe/bin/aime-acp' >&2",
     'node -e \'let input="";process.stdin.setEncoding("utf8");process.stdin.on("data",(chunk)=>{input+=chunk});process.stdin.on("end",()=>{require("fs").writeFileSync(process.env.ACP_CAPTURE_FILE,input);process.stdout.write(JSON.stringify({agents:[{name:"aime",email:"aime@meshmail.ai"}]}))})\'',
   ].join('\n'))
@@ -1186,6 +1191,7 @@ test('AIME initialization sends the exact remote Agent object to ACP init', asyn
     state: 'pending',
   }
   const envKeys = [
+    'PATH',
     'HOME', 'AAMP_TASK_RUNTIME_HOME', 'AAMP_TASK_STATE_HOME', 'AAMP_RUN_LOG_DIR',
     'AAMP_TASK_NPM_BIN', 'AAMP_TASK_NPM_CACHE_DIR',
     'AAMP_LARK_CLI_CONFIG_DIR', 'FAKE_ACP_BIN', 'ACP_CAPTURE_FILE',
@@ -1193,6 +1199,7 @@ test('AIME initialization sends the exact remote Agent object to ACP init', asyn
   const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
   try {
     Object.assign(process.env, {
+      PATH: [root, process.env.PATH].filter(Boolean).join(path.delimiter),
       HOME: root,
       AAMP_TASK_RUNTIME_HOME: runtimeHome,
       AAMP_TASK_STATE_HOME: path.join(root, 'state'),
@@ -1363,6 +1370,7 @@ test('remote managed startup sanitizes real child output and uses location-aware
   }
   writeFileSync(fakeAcp, [
     '#!/usr/bin/env node',
+    "if (process.argv.includes('--help')) process.exit(0)",
     "const remote = process.argv.some((value) => value.includes('remote-private'))",
     'if (remote) {',
     `  console.log(${JSON.stringify(JSON.stringify(failedEvent))})`,

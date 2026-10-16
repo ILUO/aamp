@@ -803,7 +803,7 @@ test('Windows cmd descriptors use ComSpec escaping without shell mode', () => {
 
 test('controller resolver resists a package-local node bin and managed cleanup records exit', {
   skip: process.platform === 'win32' && 'POSIX process-group fixture',
-  timeout: 25_000,
+  timeout: 60_000,
 }, async () => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-managed-npm-shim-'))
   const packageRoot = path.join(root, 'managed-package')
@@ -813,6 +813,7 @@ test('controller resolver resists a package-local node bin and managed cleanup r
   process.env.AAMP_TASK_NPM_CACHE_DIR = cacheDir
   let controller
   let record
+  let pendingStart
   try {
     await writePackage(packageRoot, {
       name: '@fixture/managed-bridge',
@@ -824,6 +825,7 @@ test('controller resolver resists a package-local node bin and managed cleanup r
     }, {
       'bridge.sh': [
         '#!/bin/sh',
+        'if [ "$1" = "--help" ]; then exit 0; fi',
         'trap "exit 0" TERM INT',
         'printf \'%s\\n\' \'{"type":"fixture.started","source":"requested-shell"}\'',
         'while :; do sleep 1; done',
@@ -833,15 +835,16 @@ test('controller resolver resists a package-local node bin and managed cleanup r
     })
     controller = await import(`../bin/feishu-task-agent-controller.mjs?managed-shim=${Date.now()}`)
 
+    pendingStart = controller.startManagedProcess({
+      label: 'Fixture Managed Bridge',
+      packageSpec: packageRoot,
+      executable: 'fixture-managed-bridge',
+      args: [],
+      env: { ...process.env, npm_config_offline: 'true' },
+      logFile,
+    })
     record = await withTimeout(
-      controller.startManagedProcess({
-        label: 'Fixture Managed Bridge',
-        packageSpec: packageRoot,
-        executable: 'fixture-managed-bridge',
-        args: [],
-        env: { ...process.env, npm_config_offline: 'true' },
-        logFile,
-      }),
+      pendingStart,
       15_000,
       'managed launch timed out',
     )
@@ -869,6 +872,9 @@ test('controller resolver resists a package-local node bin and managed cleanup r
       type: 'bridge.process', status: 'exited', expectedStop: true,
     })
   } finally {
+    // A timeout in withTimeout does not cancel the launch. Let its bounded
+    // probe settle before cleanup/removing the cache it may still be using.
+    await pendingStart?.catch(() => {})
     if (typeof controller?.cleanupAll === 'function') await controller.cleanupAll()
     if (previousCache === undefined) delete process.env.AAMP_TASK_NPM_CACHE_DIR
     else process.env.AAMP_TASK_NPM_CACHE_DIR = previousCache
