@@ -52,6 +52,10 @@ export interface BridgeTaskState {
   aampTaskId: string
   /** Set only for a controlled execution; legacy event dispatches leave this absent. */
   executionId?: string
+  /** Task event creation time, used only to reject an older START, never to order UUIDs. */
+  executionCreatedAt?: string
+  /** A newer controlled execution owns this Task; all old callbacks become local-only. */
+  supersededByExecutionId?: string
   /** Root execution ownership survives replies; STOP targets this latest AAMP turn when set. */
   activeContinuationTaskId?: string
   startAccepted?: boolean

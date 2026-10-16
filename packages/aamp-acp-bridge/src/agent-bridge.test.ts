@@ -1264,6 +1264,243 @@ function trackedSessionNames(bridge: AgentBridge): Set<string> {
   }).sessionNames
 }
 
+function replacementTask(taskId: string, executionId: string, createdAt = '1792134000000', sessionKey = 'feishu-task:replacement'): TaskDispatch {
+  return cancellationTask(taskId, {
+    sessionKey,
+    dispatchContext: {
+      source: 'feishu-task', execution_id: executionId,
+      task_execution_policy: 'replace_previous', task_execution_created_at: createdAt,
+      [AAMP_CANCEL_RESULT_CONTEXT_KEY]: 'cancelled',
+    },
+  })
+}
+
+function controlledPromptHarness(fake: FakeAcpxClient) {
+  const turns: Array<{
+    sessionName: string
+    handlers?: AcpPromptHandlers
+    result: ReturnType<typeof deferred<AcpResult>>
+    cancelled: ReturnType<typeof deferred<{ forced: boolean }>>
+    cancelCalls: number
+  }> = []
+  fake.prompt = async (agent, sessionName, _text, handlers) => {
+    fake.calls.push({ method: 'prompt', agent, sessionName })
+    const turn = { sessionName, handlers, result: deferred<AcpResult>(), cancelled: deferred<{ forced: boolean }>(), cancelCalls: 0 }
+    turns.push(turn)
+    handlers?.onControl?.({ cancelAndWait: async () => {
+      turn.cancelCalls += 1
+      const outcome = await turn.cancelled.promise
+      turn.result.resolve({ output: 'stale old result', events: [], streamedAssistantText: false })
+      return outcome
+    } })
+    return await turn.result.promise
+  }
+  return turns
+}
+
+test('controlled new execution waits for targeted cleanup and suppresses the old turn outputs', async (context) => {
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-cleanup')
+  releaseCancellationGates(fakeClient, fakeAcpx)
+  const turns = controlledPromptHarness(fakeAcpx)
+  const old = fakeClient.emitTaskDispatch(replacementTask('replace-old', 'execution-old'))
+  await until(() => turns.length === 1, 'old prompt must start')
+  const replacement = fakeClient.emitTaskDispatch(replacementTask('replace-new', 'execution-new', '1792134001000'))
+  await until(() => turns[0]!.cancelCalls === 1, 'new round must cancel the exact old prompt')
+  const eventsBefore = fakeClient.streamEvents.length
+  turns[0]!.handlers?.onTextChunk?.({ channel: 'assistant', text: 'stale text '.repeat(30) })
+  turns[0]!.handlers?.onToolUpdate?.({ title: 'stale tool', status: 'completed' })
+  assert.equal(fakeClient.streamEvents.length, eventsBefore)
+  assert.equal(turns.length, 1, 'new prompt cannot start while cancel is still pending')
+  await fakeClient.emitTaskCancel(cancellationEvent('replace-old'))
+  assert.equal(turns[0]!.cancelCalls, 1, 'late task.cancel must not start another session cancel')
+  turns[0]!.cancelled.resolve({ forced: false })
+  await until(() => turns.length === 2, 'replacement should start after cleanup')
+  turns[1]!.result.resolve({ output: 'new result', events: [], streamedAssistantText: false })
+  await Promise.all([old, replacement])
+  assert.deepEqual(fakeClient.results.map((result) => result.taskId), ['replace-new'])
+  assert.equal(fakeClient.streamCloses.some((close) => close.streamId === 'stream-replace-old'), false)
+  assert.equal(fakeAcpx.calls.some((call) => call.method === 'cancel'), false)
+})
+
+test('marked new execution can replace an older controlled turn without the new policy field', async (context) => {
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-upgrade')
+  releaseCancellationGates(fakeClient, fakeAcpx)
+  const turns = controlledPromptHarness(fakeAcpx)
+  const oldTask = replacementTask('upgrade-old', 'execution-old', '')
+  delete oldTask.dispatchContext!.task_execution_policy
+  const old = fakeClient.emitTaskDispatch(oldTask)
+  await until(() => turns.length === 1, 'old controlled prompt should start')
+  const next = fakeClient.emitTaskDispatch(replacementTask('upgrade-next', 'execution-next', '1792134001000'))
+  await until(() => turns[0]!.cancelCalls === 1, 'upgrade must identify the old controlled execution')
+  turns[0]!.cancelled.resolve({ forced: false })
+  await until(() => turns.length === 2, 'replacement should start after cleanup')
+  turns[1]!.result.resolve(fakeAcpx.promptResult)
+  await Promise.all([old, next])
+  assert.deepEqual(fakeClient.results.map((result) => result.taskId), ['upgrade-next'])
+})
+
+test('a superseded turn does not wait for its old in-flight progress request before releasing the session', async (context) => {
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-stream-hung')
+  releaseCancellationGates(fakeClient, fakeAcpx)
+  const turns = controlledPromptHarness(fakeAcpx)
+  const oldWrite = deferred<void>()
+  let oldWriteStarted = false
+  const append = fakeClient.appendStreamEvent.bind(fakeClient)
+  fakeClient.appendStreamEvent = async (options) => {
+    const event = await append(options)
+    if (options.streamId === 'stream-stream-old' && options.type === 'text.delta') {
+      oldWriteStarted = true
+      await oldWrite.promise
+    }
+    return event
+  }
+  const old = fakeClient.emitTaskDispatch(replacementTask('stream-old', 'execution-old'))
+  await until(() => turns.length === 1, 'old prompt should start')
+  turns[0]!.handlers?.onTextChunk?.({ channel: 'assistant', text: 'old progress '.repeat(20) })
+  await until(() => oldWriteStarted, 'old progress request should be in flight')
+  // Finish the prompt, leaving the old handler blocked in flushStreamWrites.
+  turns[0]!.result.resolve(fakeAcpx.promptResult)
+  await new Promise((resolve) => setImmediate(resolve))
+  const next = fakeClient.emitTaskDispatch(replacementTask('stream-next', 'execution-next', '1792134001000'))
+  await until(() => turns.length === 2, 'old network request must not block replacement startup')
+  assert.equal(turns[0]!.cancelCalls, 0, 'an already-exited prompt needs no late session cancel')
+  turns[1]!.result.resolve(fakeAcpx.promptResult)
+  await Promise.all([old, next])
+  assert.deepEqual(fakeClient.results.map((result) => result.taskId), ['stream-next'])
+  oldWrite.resolve()
+})
+
+test('replacement abandons a superseded hydration request before any ACP prompt starts', async (context) => {
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-hydrate-hung')
+  fakeClient.streamCloseGate.resolve()
+  fakeClient.resultGate.resolve()
+  fakeClient.gateHydrate = true
+  const turns = controlledPromptHarness(fakeAcpx)
+  const old = fakeClient.emitTaskDispatch(replacementTask('hydrate-old', 'execution-old'))
+  await fakeClient.hydrateStarted.promise
+  fakeClient.gateHydrate = false
+  const next = fakeClient.emitTaskDispatch(replacementTask('hydrate-next', 'execution-next', '1792134001000'))
+  await until(() => turns.length === 1, 'old hydration must not block replacement')
+  assert.equal(turns[0]!.cancelCalls, 0)
+  turns[0]!.result.resolve(fakeAcpx.promptResult)
+  await Promise.all([old, next])
+  assert.deepEqual(fakeClient.results.map((result) => result.taskId), ['hydrate-next'])
+  fakeClient.hydrateGate.resolve()
+})
+
+test('an unmarked new dispatch or a legacy turn without execution ID is never cancelled by replacement logic', async (context) => {
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-no-authority')
+  releaseCancellationGates(fakeClient, fakeAcpx)
+  const turns = controlledPromptHarness(fakeAcpx)
+  const legacyTask = replacementTask('legacy-no-id', 'unused')
+  delete legacyTask.dispatchContext!.execution_id
+  const legacy = fakeClient.emitTaskDispatch(legacyTask)
+  await until(() => turns.length === 1, 'legacy prompt should start')
+  const nextTask = replacementTask('no-policy', 'execution-next', '1792134001000')
+  delete nextTask.dispatchContext!.task_execution_policy
+  const next = fakeClient.emitTaskDispatch(nextTask)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0]!.cancelCalls, 0)
+  turns[0]!.result.resolve(fakeAcpx.promptResult)
+  await until(() => turns.length === 2, 'ordinary session serialization remains')
+  turns[1]!.result.resolve(fakeAcpx.promptResult)
+  await Promise.all([legacy, next])
+})
+
+test('same execution comments queue without cancellation and another Task can run independently', async (context) => {
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-same-round')
+  releaseCancellationGates(fakeClient, fakeAcpx)
+  const turns = controlledPromptHarness(fakeAcpx)
+  const first = fakeClient.emitTaskDispatch(replacementTask('same-first', 'execution-same'))
+  await until(() => turns.length === 1, 'first prompt should start')
+  const comment = fakeClient.emitTaskDispatch(replacementTask('same-comment', 'execution-same'))
+  const other = fakeClient.emitTaskDispatch(replacementTask('other-task', 'execution-other', '1792134001000', 'feishu-task:other'))
+  await until(() => turns.length === 2, 'different Task should start without waiting')
+  assert.equal(turns[0]!.cancelCalls, 0)
+  assert.notEqual(turns[0]!.sessionName, turns[1]!.sessionName)
+  turns[0]!.result.resolve(fakeAcpx.promptResult)
+  turns[1]!.result.resolve(fakeAcpx.promptResult)
+  await until(() => turns.length === 3, 'same execution comment should start after first prompt')
+  assert.equal(turns[2]!.sessionName, turns[0]!.sessionName)
+  assert.equal(turns[2]!.cancelCalls, 0)
+  turns[2]!.result.resolve(fakeAcpx.promptResult)
+  await Promise.all([first, comment, other])
+})
+
+test('older or undated different executions cannot replace the latest timestamped round', async (context) => {
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-stale')
+  releaseCancellationGates(fakeClient, fakeAcpx)
+  const turns = controlledPromptHarness(fakeAcpx)
+  const newest = fakeClient.emitTaskDispatch(replacementTask('latest-round', 'execution-latest', '1792134002000'))
+  await until(() => turns.length === 1, 'latest prompt should start')
+  await fakeClient.emitTaskDispatch(replacementTask('older-round', 'execution-older', '1792134001000'))
+  await fakeClient.emitTaskDispatch(replacementTask('undated-round', 'execution-undated', ''))
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0]!.cancelCalls, 0)
+  turns[0]!.result.resolve(fakeAcpx.promptResult)
+  await newest
+})
+
+test('bounded execution history eviction cannot let a stale dispatch replace a live newer round', async (context) => {
+  const { bridge, fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-live-history')
+  releaseCancellationGates(fakeClient, fakeAcpx)
+  const turns = controlledPromptHarness(fakeAcpx)
+  const live = fakeClient.emitTaskDispatch(replacementTask('history-live', 'execution-newest', '1792134002000'))
+  await until(() => turns.length === 1, 'live newest execution should start')
+  for (let index = 0; index < 257; index += 1) {
+    const key = `other-dispatcher\nfeishu-task:evict-${index}`
+    bridge['latestControlledExecutions'].set(key, { key, executionId: `evict-${index}`, replacePrevious: true })
+  }
+  await fakeClient.emitTaskDispatch(replacementTask('history-stale', 'execution-stale', '1792134001000'))
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0]!.cancelCalls, 0)
+  turns[0]!.result.resolve(fakeAcpx.promptResult)
+  await live
+})
+
+test('forced replacement retains the fresh ACP session for same-execution continuation', async (context) => {
+  const { bridge, fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-fresh-session')
+  releaseCancellationGates(fakeClient, fakeAcpx)
+  const turns = controlledPromptHarness(fakeAcpx)
+  const old = fakeClient.emitTaskDispatch(replacementTask('force-old', 'execution-old'))
+  await until(() => turns.length === 1, 'old prompt should start')
+  const next = fakeClient.emitTaskDispatch(replacementTask('force-next', 'execution-next', '1792134001000'))
+  await until(() => turns[0]!.cancelCalls === 1, 'old prompt should be cancelled')
+  turns[0]!.cancelled.resolve({ forced: true })
+  await until(() => turns.length === 2, 'new prompt should start in a fresh session')
+  assert.notEqual(turns[1]!.sessionName, turns[0]!.sessionName)
+  turns[1]!.result.resolve(fakeAcpx.promptResult)
+  await Promise.all([old, next])
+  for (let index = 0; index < 257; index += 1) {
+    bridge['replacementSessionNames'].set(`another-task-${index}`, `another-session-${index}`)
+  }
+  const comment = fakeClient.emitTaskDispatch(replacementTask('force-comment', 'execution-next', '1792134001000'))
+  await until(() => turns.length === 3, 'comment should continue')
+  assert.equal(turns[2]!.sessionName, turns[1]!.sessionName)
+  turns[2]!.result.resolve(fakeAcpx.promptResult)
+  await comment
+})
+
+test('failed targeted termination rejects the replacement instead of starting concurrently', async (context) => {
+  const { fakeClient, fakeAcpx } = await cancellationHarness(context, 'replace-failure')
+  releaseCancellationGates(fakeClient, fakeAcpx)
+  const turns = controlledPromptHarness(fakeAcpx)
+  const old = fakeClient.emitTaskDispatch(replacementTask('failure-old', 'execution-old'))
+  await until(() => turns.length === 1, 'old prompt should start')
+  const next = fakeClient.emitTaskDispatch(replacementTask('failure-next', 'execution-next', '1792134001000'))
+  await until(() => turns[0]!.cancelCalls === 1, 'old prompt should be cancelled')
+  turns[0]!.cancelled.reject(new Error('targeted process did not exit'))
+  await next
+  assert.equal(turns.length, 1, 'unsafe session must not run a new prompt')
+  assert.equal(fakeClient.results[0]?.taskId, 'failure-next')
+  assert.equal(fakeClient.results[0]?.status, 'rejected')
+  turns[0]!.result.resolve(fakeAcpx.promptResult)
+  await old.catch(() => {})
+  await fakeClient.emitTaskDispatch(replacementTask('failure-retry', 'execution-retry', '1792134002000'))
+  assert.equal(turns.length, 1)
+})
+
 test('cancel during hydration wins before unauthorized rejection side effects', async (context) => {
   const taskId = 'cancel-during-hydrate-unauthorized'
   const { bridge, events, fakeClient, fakeAcpx, testHome } = await cancellationHarness(context, taskId, {

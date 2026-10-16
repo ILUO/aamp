@@ -11,6 +11,7 @@ import {
   type TaskStreamOpened,
 } from 'aamp-sdk'
 import { createHash } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -52,6 +53,15 @@ function taskWriteContext(taskState: BridgeTaskState, targetTaskGuid = taskState
 }
 
 type LogMetadata = Record<string, unknown>
+
+class ControlledCallbackSuperseded extends Error {}
+
+interface ControlledCallbackScope {
+  aampTaskId: string
+  active: boolean
+  stopped: Promise<never>
+  invalidate: () => void
+}
 type Logger = {
   log: (message?: unknown, metadata?: LogMetadata) => void
   error: (message?: unknown, metadata?: LogMetadata) => void
@@ -71,6 +81,7 @@ type FeishuTaskEventIgnoreReason =
   | 'agent_task_status_not_dispatchable'
   | 'duplicate_task_event'
   | 'invalid_controlled_command'
+  | 'stale_controlled_execution'
   | 'controlled_task_uses_commands'
   | 'task_members_unavailable'
   | 'agent_not_current_assignee'
@@ -391,6 +402,7 @@ async function withPromptDispatchFailure<T>(
   try {
     return await operation()
   } catch (error) {
+    if (error instanceof ControlledCallbackSuperseded) throw error
     if (error instanceof PromptDispatchFailure) throw error
     throw new PromptDispatchFailure(action, error)
   }
@@ -403,6 +415,7 @@ async function withPostPromptFeishuFailure<T>(
   try {
     return await operation()
   } catch (error) {
+    if (error instanceof ControlledCallbackSuperseded) throw error
     if (error instanceof PostPromptFeishuFailure) throw error
     throw new PostPromptFeishuFailure(action, error)
   }
@@ -1641,6 +1654,10 @@ export class FeishuTaskBridgeRuntime {
   private readonly streamStepFlushQueues = new Map<string, Promise<void>>()
   private readonly backgroundTasks = new Set<Promise<void>>()
   private readonly controlledEventQueues = new Map<string, Promise<void>>()
+  private readonly controlledCallbackQueues = new Map<string, Promise<void>>()
+  private readonly controlledCallbackContext = new AsyncLocalStorage<ControlledCallbackScope>()
+  private readonly controlledCallbackScopes = new Set<ControlledCallbackScope>()
+  private stateSaveQueue: Promise<void> = Promise.resolve()
   private readonly controlledStopInFlight = new Set<string>()
   private readonly controlledStopCallbacks = new Map<string, Set<Promise<void>>>()
   private stopping = false
@@ -1656,18 +1673,71 @@ export class FeishuTaskBridgeRuntime {
       smtpPassword: config.mailbox.smtpPassword,
       baseUrl: config.mailbox.baseUrl,
     })
-    this.feishu = options.feishuClient ?? new OapiFeishuTaskClient(config.feishu, {
+    this.feishu = this.withControlledCallbackWaits(options.feishuClient ?? new OapiFeishuTaskClient(config.feishu, {
       logger: createDebugLogger(this.logger),
-    })
+    }))
     const configuredPaths = normalizeControlledFeedbackPaths(config.feishu.controlledFeedback)
     const configuredTransport = configuredPaths && this.feishu instanceof OapiFeishuTaskClient
       ? this.feishu.createControlledFeedbackTransport(configuredPaths)
       : undefined
     const feedbackTransport = options.controlledFeedbackTransport ?? configuredTransport
-    this.controlledFeedback = feedbackTransport ? new ControlledTaskFeedbackReporter(feedbackTransport) : undefined
+    this.controlledFeedback = feedbackTransport
+      ? new ControlledTaskFeedbackReporter(this.withControlledCallbackWaits(feedbackTransport)) : undefined
+  }
+
+  // All callback network calls share one cancellation boundary. An in-flight
+  // request may finish remotely, but its local continuation cannot revive an old turn.
+  private withControlledCallbackWaits<T extends object>(target: T): T {
+    return new Proxy(target, {
+      get: (client, key) => {
+        const method = Reflect.get(client, key, client) as unknown
+        if (typeof method !== 'function') return method
+        return (...args: unknown[]) => {
+          const scope = this.controlledCallbackContext.getStore()
+          this.assertControlledCallbackCurrent(scope)
+          const result: unknown = Reflect.apply(method, client, args)
+          if (!scope || !result || typeof (result as PromiseLike<unknown>).then !== 'function') return result
+          return this.waitForControlledCallback(scope, Promise.resolve(result))
+        }
+      },
+    })
+  }
+
+  private assertControlledCallbackCurrent(scope = this.controlledCallbackContext.getStore()): void {
+    if (!scope) return
+    const task = this.state.tasks[scope.aampTaskId]
+    if (!scope.active || !task || !this.isCurrentControlledTask(task)) throw new ControlledCallbackSuperseded()
+  }
+
+  private async waitForControlledCallback<T>(scope: ControlledCallbackScope, work: Promise<T>): Promise<T> {
+    const result = await Promise.race([work, scope.stopped])
+    this.assertControlledCallbackCurrent(scope)
+    return result
+  }
+
+  private updateTaskState(aampTaskId: string, next: BridgeTaskState): void {
+    this.assertControlledCallbackCurrent()
+    const scope = this.controlledCallbackContext.getStore()
+    Reflect.set(this.state.tasks, aampTaskId, scope ? { ...this.state.tasks[aampTaskId], ...next } : next)
+  }
+
+  private invalidateControlledCallbacks(aampTaskId?: string): void {
+    for (const scope of this.controlledCallbackScopes) {
+      if (!aampTaskId || scope.aampTaskId === aampTaskId) scope.invalidate()
+    }
+  }
+
+  private closeControlledStream(aampTaskId: string): void {
+    const subscription = this.activeStreamSubscriptions.get(aampTaskId)
+    this.activeStreamSubscriptions.delete(aampTaskId)
+    try { subscription?.close() }
+    catch (error) {
+      this.logger.error(`[aamp stream ${aampTaskId}] local close failed: ${formatUnknownError(error)}`)
+    }
   }
 
   async start(options: FeishuTaskBridgeStartOptions = {}): Promise<void> {
+    this.stopping = false
     this.state = await loadBridgeState(this.configDir)
     const prunedTaskCount = this.pruneTaskState()
     this.prunePermissionDeniedCommentNotices()
@@ -1723,12 +1793,20 @@ export class FeishuTaskBridgeRuntime {
   async stop(): Promise<void> {
     if (this.stopping) return
     this.stopping = true
+    this.invalidateControlledCallbacks()
+    for (const taskId of this.streamStepBuffers.keys()) {
+      if (!this.state.tasks[taskId]?.executionId) continue
+      this.clearStreamStepFlushTimer(taskId)
+      this.streamStepBuffers.delete(taskId)
+      this.closeControlledStream(taskId)
+    }
     for (const subscription of this.activeStreamSubscriptions.values()) {
       subscription.close()
     }
     this.activeStreamSubscriptions.clear()
     await this.drainBackgroundTasks()
     await Promise.allSettled([...this.controlledEventQueues.values()])
+    await Promise.allSettled([...this.controlledCallbackQueues.values()])
     await Promise.allSettled([...this.streamEventQueues.values()])
     this.streamEventQueues.clear()
     await this.flushAllStreamStepBuffers()
@@ -2210,6 +2288,14 @@ export class FeishuTaskBridgeRuntime {
     }
     if (controlledKind === 'task_comment') {
       // User replies and START/STOP must select the current AAMP turn in the same order.
+      // Wait outside the command queue so a new execution can supersede a stuck writer.
+      await this.controlledCallbackQueues.get(event.taskGuid)?.catch(() => {})
+      await this.drainControlledStopCallbacks(event.taskGuid)
+      const owner = this.getLatestControlledOwner(event.taskGuid)
+      if (owner) {
+        const activeId = owner.activeContinuationTaskId ?? owner.aampTaskId
+        await this.enqueueControlledCallback(activeId, () => this.enqueueStreamStepFlush(activeId))
+      }
       await this.enqueueControlledOperation(event.taskGuid, () => this.handleLegacyTaskEvent(event))
       return
     }
@@ -2280,7 +2366,7 @@ export class FeishuTaskBridgeRuntime {
           createdAt: existingTaskState?.createdAt ?? now,
           updatedAt: now,
         }
-        this.state.tasks[aampTaskId] = taskState
+        this.updateTaskState(aampTaskId, taskState)
         await this.persistState()
         if (!(taskState.helpCommentedTaskIds ?? []).includes(aampTaskId)) {
           await this.feishu.commentTask(task.guid, REMOTE_ATTACHMENTS_UNSUPPORTED_HELP)
@@ -2290,18 +2376,18 @@ export class FeishuTaskBridgeRuntime {
             helpCommentedTaskIds: [...new Set([...(latestTaskState.helpCommentedTaskIds ?? []), aampTaskId])],
             updatedAt: new Date().toISOString(),
           }
-          this.state.tasks[aampTaskId] = taskState
+          this.updateTaskState(aampTaskId, taskState)
           await this.persistState()
         } else {
           this.logger.log(`${formatTaskLogPrefix(task.guid, event.eventId)} remote attachment help comment already recorded`, { taskId: aampTaskId })
         }
         await this.markFeishuTasksBlockedOnce(aampTaskId, this.state.tasks[aampTaskId] ?? taskState)
-        this.state.tasks[aampTaskId] = {
+        this.updateTaskState(aampTaskId, {
           ...(this.state.tasks[aampTaskId] ?? taskState),
           status: 'help_needed',
           lastError: undefined,
           updatedAt: new Date().toISOString(),
-        }
+        })
         this.rememberEvent(event, semanticEventKey)
         await this.persistState()
         this.logger.log(`${formatTaskLogPrefix(task.guid, event.eventId)} remote attachments blocked category=input_attachment count=${attachmentRefs.length}`, { taskId: aampTaskId })
@@ -2330,7 +2416,7 @@ export class FeishuTaskBridgeRuntime {
         createdAt: now,
         updatedAt: now,
       }
-      this.state.tasks[dispatch.taskId] = taskState
+      this.updateTaskState(dispatch.taskId, taskState)
       await this.persistState()
       // Preparing context can overlap START or assignee removal. Re-read immediately before sending.
       const latestTask = await withPromptDispatchFailure('read_task_details', () => this.feishu.getTaskBase(event.taskGuid))
@@ -2366,12 +2452,12 @@ export class FeishuTaskBridgeRuntime {
         attachments: preparedAttachments.attachments.length ? preparedAttachments.attachments : undefined,
       }))
 
-      this.state.tasks[dispatch.taskId] = {
+      this.updateTaskState(dispatch.taskId, {
         ...taskState,
         aampMessageId: result.messageId,
         status: 'dispatched',
         updatedAt: new Date().toISOString(),
-      }
+      })
       this.state.lastAampDispatchAt = new Date().toISOString()
       this.state.lastAampDispatchTaskId = dispatch.taskId
       this.rememberEvent(event, semanticEventKey)
@@ -2390,12 +2476,12 @@ export class FeishuTaskBridgeRuntime {
       this.state.lastError = message
       if (taskState) {
         const latestTaskState = this.state.tasks[taskState.aampTaskId] ?? taskState
-        this.state.tasks[taskState.aampTaskId] = {
+        this.updateTaskState(taskState.aampTaskId, {
           ...latestTaskState,
           status: 'failed',
           lastError: message,
           updatedAt: new Date().toISOString(),
-        }
+        })
       }
       await this.persistState()
       throw error
@@ -2407,6 +2493,7 @@ export class FeishuTaskBridgeRuntime {
     kind: 'task_agent_start' | 'task_agent_stop',
   ): Promise<void> {
     await this.enqueueControlledOperation(event.taskGuid, () => this.handleControlledTaskEvent(event, kind))
+    if (kind === 'task_agent_stop') await this.drainControlledStopCallbacks(event.taskGuid)
   }
 
   private async enqueueControlledOperation(taskGuid: string, operation: () => Promise<void>): Promise<void> {
@@ -2424,15 +2511,49 @@ export class FeishuTaskBridgeRuntime {
 
   private enqueueControlledCallback(aampTaskId: string, operation: () => Promise<void>): Promise<void> {
     const taskState = this.state.tasks[aampTaskId]
+    if (!taskState?.executionId) return operation()
+    const activeScope = this.controlledCallbackContext.getStore()
+    if (activeScope?.active && activeScope.aampTaskId === aampTaskId) return operation()
+    const run = async () => {
+      const task = this.state.tasks[aampTaskId]
+      if (this.stopping || !task || !this.isCurrentControlledTask(task)) return
+      let rejectStopped!: (error: Error) => void
+      const stopped = new Promise<never>((_, reject) => { rejectStopped = reject })
+      void stopped.catch(() => {})
+      const scope: ControlledCallbackScope = {
+        aampTaskId, active: true, stopped,
+        invalidate: () => {
+          if (!scope.active) return
+          scope.active = false
+          rejectStopped(new ControlledCallbackSuperseded())
+        },
+      }
+      this.controlledCallbackScopes.add(scope)
+      try {
+        await this.controlledCallbackContext.run(scope, async () => {
+          try { await Promise.race([operation(), stopped]) }
+          catch (error) { if (!(error instanceof ControlledCallbackSuperseded)) throw error }
+        })
+      } finally {
+        scope.active = false
+        this.controlledCallbackScopes.delete(scope)
+      }
+    }
     // A real terminal result can arrive while cancellation is still being sent.
-    if (taskState && this.controlledStopInFlight.has(taskState.taskGuid)) {
+    if (this.controlledStopInFlight.has(taskState.taskGuid)) {
       const callbacks = this.controlledStopCallbacks.get(taskState.taskGuid) ?? new Set<Promise<void>>()
       this.controlledStopCallbacks.set(taskState.taskGuid, callbacks)
-      const callback: Promise<void> = operation().finally(() => callbacks.delete(callback))
+      const callback: Promise<void> = run().finally(() => callbacks.delete(callback))
       callbacks.add(callback)
       return callback
     }
-    return taskState?.executionId ? this.enqueueControlledOperation(taskState.taskGuid, operation) : operation()
+    const previous = this.controlledCallbackQueues.get(taskState.taskGuid) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(run)
+    this.controlledCallbackQueues.set(taskState.taskGuid, next)
+    void next.finally(() => {
+      if (this.controlledCallbackQueues.get(taskState.taskGuid) === next) this.controlledCallbackQueues.delete(taskState.taskGuid)
+    }).catch(() => {})
+    return next
   }
 
   private async drainControlledStopCallbacks(taskGuid: string): Promise<void> {
@@ -2450,7 +2571,8 @@ export class FeishuTaskBridgeRuntime {
 
   private getLatestControlledOwner(taskGuid: string): BridgeTaskState | undefined {
     return Object.values(this.state.tasks)
-      .filter((task) => task.taskGuid === taskGuid && task.executionId && this.getControlledOwner(task) === task)
+      .filter((task) => task.taskGuid === taskGuid && task.executionId && !task.supersededByExecutionId
+        && this.getControlledOwner(task) === task)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
   }
 
@@ -2464,7 +2586,7 @@ export class FeishuTaskBridgeRuntime {
       || this.getLatestControlledOwner(task.taskGuid)?.executionId !== task.executionId) return false
     await this.reportControlledExecutionState(aampTaskId, 'STOPPED')
     const latest = this.state.tasks[aampTaskId] ?? task
-    this.state.tasks[aampTaskId] = { ...latest, status: 'cancelled', updatedAt: new Date().toISOString() }
+    this.updateTaskState(aampTaskId, { ...latest, status: 'cancelled', updatedAt: new Date().toISOString() })
     this.syncControlledOwner(this.state.tasks[aampTaskId]!)
     await this.persistState()
     return true
@@ -2491,18 +2613,42 @@ export class FeishuTaskBridgeRuntime {
   private isCurrentControlledTask(taskState: BridgeTaskState): boolean {
     if (!taskState.executionId) return true
     const owner = this.getControlledOwner(taskState)
-    return Boolean(owner && owner.executionId === taskState.executionId
+    return Boolean(owner && !owner.supersededByExecutionId && !taskState.supersededByExecutionId
+      && owner.executionId === taskState.executionId
       && (owner.activeContinuationTaskId ?? owner.aampTaskId) === taskState.aampTaskId)
+  }
+
+  private isOlderControlledStart(event: FeishuTaskEvent, owner: BridgeTaskState | undefined): boolean {
+    if (!owner || owner.executionId === event.executionId || !owner.executionCreatedAt) return false
+    // UUIDs and arrival order cannot tell which execution is newer. Fail closed
+    // when an ordered current round would be replaced by an undated/older event.
+    const incoming = event.timestamp?.trim()
+    const current = owner.executionCreatedAt.trim()
+    if (!incoming || !/^\d+$/.test(incoming) || !/^\d+$/.test(current)) return true
+    return BigInt(incoming) <= BigInt(current)
+  }
+
+  private supersedeControlledExecutions(taskGuid: string, executionId: string): void {
+    const now = new Date().toISOString()
+    for (const [taskId, task] of Object.entries(this.state.tasks)) {
+      if (task.taskGuid !== taskGuid || !task.executionId || task.executionId === executionId
+        || task.supersededByExecutionId) continue
+      this.updateTaskState(taskId, { ...task, supersededByExecutionId: executionId, status: 'cancelled', updatedAt: now })
+      // Do not flush buffered old output while switching the execution owner.
+      this.clearStreamStepFlushTimer(taskId)
+      this.streamStepBuffers.delete(taskId)
+      this.closeControlledStream(taskId)
+    }
   }
 
   private syncControlledOwner(taskState: BridgeTaskState): void {
     const owner = this.getControlledOwner(taskState)
     if (!owner || owner === taskState || !this.isCurrentControlledTask(taskState)) return
-    this.state.tasks[owner.aampTaskId] = {
+    this.updateTaskState(owner.aampTaskId, {
       ...owner, status: taskState.status, startAccepted: taskState.startAccepted,
       stopRequested: taskState.stopRequested, reportedExecutionState: taskState.reportedExecutionState,
       lastError: taskState.lastError, updatedAt: taskState.updatedAt,
-    }
+    })
   }
 
   private async handleControlledCommentEvent(
@@ -2539,8 +2685,8 @@ export class FeishuTaskBridgeRuntime {
       await this.ignoreFeishuTaskEvent(event, 'controlled_task_uses_commands')
       return
     }
-    // Drain old buffered writes before handing this execution to a new AAMP turn.
-    await this.enqueueStreamStepFlush(activeId)
+    // The event entry point flushes before joining the command queue. Waiting
+    // for a timer's network write here would block a replacement START again.
     if (this.config.agent?.executionLocation === 'remote' && this.collectFeishuTaskAttachmentRefs(task).length > 0) {
       throw new Error('REMOTE_ATTACHMENTS_UNSUPPORTED: Remote Agent input attachments are not supported.')
     }
@@ -2560,12 +2706,16 @@ export class FeishuTaskBridgeRuntime {
       status: 'dispatching', createdAt: now, updatedAt: now,
     }
     const savedOwner = this.state.tasks[owner.aampTaskId] ?? owner
-    this.state.tasks[aampTaskId] = taskState
-    this.state.tasks[owner.aampTaskId] = { ...savedOwner, activeContinuationTaskId: aampTaskId,
-      status: 'dispatching', reportedExecutionState: 'BLOCKED', updatedAt: now }
+    this.updateTaskState(aampTaskId, taskState)
+    this.updateTaskState(owner.aampTaskId, { ...savedOwner, activeContinuationTaskId: aampTaskId,
+      status: 'dispatching', reportedExecutionState: 'BLOCKED', updatedAt: now })
+    this.clearStreamStepFlushTimer(activeId)
+    this.streamStepBuffers.delete(activeId)
+    this.closeControlledStream(activeId)
     let sentToAamp = false
     try {
       await this.persistState()
+      this.invalidateControlledCallbacks(activeId)
       const assigneeIgnoreReason = await this.verifyCurrentTaskAssignee(event.taskGuid)
       if (assigneeIgnoreReason) throw new Error(`Task is not dispatchable: ${assigneeIgnoreReason}`)
       const bodyText = appendAttachmentNotes(dispatch.bodyText, preparedAttachments.notes)
@@ -2573,12 +2723,14 @@ export class FeishuTaskBridgeRuntime {
         to: this.config.targetAgentEmail, taskId: aampTaskId, sessionKey: dispatch.sessionKey,
         title: dispatch.title, bodyText, rawBodyText: bodyText, promptRules: dispatch.promptRules,
         dispatchContext: { ...dispatch.dispatchContext, execution_id: owner.executionId,
+          task_execution_policy: 'replace_previous',
+          ...(owner.executionCreatedAt ? { task_execution_created_at: owner.executionCreatedAt } : {}),
           [AAMP_CANCEL_RESULT_CONTEXT_KEY]: 'cancelled' },
         attachments: preparedAttachments.attachments.length ? preparedAttachments.attachments : undefined,
       })
       sentToAamp = true
-      this.state.tasks[aampTaskId] = { ...taskState, aampMessageId: sent.messageId,
-        status: 'dispatched', updatedAt: new Date().toISOString() }
+      this.updateTaskState(aampTaskId, { ...taskState, aampMessageId: sent.messageId,
+        status: 'dispatched', updatedAt: new Date().toISOString() })
       this.syncControlledOwner(this.state.tasks[aampTaskId]!)
       this.state.lastAampDispatchAt = new Date().toISOString()
       this.state.lastAampDispatchTaskId = aampTaskId
@@ -2589,7 +2741,7 @@ export class FeishuTaskBridgeRuntime {
       if (sentToAamp) throw error
       if (this.state.tasks[owner.aampTaskId]?.activeContinuationTaskId === aampTaskId) {
         // A failed reply delivery must not reject or release the already accepted execution.
-        this.state.tasks[owner.aampTaskId] = savedOwner
+        this.updateTaskState(owner.aampTaskId, savedOwner)
         delete this.state.tasks[aampTaskId]
       }
       await this.persistState()
@@ -2665,8 +2817,8 @@ export class FeishuTaskBridgeRuntime {
           return
         } finally {
           this.controlledStopInFlight.delete(event.taskGuid)
-          // A late help/result writer must finish before a queued user reply replaces its AAMP turn.
-          await this.drainControlledStopCallbacks(event.taskGuid)
+          // The caller drains writers after releasing the command queue, so a
+          // replacement START can invalidate their pending network waits.
         }
       }
       // ACK or a terminal result can arrive while sendCancel is in flight.
@@ -2677,7 +2829,7 @@ export class FeishuTaskBridgeRuntime {
         await this.persistState()
         return
       }
-      this.state.tasks[activeId] = { ...latestTaskState, stopRequested: true, updatedAt: new Date().toISOString() }
+      this.updateTaskState(activeId, { ...latestTaskState, stopRequested: true, updatedAt: new Date().toISOString() })
       this.syncControlledOwner(this.state.tasks[activeId]!)
       await this.persistState()
       await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'ACCEPTED' })
@@ -2696,9 +2848,16 @@ export class FeishuTaskBridgeRuntime {
     }
     const existing = this.state.tasks[aampTaskId]
     if (existing) {
-      if (existing.status === 'failed' || existing.status === 'cancelled') {
+      if (!existing.supersededByExecutionId && (existing.status === 'failed' || existing.status === 'cancelled')) {
         await feedback.reportCommandResult({ taskGuid: event.taskGuid, executionId, action, result: 'REJECTED' })
       }
+      this.rememberEvent(event)
+      await this.persistState()
+      return
+    }
+
+    if (this.isOlderControlledStart(event, this.getLatestControlledOwner(event.taskGuid))) {
+      await this.ignoreFeishuTaskEvent(event, 'stale_controlled_execution')
       this.rememberEvent(event)
       await this.persistState()
       return
@@ -2725,6 +2884,7 @@ export class FeishuTaskBridgeRuntime {
         taskGuid: task.guid,
         aampTaskId,
         executionId,
+        ...(event.timestamp ? { executionCreatedAt: event.timestamp } : {}),
         feishuEventId: event.eventId,
         feishuEventKind: kind,
         ...(task.taskId ? { feishuTaskId: task.taskId } : {}),
@@ -2733,10 +2893,16 @@ export class FeishuTaskBridgeRuntime {
         createdAt: now,
         updatedAt: now,
       }
-      this.state.tasks[aampTaskId] = taskState
+      this.updateTaskState(aampTaskId, taskState)
       await this.persistState()
       const assigneeIgnoreReason = await this.verifyCurrentTaskAssignee(event.taskGuid)
       if (assigneeIgnoreReason) throw new Error(`Task is not dispatchable: ${assigneeIgnoreReason}`)
+      this.supersedeControlledExecutions(task.guid, executionId)
+      await this.persistState()
+      for (const scope of this.controlledCallbackScopes) {
+        const old = this.state.tasks[scope.aampTaskId]
+        if (old?.taskGuid === task.guid && old.executionId !== executionId) scope.invalidate()
+      }
       const bodyText = appendAttachmentNotes(dispatch.bodyText, preparedAttachments.notes)
       const sent = await this.aamp.sendTask({
         to: this.config.targetAgentEmail,
@@ -2748,13 +2914,15 @@ export class FeishuTaskBridgeRuntime {
         dispatchContext: {
           ...dispatch.dispatchContext,
           execution_id: executionId,
+          task_execution_policy: 'replace_previous',
+          ...(event.timestamp ? { task_execution_created_at: event.timestamp } : {}),
           [AAMP_CANCEL_RESULT_CONTEXT_KEY]: 'cancelled',
         },
         promptRules: dispatch.promptRules,
         attachments: preparedAttachments.attachments.length ? preparedAttachments.attachments : undefined,
       })
       sentToAamp = true
-      this.state.tasks[aampTaskId] = { ...taskState, aampMessageId: sent.messageId, status: 'dispatched', updatedAt: new Date().toISOString() }
+      this.updateTaskState(aampTaskId, { ...taskState, aampMessageId: sent.messageId, status: 'dispatched', updatedAt: new Date().toISOString() })
       this.state.lastAampDispatchAt = new Date().toISOString()
       this.state.lastAampDispatchTaskId = aampTaskId
       this.rememberEvent(event)
@@ -2762,7 +2930,7 @@ export class FeishuTaskBridgeRuntime {
     } catch (error) {
       if (sentToAamp) throw error
       if (taskState) {
-        this.state.tasks[aampTaskId] = { ...taskState, status: 'failed', lastError: formatUnknownError(error), updatedAt: new Date().toISOString() }
+        this.updateTaskState(aampTaskId, { ...taskState, status: 'failed', lastError: formatUnknownError(error), updatedAt: new Date().toISOString() })
       }
       await feedback.reportCommandResult({
         taskGuid: event.taskGuid, executionId, action, result: 'REJECTED',
@@ -2780,11 +2948,11 @@ export class FeishuTaskBridgeRuntime {
     if (taskState.executionId && ['completed', 'failed', 'cancelled'].includes(taskState.status)) return
     if (taskState.executionId && !isSameMailboxAddress(stream.from, this.config.targetAgentEmail)) return
 
-    this.state.tasks[stream.taskId] = {
+    this.updateTaskState(stream.taskId, {
       ...taskState,
       streamId: stream.streamId,
       updatedAt: new Date().toISOString(),
-    }
+    })
     await this.persistState()
     await this.subscribeToTaskStream(stream.taskId, stream.streamId)
   }
@@ -2797,21 +2965,34 @@ export class FeishuTaskBridgeRuntime {
     if (this.activeStreamSubscriptions.has(aampTaskId)) return
 
     const latestTaskState = this.state.tasks[aampTaskId]
-    const subscription = await this.aamp.subscribeStream(
+    const scope = this.controlledCallbackContext.getStore()
+    const subscribing = this.aamp.subscribeStream(
       streamId,
       {
         onEvent: (event) => {
-          this.enqueueStreamEvent(aampTaskId, event)
+          this.controlledCallbackContext.exit(() => this.enqueueStreamEvent(aampTaskId, event))
         },
         onError: (error) => {
-          const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
-          this.state.lastError = message
-          this.logger.error(`[aamp stream ${aampTaskId}] ${message}`, { taskId: aampTaskId })
-          void this.persistState()
+          this.controlledCallbackContext.exit(() => {
+            if (!this.state.tasks[aampTaskId]) return
+            void this.enqueueControlledCallback(aampTaskId, async () => {
+              const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+              this.state.lastError = message
+              this.logger.error(`[aamp stream ${aampTaskId}] ${message}`, { taskId: aampTaskId })
+              await this.persistState()
+            }).catch((failure: unknown) => {
+              this.logger.error(`[aamp stream ${aampTaskId}] failed to save stream error: ${formatUnknownError(failure)}`, { taskId: aampTaskId })
+            })
+          })
         },
       },
       latestTaskState?.lastStreamEventId ? { lastEventId: latestTaskState.lastStreamEventId } : {},
     )
+    void subscribing.then((subscription) => {
+      if (scope && !scope.active) subscription.close()
+    }).catch(() => {})
+    const subscription = scope ? await this.waitForControlledCallback(scope, subscribing) : await subscribing
+    this.assertControlledCallbackCurrent(scope)
     this.activeStreamSubscriptions.set(aampTaskId, subscription)
   }
 
@@ -2831,7 +3012,7 @@ export class FeishuTaskBridgeRuntime {
       if (this.streamEventQueues.get(aampTaskId) === next) {
         this.streamEventQueues.delete(aampTaskId)
       }
-    })
+    }).catch(() => {})
   }
 
   private async handleStreamEvent(aampTaskId: string, event: AampStreamEvent): Promise<void> {
@@ -2846,7 +3027,7 @@ export class FeishuTaskBridgeRuntime {
       ...(event.id ? { lastStreamEventId: event.id } : {}),
       updatedAt: new Date().toISOString(),
     }
-    this.state.tasks[aampTaskId] = baseState
+    this.updateTaskState(aampTaskId, baseState)
 
     const steps = streamEventToTaskSteps(event)
     if (steps.length === 0) {
@@ -2916,7 +3097,7 @@ export class FeishuTaskBridgeRuntime {
     buffer.timer = setTimeout(() => {
       const latestBuffer = this.streamStepBuffers.get(aampTaskId)
       if (latestBuffer) delete latestBuffer.timer
-      void this.enqueueStreamStepFlush(aampTaskId)
+      void this.enqueueControlledCallback(aampTaskId, () => this.enqueueStreamStepFlush(aampTaskId)).catch(() => {})
     }, this.streamStepFlushIntervalMs)
     buffer.timer.unref?.()
   }
@@ -2941,6 +3122,7 @@ export class FeishuTaskBridgeRuntime {
       .catch(() => {})
       .then(() => this.flushStreamStepBuffer(aampTaskId))
       .catch(async (error: Error) => {
+        if (error instanceof ControlledCallbackSuperseded) throw error
         const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
         this.state.lastError = message
         this.logger.error(`[aamp stream ${aampTaskId}] ${message}`, { taskId: aampTaskId })
@@ -2952,7 +3134,7 @@ export class FeishuTaskBridgeRuntime {
       if (this.streamStepFlushQueues.get(aampTaskId) === next) {
         this.streamStepFlushQueues.delete(aampTaskId)
       }
-    })
+    }).catch(() => {})
     await next
   }
 
@@ -3000,12 +3182,12 @@ export class FeishuTaskBridgeRuntime {
       latestStreamStepTexts.add(step.normalized)
     }
     const nextStepCount = (latestTaskState.streamStepCount ?? 0) + displaySteps.length
-    this.state.tasks[aampTaskId] = {
+    this.updateTaskState(aampTaskId, {
       ...latestTaskState,
       streamStepCount: nextStepCount,
       streamStepTexts: [...latestStreamStepTexts],
       updatedAt: new Date().toISOString(),
-    }
+    })
     await this.persistState()
     this.logger.log(`${formatTaskLogPrefix(latestTaskState.taskGuid)} steps flushed count=${stepsToFlush.length} total=${nextStepCount}`, { taskId: aampTaskId })
   }
@@ -3031,18 +3213,20 @@ export class FeishuTaskBridgeRuntime {
         action: 'START',
         result: 'ACCEPTED',
       })
-      this.state.tasks[ack.taskId] = { ...taskState, startAccepted: true, status: 'acknowledged', updatedAt: new Date().toISOString() }
+      const latest = this.state.tasks[ack.taskId] ?? taskState
+      if (latest.stopRequested || ['completed', 'failed', 'cancelled'].includes(latest.status)) return
+      this.updateTaskState(ack.taskId, { ...latest, startAccepted: true, status: 'acknowledged', updatedAt: new Date().toISOString() })
       await this.persistState()
       return
     }
 
     if (!this.config.behavior.ackComment) {
       this.logger.log(`[aamp ack ${ack.taskId}] ack comment disabled`, { taskId: ack.taskId })
-      this.state.tasks[ack.taskId] = {
+      this.updateTaskState(ack.taskId, {
         ...taskState,
         status: 'acknowledged',
         updatedAt: new Date().toISOString(),
-      }
+      })
       await this.persistState()
       return
     }
@@ -3050,12 +3234,12 @@ export class FeishuTaskBridgeRuntime {
     const ackCommentEventKey = getAckCommentEventKey(taskState)
     if (ackCommentEventKey && this.state.ackCommentedEventKeys[ackCommentEventKey]) {
       this.logger.log(`[aamp ack ${ack.taskId}] semantic comment already recorded key=${ackCommentEventKey}`, { taskId: ack.taskId })
-      this.state.tasks[ack.taskId] = {
+      this.updateTaskState(ack.taskId, {
         ...taskState,
         status: 'acknowledged',
         ackCommentedEventKeys: [...new Set([...(taskState.ackCommentedEventKeys ?? []), ackCommentEventKey])],
         updatedAt: new Date().toISOString(),
-      }
+      })
       await this.persistState()
       return
     }
@@ -3076,12 +3260,12 @@ export class FeishuTaskBridgeRuntime {
       }), taskWriteContext(taskState))
 
       const updatedTaskState = markAckCommented(taskState, ack.taskId)
-      this.state.tasks[ack.taskId] = ackCommentEventKey
+      this.updateTaskState(ack.taskId, ackCommentEventKey
         ? {
           ...updatedTaskState,
           ackCommentedEventKeys: [...new Set([...(updatedTaskState.ackCommentedEventKeys ?? []), ackCommentEventKey])],
         }
-        : updatedTaskState
+        : updatedTaskState)
       if (ackCommentEventKey) {
         this.state.ackCommentedEventKeys[ackCommentEventKey] = new Date().toISOString()
         this.pruneAckCommentedEvents()
@@ -3108,7 +3292,7 @@ export class FeishuTaskBridgeRuntime {
     if (!feedback) throw new Error('Controlled Task feedback transport is not configured')
     if (!taskState.startAccepted && state !== 'STOPPED') {
       await feedback.reportCommandResult({ taskGuid: taskState.taskGuid, executionId: taskState.executionId, action: 'START', result: 'ACCEPTED' })
-      this.state.tasks[aampTaskId] = { ...taskState, startAccepted: true, updatedAt: new Date().toISOString() }
+      this.updateTaskState(aampTaskId, { ...taskState, startAccepted: true, updatedAt: new Date().toISOString() })
       await this.persistState()
     }
     await feedback.reportExecutionState({
@@ -3118,7 +3302,7 @@ export class FeishuTaskBridgeRuntime {
       ...(reason ? { reason } : {}),
     })
     const latest = this.state.tasks[aampTaskId] ?? taskState
-    this.state.tasks[aampTaskId] = { ...latest, reportedExecutionState: state, updatedAt: new Date().toISOString() }
+    this.updateTaskState(aampTaskId, { ...latest, reportedExecutionState: state, updatedAt: new Date().toISOString() })
     this.syncControlledOwner(this.state.tasks[aampTaskId]!)
     await this.persistState()
   }
@@ -3141,17 +3325,17 @@ export class FeishuTaskBridgeRuntime {
         if (!this.isCurrentControlledTask(latest) || ['completed', 'failed', 'cancelled'].includes(latest.status)) return
         if (!(latest.helpCommentedTaskIds ?? []).includes(help.taskId)) {
           await this.commentTaskOrUploadFallback(latest.taskGuid, question, 'help-needed-comment', taskWriteContext(latest))
-          this.state.tasks[help.taskId] = {
+          this.updateTaskState(help.taskId, {
             ...(this.state.tasks[help.taskId] ?? latest),
             helpCommentedTaskIds: [...new Set([...(latest.helpCommentedTaskIds ?? []), help.taskId])],
             updatedAt: new Date().toISOString(),
-          }
+          })
           await this.persistState()
         }
         await this.reportControlledExecutionState(help.taskId, 'BLOCKED')
         const current = this.state.tasks[help.taskId] ?? latest
         if (!this.isCurrentControlledTask(current) || ['completed', 'failed', 'cancelled'].includes(current.status)) return
-        this.state.tasks[help.taskId] = { ...current, status: 'help_needed', updatedAt: new Date().toISOString() }
+        this.updateTaskState(help.taskId, { ...current, status: 'help_needed', updatedAt: new Date().toISOString() })
         this.syncControlledOwner(this.state.tasks[help.taskId]!)
         await this.persistState()
       } finally {
@@ -3188,13 +3372,13 @@ export class FeishuTaskBridgeRuntime {
         helpCommentedTaskIds: [...helpCommentedTaskIds],
         updatedAt: new Date().toISOString(),
       }
-      this.state.tasks[help.taskId] = updatedState
+      this.updateTaskState(help.taskId, updatedState)
       await this.markFeishuTasksBlockedOnce(help.taskId, updatedState)
-      this.state.tasks[help.taskId] = {
+      this.updateTaskState(help.taskId, {
         ...(this.state.tasks[help.taskId] ?? updatedState),
         status: 'help_needed',
         updatedAt: new Date().toISOString(),
-      }
+      })
       await this.persistState()
       this.logger.log(`[aamp help] commented task=${help.taskId}`, { taskId: help.taskId })
     } finally {
@@ -3207,7 +3391,7 @@ export class FeishuTaskBridgeRuntime {
     if (!current?.executionId || !this.isCurrentControlledTask(current) || current.stopRequested
       || ['completed', 'failed', 'cancelled'].includes(current.status)) return
     // The Agent has actually paused. Preserve that fact even if commenting or feedback acknowledgement fails.
-    this.state.tasks[aampTaskId] = { ...current, status: 'help_needed', updatedAt: new Date().toISOString() }
+    this.updateTaskState(aampTaskId, { ...current, status: 'help_needed', updatedAt: new Date().toISOString() })
     this.syncControlledOwner(this.state.tasks[aampTaskId]!)
     await this.persistState()
   }
@@ -3224,10 +3408,10 @@ export class FeishuTaskBridgeRuntime {
         taskGuid: taskState.taskGuid, executionId, action: 'START', result: 'REJECTED',
         ...(result.errorMsg ? { reason: result.errorMsg } : {}),
       })
-      this.state.tasks[aampTaskId] = {
+      this.updateTaskState(aampTaskId, {
         ...taskState, status: 'failed', resultHandledTaskIds: [...new Set([...(taskState.resultHandledTaskIds ?? []), aampTaskId])],
         updatedAt: new Date().toISOString(),
-      }
+      })
       await this.persistState()
       return
     }
@@ -3238,9 +3422,9 @@ export class FeishuTaskBridgeRuntime {
       await this.commentHelpNeededOnce(aampTaskId, paused, disposition.message)
       await this.reportControlledExecutionState(aampTaskId, 'BLOCKED')
       const latest = this.state.tasks[aampTaskId] ?? paused
-      this.state.tasks[aampTaskId] = { ...latest,
+      this.updateTaskState(aampTaskId, { ...latest,
         resultHandledTaskIds: [...new Set([...(latest.resultHandledTaskIds ?? []), aampTaskId])],
-        updatedAt: new Date().toISOString() }
+        updatedAt: new Date().toISOString() })
       this.syncControlledOwner(this.state.tasks[aampTaskId]!)
       await this.persistState()
       return
@@ -3274,6 +3458,7 @@ export class FeishuTaskBridgeRuntime {
         reason = disposition.message
       }
     } catch (error) {
+      if (error instanceof ControlledCallbackSuperseded) throw error
       nextStatus = 'failed'
       nextState = 'FAILED'
       reason = sanitizeTaskVisibleFailureReason(error, this.config.agent?.executionLocation ?? 'local')
@@ -3281,13 +3466,13 @@ export class FeishuTaskBridgeRuntime {
 
     await this.reportControlledExecutionState(aampTaskId, nextState, reason)
     const latest = this.state.tasks[aampTaskId] ?? taskState
-    this.state.tasks[aampTaskId] = {
+    this.updateTaskState(aampTaskId, {
       ...latest,
       status: nextStatus,
       resultHandledTaskIds: [...new Set([...(latest.resultHandledTaskIds ?? []), aampTaskId])],
       ...(reason ? { lastError: reason } : { lastError: undefined }),
       updatedAt: new Date().toISOString(),
-    }
+    })
     this.syncControlledOwner(this.state.tasks[aampTaskId]!)
     await this.persistState()
   }
@@ -3321,13 +3506,13 @@ export class FeishuTaskBridgeRuntime {
           // 当前 Feishu 接口没有停止流转；这里只记录 AAMP 的终态，不调用完成或失败写回。
           const resultHandledTaskIds = new Set(flushedTaskState.resultHandledTaskIds ?? [])
           resultHandledTaskIds.add(result.taskId)
-          this.state.tasks[result.taskId] = {
+          this.updateTaskState(result.taskId, {
             ...flushedTaskState,
             status: 'cancelled',
             resultHandledTaskIds: [...resultHandledTaskIds],
             lastError: undefined,
             updatedAt: new Date().toISOString(),
-          }
+          })
           await this.persistState()
           this.logger.log(`${formatTaskLogPrefix(flushedTaskState.taskGuid)} result closed aamp_task=${result.taskId} status=cancelled`, { taskId: result.taskId })
           return
@@ -3344,13 +3529,13 @@ export class FeishuTaskBridgeRuntime {
           const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
           const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
           resultHandledTaskIds.add(result.taskId)
-          this.state.tasks[result.taskId] = {
+          this.updateTaskState(result.taskId, {
             ...latestTaskState,
             status: 'completed',
             resultHandledTaskIds: [...resultHandledTaskIds],
             lastError: undefined,
             updatedAt: new Date().toISOString(),
-          }
+          })
           await this.persistState()
           this.logger.log(`[aamp result] answered task=${result.taskId}`, { taskId: result.taskId })
           return
@@ -3362,12 +3547,12 @@ export class FeishuTaskBridgeRuntime {
           const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
           const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
           resultHandledTaskIds.add(result.taskId)
-          this.state.tasks[result.taskId] = {
+          this.updateTaskState(result.taskId, {
             ...latestTaskState,
             status: 'help_needed',
             resultHandledTaskIds: [...resultHandledTaskIds],
             updatedAt: new Date().toISOString(),
-          }
+          })
           await this.persistState()
           this.logger.log(`[aamp result] help-needed task=${result.taskId}`, { taskId: result.taskId })
           return
@@ -3394,13 +3579,13 @@ export class FeishuTaskBridgeRuntime {
           const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
           const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
           resultHandledTaskIds.add(result.taskId)
-          this.state.tasks[result.taskId] = {
+          this.updateTaskState(result.taskId, {
             ...latestTaskState,
             status: 'completed',
             resultHandledTaskIds: [...resultHandledTaskIds],
             lastError: undefined,
             updatedAt: new Date().toISOString(),
-          }
+          })
           await this.persistState()
           this.logger.log(`${formatTaskLogPrefix(latestTaskState.taskGuid)} result closed aamp_task=${result.taskId} status=succeeded`, { taskId: result.taskId })
           return
@@ -3471,13 +3656,13 @@ export class FeishuTaskBridgeRuntime {
       commentError ? `说明评论失败：${sanitizeTaskVisibleFailureReason(commentError, executionLocation)}` : '',
     ].filter(Boolean).join(' | ')
     this.state.lastError = lastError
-    this.state.tasks[aampTaskId] = {
+    this.updateTaskState(aampTaskId, {
       ...finalTaskState,
       status: 'completed',
       resultHandledTaskIds: [...resultHandledTaskIds],
       lastError,
       updatedAt: new Date().toISOString(),
-    }
+    })
     await this.persistState()
     const log = executionLocation === 'remote'
       ? `${formatTaskLogPrefix(finalTaskState.taskGuid)} result feishu write failure action=${action} category=finalized aamp_task=${aampTaskId} error=${message}`
@@ -3503,13 +3688,13 @@ export class FeishuTaskBridgeRuntime {
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
     const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
     resultHandledTaskIds.add(aampTaskId)
-    this.state.tasks[aampTaskId] = {
+    this.updateTaskState(aampTaskId, {
       ...latestTaskState,
       status: 'failed',
       resultHandledTaskIds: [...resultHandledTaskIds],
       lastError: disposition.message,
       updatedAt: new Date().toISOString(),
-    }
+    })
     await this.persistState()
     this.logger.log(`${formatTaskLogPrefix(latestTaskState.taskGuid)} result closed aamp_task=${aampTaskId} status=failure`, { taskId: aampTaskId })
   }
@@ -3586,11 +3771,11 @@ export class FeishuTaskBridgeRuntime {
     if ((latestTaskState.resultAppliedOutputKeys ?? []).includes(outputKey)) return
     const resultAppliedOutputKeys = new Set(latestTaskState.resultAppliedOutputKeys ?? [])
     resultAppliedOutputKeys.add(outputKey)
-    this.state.tasks[aampTaskId] = {
+    this.updateTaskState(aampTaskId, {
       ...latestTaskState,
       resultAppliedOutputKeys: [...resultAppliedOutputKeys],
       updatedAt: new Date().toISOString(),
-    }
+    })
     await this.persistState()
   }
 
@@ -3620,12 +3805,12 @@ export class FeishuTaskBridgeRuntime {
     resultCommentedTaskIds.add(aampTaskId)
     const resultAppliedOutputKeys = new Set(latestTaskState.resultAppliedOutputKeys ?? [])
     if (outputKey) resultAppliedOutputKeys.add(outputKey)
-    this.state.tasks[aampTaskId] = {
+    this.updateTaskState(aampTaskId, {
       ...latestTaskState,
       resultCommentedTaskIds: [...resultCommentedTaskIds],
       resultAppliedOutputKeys: [...resultAppliedOutputKeys],
       updatedAt: new Date().toISOString(),
-    }
+    })
     await this.persistState()
   }
 
@@ -3701,11 +3886,11 @@ export class FeishuTaskBridgeRuntime {
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
-    this.state.tasks[aampTaskId] = {
+    this.updateTaskState(aampTaskId, {
       ...latestTaskState,
       resultCommentedTaskIds: [...resultCommentedTaskIds],
       updatedAt: new Date().toISOString(),
-    }
+    })
     await this.persistState()
   }
 
@@ -3721,11 +3906,11 @@ export class FeishuTaskBridgeRuntime {
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
-    this.state.tasks[aampTaskId] = {
+    this.updateTaskState(aampTaskId, {
       ...latestTaskState,
       resultCommentedTaskIds: [...resultCommentedTaskIds],
       updatedAt: new Date().toISOString(),
-    }
+    })
     await this.persistState()
   }
 
@@ -3750,11 +3935,11 @@ export class FeishuTaskBridgeRuntime {
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
-    this.state.tasks[aampTaskId] = {
+    this.updateTaskState(aampTaskId, {
       ...latestTaskState,
       resultCommentedTaskIds: [...resultCommentedTaskIds],
       updatedAt: new Date().toISOString(),
-    }
+    })
     await this.persistState()
   }
 
@@ -3792,11 +3977,11 @@ export class FeishuTaskBridgeRuntime {
 
       const feishuInProgressTaskIds = new Set(latestTaskState.feishuInProgressTaskIds ?? [])
       feishuInProgressTaskIds.add(taskGuid)
-      this.state.tasks[aampTaskId] = {
+      this.updateTaskState(aampTaskId, {
         ...latestTaskState,
         feishuInProgressTaskIds: [...feishuInProgressTaskIds],
         updatedAt: new Date().toISOString(),
-      }
+      })
       await this.persistState()
       this.debugLog(`[feishu task ${taskGuid}] marked in progress for ${aampTaskId}`, { taskId: aampTaskId })
       return true
@@ -3833,11 +4018,11 @@ export class FeishuTaskBridgeRuntime {
 
       const feishuCompletedTaskIds = new Set(latestTaskState.feishuCompletedTaskIds ?? [])
       feishuCompletedTaskIds.add(taskGuid)
-      this.state.tasks[aampTaskId] = {
+      this.updateTaskState(aampTaskId, {
         ...latestTaskState,
         feishuCompletedTaskIds: [...feishuCompletedTaskIds],
         updatedAt: new Date().toISOString(),
-      }
+      })
       await this.persistState()
       this.debugLog(`[feishu task ${taskGuid}] completed for ${aampTaskId}`, { taskId: aampTaskId })
       return true
@@ -3874,11 +4059,11 @@ export class FeishuTaskBridgeRuntime {
 
       const feishuBlockedTaskIds = new Set(latestTaskState.feishuBlockedTaskIds ?? [])
       feishuBlockedTaskIds.add(taskGuid)
-      this.state.tasks[aampTaskId] = {
+      this.updateTaskState(aampTaskId, {
         ...latestTaskState,
         feishuBlockedTaskIds: [...feishuBlockedTaskIds],
         updatedAt: new Date().toISOString(),
-      }
+      })
       await this.persistState()
       this.debugLog(`[feishu task ${taskGuid}] marked blocked for ${aampTaskId}`, { taskId: aampTaskId })
       return true
@@ -3997,6 +4182,12 @@ export class FeishuTaskBridgeRuntime {
   }
 
   private async persistState(): Promise<void> {
-    await saveBridgeState(this.state, this.configDir)
+    this.assertControlledCallbackCurrent()
+    // Callback and command queues may save concurrently. Serialize atomic renames
+    // so an older write cannot erase a persisted replacement marker.
+    const saving = this.stateSaveQueue.catch(() => {}).then(() => saveBridgeState(this.state, this.configDir))
+    this.stateSaveQueue = saving
+    await saving
+    this.assertControlledCallbackCurrent()
   }
 }

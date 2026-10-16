@@ -651,6 +651,210 @@ test('a later controlled reply replaces the paused child and late child results 
   } finally { await f.cleanup() }
 })
 
+test('a new controlled execution supersedes old feedback without reporting its cancellation', async () => {
+  const f = await controlledReplyFixture()
+  try {
+    await f.feishu.emit({ eventId: 'evt_replace', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_new', action: 'START', timestamp: '1792138000000' })
+    const next = `feishu-task-${f.taskGuid}-execution_new`
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.rootId]?.supersededByExecutionId, 'execution_new')
+    assert.equal(f.aamp.sentTasks[0]?.dispatchContext?.task_execution_policy, 'replace_previous')
+    assert.equal(f.aamp.sentTasks[0]?.dispatchContext?.task_execution_created_at, '1792138000000')
+    const writes = f.feishu.writes.length
+    f.aamp.emitAck(f.rootId)
+    f.aamp.emitHelp(f.rootId, { question: '旧轮问题' })
+    f.aamp.emitResult(f.rootId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"旧轮结果","reply_written":false}' })
+    // A same-Task command is a barrier for all callbacks enqueued above.
+    await f.feishu.emit({ eventId: 'evt_replace_retry', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_new', action: 'START', timestamp: '1792138000001' })
+    assert.equal(f.feishu.writes.length, writes)
+    assert.deepEqual(f.feedback.states, [])
+    assert.deepEqual(f.feedback.commands, [])
+    await f.feishu.emit({ eventId: 'evt_old_stop', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_stop'], executionId: f.executionId, action: 'STOP' })
+    assert.deepEqual(f.aamp.cancelRequests, [])
+    f.aamp.emitAck(next)
+    await waitFor(() => assert.equal(f.feedback.commands.length, 1))
+    assert.equal((f.feedback.commands as ReportAgentTaskCommandResultBody[])[0]?.execution_id, 'execution_new')
+    assert.equal(f.aamp.sentTasks.length, 1)
+  } finally { await f.cleanup() }
+})
+
+test('an older, undated or same-time START cannot supersede a newer controlled execution', async () => {
+  const f = await controlledReplyFixture()
+  try {
+    await f.feishu.emit({ eventId: 'evt_current', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_current', action: 'START', timestamp: '1792138000000' })
+    for (const [eventId, timestamp] of [['evt_older', '1792137999999'], ['evt_undated', undefined], ['evt_equal', '1792138000000']]) {
+      await f.feishu.emit({ eventId: eventId!, taskGuid: f.taskGuid, eventTypes: ['task_agent_start'],
+        executionId: `execution_${eventId}`, action: 'START', ...(timestamp ? { timestamp } : {}) })
+      assert.equal(f.runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'stale_controlled_execution')
+    }
+    assert.equal(f.aamp.sentTasks.length, 1)
+    assert.equal(f.runtime.getStateSnapshot().tasks[`feishu-task-${f.taskGuid}-execution_current`]?.supersededByExecutionId, undefined)
+    await f.feishu.emit({ eventId: 'evt_later', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_later', action: 'START', timestamp: '1792138000001' })
+    assert.equal(f.aamp.sentTasks.length, 2)
+    assert.equal(f.runtime.getStateSnapshot().tasks[`feishu-task-${f.taskGuid}-execution_current`]?.supersededByExecutionId, 'execution_later')
+  } finally { await f.cleanup() }
+})
+
+test('superseded controlled callbacks remain ignored after bridge restart', async () => {
+  const f = await controlledReplyFixture()
+  try {
+    await f.feishu.emit({ eventId: 'evt_new_round', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_new', action: 'START', timestamp: '1792138000000' })
+    await f.runtime.stop()
+    await f.runtime.start()
+    const writes = f.feishu.writes.length
+    f.aamp.emitHelp(f.rootId, { question: '重启后的旧问题' })
+    f.aamp.emitResult(f.rootId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"旧结果","reply_written":false}' })
+    await f.feishu.emit({ eventId: 'evt_new_round_retry', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_new', action: 'START', timestamp: '1792138000001' })
+    assert.equal(f.feishu.writes.length, writes)
+    assert.deepEqual(f.feedback.states, [])
+  } finally { await f.cleanup() }
+})
+
+test('a new execution passes a pending old ACK and its late response cannot restore old ownership', async () => {
+  const f = await controlledReplyFixture()
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  try {
+    await f.feishu.emit({ eventId: 'evt_pending_ack_start', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_pending_ack', action: 'START', timestamp: '1792138000000' })
+    const oldId = `feishu-task-${f.taskGuid}-execution_pending_ack`
+    const report = f.feedback.transport.reportCommandResult
+    let entered = false
+    f.feedback.transport.reportCommandResult = async (body) => {
+      if (body.execution_id === 'execution_pending_ack') { entered = true; await pending }
+      await report(body)
+    }
+    f.aamp.emitAck(oldId)
+    await waitFor(() => assert.equal(entered, true))
+    const replacement = f.feishu.emit({ eventId: 'evt_after_pending_ack', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_after_ack', action: 'START', timestamp: '1792138000001' })
+    await waitFor(() => assert.equal(f.aamp.sentTasks.length, 2))
+    await replacement
+    release()
+    await new Promise((resolve) => setImmediate(resolve))
+    const old = f.runtime.getStateSnapshot().tasks[oldId]!
+    assert.equal(old.supersededByExecutionId, 'execution_after_ack')
+    assert.equal(old.startAccepted, undefined)
+    assert.equal((await loadBridgeState(f.configDir)).tasks[oldId]?.supersededByExecutionId, 'execution_after_ack')
+  } finally { release(); await f.cleanup() }
+})
+
+test('replacement interrupts an old result delivery before further outputs or terminal feedback', async () => {
+  const f = await controlledReplyFixture()
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  try {
+    const comment = f.feishu.commentTask.bind(f.feishu)
+    let entered = false
+    f.feishu.commentTask = async (...args) => { entered = true; await pending; return await comment(...args) }
+    f.aamp.emitResult(f.rootId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"旧结果","reply_written":false}' })
+    await waitFor(() => assert.equal(entered, true))
+    const replacement = f.feishu.emit({ eventId: 'evt_after_pending_result', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_after_result', action: 'START', timestamp: '1792138000000' })
+    await waitFor(() => assert.equal(f.aamp.sentTasks.length, 1))
+    await replacement
+    release()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(f.feedback.states, [])
+    const old = f.runtime.getStateSnapshot().tasks[f.rootId]!
+    assert.equal(old.supersededByExecutionId, 'execution_after_result')
+    assert.equal(old.resultHandledTaskIds, undefined)
+    assert.equal(old.resultCommentedTaskIds, undefined)
+  } finally { release(); await f.cleanup() }
+})
+
+test('long-lived stream errors enter a fresh callback scope and ignore a superseded stream', async () => {
+  const f = await controlledReplyFixture()
+  let reportError!: (error: Error) => void
+  const subscribe = f.aamp.subscribeStream.bind(f.aamp)
+  f.aamp.subscribeStream = async (streamId, handlers) => {
+    // These continuations inherit the stream-open callback context, as an SSE read loop does.
+    let release!: (error: Error) => void
+    const nextError = new Promise<Error>((resolve) => { release = resolve })
+    void nextError.then((error) => handlers.onError?.(error))
+    reportError = release
+    return await subscribe(streamId, handlers)
+  }
+  try {
+    f.aamp.emitStreamOpened(f.rootId, 'scope_error_stream')
+    await waitFor(() => assert.ok(f.aamp.streamHandlers.scope_error_stream))
+    await new Promise((resolve) => setImmediate(resolve))
+    reportError(new Error('current stream failed'))
+    await waitFor(() => assert.match(f.runtime.getStateSnapshot().lastError ?? '', /current stream failed/))
+    await f.feishu.emit({ eventId: 'evt_after_stream_error', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_after_stream_error', action: 'START', timestamp: '1792138000000' })
+    const lastError = f.runtime.getStateSnapshot().lastError
+    f.aamp.streamHandlers.scope_error_stream!.onError?.(new Error('stale stream failed'))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(f.runtime.getStateSnapshot().lastError, lastError)
+  } finally { await f.cleanup() }
+})
+
+test('a comment waiting for an old stream flush leaves the command queue available to replacement', async () => {
+  const f = await controlledReplyFixture()
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  let replying: Promise<void> | undefined
+  try {
+    let flushing = false
+    f.feishu.appendTaskSteps = async () => { flushing = true; await pending }
+    f.aamp.emitStreamOpened(f.rootId, 'pending_comment_flush')
+    await waitFor(() => assert.ok(f.aamp.streamHandlers.pending_comment_flush))
+    f.aamp.emitStreamEvent('pending_comment_flush', { taskId: f.rootId, seq: 1,
+      type: 'text.delta', payload: { text: '旧轮待写步骤' } })
+    await waitFor(() => assert.equal(flushing, true))
+    replying = f.feishu.emit(f.event)
+    f.feishu.tasks[f.taskGuid]!.agentTaskStatus = 0
+    const replacement = f.feishu.emit({ eventId: 'evt_replace_pending_comment', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_after_comment_flush', action: 'START', timestamp: '1792138000000' })
+    await waitFor(() => assert.equal(f.aamp.sentTasks[0]?.dispatchContext?.execution_id, 'execution_after_comment_flush'))
+    await replacement
+    release()
+    await replying
+    assert.equal(f.aamp.sentTasks.length, 1)
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.rootId]?.supersededByExecutionId, 'execution_after_comment_flush')
+  } finally { release(); await replying?.catch(() => {}); await f.cleanup() }
+})
+
+test('stale START does not interrupt the current callback and stop does not wait for its network forever', async () => {
+  const f = await controlledReplyFixture()
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  let releaseHelp!: () => void
+  const pendingHelp = new Promise<void>((resolve) => { releaseHelp = resolve })
+  try {
+    await f.feishu.emit({ eventId: 'evt_callback_owner', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_callback_owner', action: 'START', timestamp: '1792138000000' })
+    const ownerId = `feishu-task-${f.taskGuid}-execution_callback_owner`
+    let entered = false
+    f.feedback.transport.reportCommandResult = async () => { entered = true; await pending }
+    f.aamp.emitAck(ownerId)
+    await waitFor(() => assert.equal(entered, true))
+    await f.feishu.emit({ eventId: 'evt_stale_while_callback', taskGuid: f.taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_stale_callback', action: 'START', timestamp: '1792137999999' })
+    assert.equal(f.runtime.getStateSnapshot().tasks[ownerId]?.supersededByExecutionId, undefined)
+    release()
+    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[ownerId]?.startAccepted, true))
+    let helpEntered = false
+    f.feishu.commentTask = async () => { helpEntered = true; await pendingHelp }
+    f.aamp.emitHelp(ownerId, { question: '等待中的旧问题' })
+    await waitFor(() => assert.equal(helpEntered, true))
+    let stopped = false
+    const stopping = f.runtime.stop().then(() => { stopped = true })
+    await waitFor(() => assert.equal(stopped, true))
+    await stopping
+    releaseHelp()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(f.runtime.getStateSnapshot().tasks[ownerId]?.helpCommentedTaskIds, undefined)
+  } finally { release(); releaseHelp(); await f.cleanup() }
+})
+
 test('a finished newest controlled execution never resumes an older root or falls back to legacy comments', async () => {
   const f = await controlledReplyFixture()
   try {
