@@ -730,8 +730,10 @@ function acquireTaskExecutionLock(taskId: string): string | null {
   const locksDir = join(getBridgeHomeDir(), 'task-locks')
   const lockDir = join(locksDir, `${taskLockName(taskId)}.lock`)
   mkdirSync(locksDir, { recursive: true })
+  let created = false
   try {
     mkdirSync(lockDir)
+    created = true
     writeFileSync(join(lockDir, 'owner.json'), `${JSON.stringify({
       pid: process.pid,
       taskId,
@@ -740,7 +742,13 @@ function acquireTaskExecutionLock(taskId: string): string | null {
     return lockDir
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (code === 'EEXIST') return null
+    if (!created && code === 'EEXIST') return null
+    if (created) {
+      try { rmSync(lockDir, { recursive: true, force: true }) }
+      catch (cleanupError) {
+        console.warn(`Failed to clean incomplete task lock ${taskId}: ${(cleanupError as Error).message}`)
+      }
+    }
     throw error
   }
 }
@@ -2079,6 +2087,27 @@ export class AgentBridge {
       activeTaskSession.clearPendingText?.()
       activeTaskSession.clearPendingText = undefined
     }
+    } catch (error) {
+      // Local preparation (including lock creation) runs before the stream/prompt
+      // error handler. Controlled dispatches still need one rejection receipt.
+      if (!reportCancellation || historicalTerminalResult || shouldStopTask()
+        || !claimTerminal('rejected')) throw error
+      const rejectedClient = this.client
+      if (!rejectedClient) throw error
+      const errorMsg = formatTaskAgentError(this.name, error, this.agentConfig.executionLocation)
+      console.error(`[${this.name}] Task ${task.taskId} preparation failed: ${errorMsg}`)
+      try {
+        await waitUnlessSuperseded(rejectedClient.sendResult({
+          to: task.from,
+          taskId: task.taskId,
+          status: 'rejected',
+          output: '',
+          errorMsg: `ACP task preparation failed: ${errorMsg}`,
+          inReplyTo: task.messageId,
+        }))
+      } catch (deliveryError) {
+        console.error(`[${this.name}] Task ${task.taskId} rejected delivery failed: ${(deliveryError as Error).message}`)
+      }
     } finally {
       // Hydration, terminal-history checks and mutex waits can all return before
       // finishCancelledTask is in scope. They still owe the controlled STOP receipt.

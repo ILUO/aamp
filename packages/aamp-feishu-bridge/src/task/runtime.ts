@@ -1655,6 +1655,7 @@ export class FeishuTaskBridgeRuntime {
   private readonly backgroundTasks = new Set<Promise<void>>()
   private readonly controlledEventQueues = new Map<string, Promise<void>>()
   private readonly controlledCallbackQueues = new Map<string, Promise<void>>()
+  private readonly controlledResultQueues = new Map<string, Promise<void>>()
   private readonly controlledCallbackContext = new AsyncLocalStorage<ControlledCallbackScope>()
   private readonly controlledCallbackScopes = new Set<ControlledCallbackScope>()
   private stateSaveQueue: Promise<void> = Promise.resolve()
@@ -1941,7 +1942,7 @@ export class FeishuTaskBridgeRuntime {
       this.state.lastAampResultAt = new Date().toISOString()
       this.state.lastAampResultTaskId = result.taskId
       this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} result received aamp_task=${result.taskId} from=${result.from} status=${result.status}`, { taskId: result.taskId })
-      this.trackBackgroundTask(this.enqueueControlledCallback(result.taskId, () => this.handleTaskResult(result)).catch(async (error: Error) => {
+      this.trackBackgroundTask(this.enqueueTaskResult(result).catch(async (error: Error) => {
         const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
         this.state.lastError = message
         this.logger.error(`[aamp result ${result.taskId}] ${message}`, { taskId: result.taskId })
@@ -2562,6 +2563,19 @@ export class FeishuTaskBridgeRuntime {
     this.controlledStopCallbacks.delete(taskGuid)
   }
 
+  private enqueueTaskResult(result: TaskResult): Promise<void> {
+    if (!this.state.tasks[result.taskId]?.executionId) return this.handleTaskResult(result)
+    // STOP permits callbacks to run while sendCancel is pending. Preserve distinct
+    // results for one turn instead of dropping cancellation behind its final need_help.
+    const previous = this.controlledResultQueues.get(result.taskId) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(() => this.enqueueControlledCallback(result.taskId, () => this.handleTaskResult(result)))
+    this.controlledResultQueues.set(result.taskId, next)
+    void next.finally(() => {
+      if (this.controlledResultQueues.get(result.taskId) === next) this.controlledResultQueues.delete(result.taskId)
+    }).catch(() => {})
+    return next
+  }
+
   private getControlledOwner(taskState: BridgeTaskState): BridgeTaskState | undefined {
     if (!taskState.executionId) return undefined
     const rootId = buildFeishuTaskId({ taskGuid: taskState.taskGuid, executionId: taskState.executionId,
@@ -2581,7 +2595,7 @@ export class FeishuTaskBridgeRuntime {
     // A BLOCKED marker alone may belong to a live continuation. Only this exact
     // completed need_help turn can finish an already requested STOP without a new ACP result.
     if (!task?.executionId || !task.stopRequested || task.status !== 'help_needed'
-      || task.reportedExecutionState !== 'BLOCKED' || !task.resultHandledTaskIds?.includes(aampTaskId)
+      || !task.resultHandledTaskIds?.includes(aampTaskId)
       || !this.isCurrentControlledTask(task)
       || this.getLatestControlledOwner(task.taskGuid)?.executionId !== task.executionId) return false
     await this.reportControlledExecutionState(aampTaskId, 'STOPPED')
@@ -3324,13 +3338,15 @@ export class FeishuTaskBridgeRuntime {
         const latest = this.state.tasks[help.taskId] ?? taskState
         if (!this.isCurrentControlledTask(latest) || ['completed', 'failed', 'cancelled'].includes(latest.status)) return
         if (!(latest.helpCommentedTaskIds ?? []).includes(help.taskId)) {
-          await this.commentTaskOrUploadFallback(latest.taskGuid, question, 'help-needed-comment', taskWriteContext(latest))
-          this.updateTaskState(help.taskId, {
-            ...(this.state.tasks[help.taskId] ?? latest),
-            helpCommentedTaskIds: [...new Set([...(latest.helpCommentedTaskIds ?? []), help.taskId])],
-            updatedAt: new Date().toISOString(),
-          })
-          await this.persistState()
+          if (await this.tryControlledHelpComment(help.taskId, () => this.commentTaskOrUploadFallback(latest.taskGuid, question, 'help-needed-comment', taskWriteContext(latest)))) {
+            const current = this.state.tasks[help.taskId] ?? latest
+            this.updateTaskState(help.taskId, {
+              ...current,
+              helpCommentedTaskIds: [...new Set([...(current.helpCommentedTaskIds ?? []), help.taskId])],
+              updatedAt: new Date().toISOString(),
+            })
+            await this.persistState()
+          }
         }
         await this.reportControlledExecutionState(help.taskId, 'BLOCKED')
         const current = this.state.tasks[help.taskId] ?? latest
@@ -3396,6 +3412,25 @@ export class FeishuTaskBridgeRuntime {
     await this.persistState()
   }
 
+  private async tryControlledHelpComment(aampTaskId: string, writeComment: () => Promise<void>): Promise<boolean> {
+    try {
+      await writeComment()
+      return true
+    } catch (error) {
+      if (error instanceof ControlledCallbackSuperseded) throw error
+      this.assertControlledCallbackCurrent()
+      const current = this.state.tasks[aampTaskId]
+      if (!current || !this.isCurrentControlledTask(current)) return false
+      const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+      this.state.lastError = message
+      this.updateTaskState(aampTaskId, { ...current, lastError: message, updatedAt: new Date().toISOString() })
+      this.logger.error(`${formatTaskLogPrefix(current.taskGuid)} help comment failed: ${message}`, { taskId: aampTaskId })
+      // The runtime state below is mandatory even if the auxiliary question or
+      // oversized-content upload fails; its normal state save also retains this error.
+      return false
+    }
+  }
+
   private async handleControlledTaskResult(result: TaskResult, taskState: BridgeTaskState): Promise<void> {
     const aampTaskId = result.taskId
     const executionId = taskState.executionId
@@ -3416,13 +3451,26 @@ export class FeishuTaskBridgeRuntime {
       return
     }
 
-    if (disposition.kind === 'help_needed' && !taskState.stopRequested) {
+    if (disposition.kind === 'help_needed') {
       await this.markControlledHelpNeeded(aampTaskId)
       const paused = this.state.tasks[aampTaskId] ?? taskState
-      await this.commentHelpNeededOnce(aampTaskId, paused, disposition.message)
-      await this.reportControlledExecutionState(aampTaskId, 'BLOCKED')
-      const latest = this.state.tasks[aampTaskId] ?? paused
+      if (!paused.stopRequested) {
+        await this.tryControlledHelpComment(aampTaskId, () => this.commentHelpNeededOnce(aampTaskId, paused, disposition.message))
+      }
+      let latest = this.state.tasks[aampTaskId] ?? paused
+      if (!this.isCurrentControlledTask(latest) || ['completed', 'failed', 'cancelled'].includes(latest.status)) return
+      let stopped = Boolean(latest.stopRequested)
+      await this.reportControlledExecutionState(aampTaskId, stopped ? 'STOPPED' : 'BLOCKED')
+      latest = this.state.tasks[aampTaskId] ?? latest
+      // A final need_help proves this prompt ended. STOP may have arrived during
+      // its question write or BLOCKED feedback, so do not wait for another ACP result.
+      if (!stopped && latest.stopRequested) {
+        stopped = true
+        await this.reportControlledExecutionState(aampTaskId, 'STOPPED')
+        latest = this.state.tasks[aampTaskId] ?? latest
+      }
       this.updateTaskState(aampTaskId, { ...latest,
+        status: stopped ? 'cancelled' : 'help_needed',
         resultHandledTaskIds: [...new Set([...(latest.resultHandledTaskIds ?? []), aampTaskId])],
         updatedAt: new Date().toISOString() })
       this.syncControlledOwner(this.state.tasks[aampTaskId]!)
@@ -3434,7 +3482,7 @@ export class FeishuTaskBridgeRuntime {
     let nextState: NonNullable<BridgeTaskState['reportedExecutionState']>
     let reason: string | undefined
     try {
-      if (disposition.kind === 'cancelled' || (taskState.stopRequested && disposition.kind === 'help_needed')) {
+      if (disposition.kind === 'cancelled') {
         nextStatus = 'cancelled'
         nextState = 'STOPPED'
       } else if (disposition.kind === 'answered') {
@@ -3447,10 +3495,6 @@ export class FeishuTaskBridgeRuntime {
         await this.applyTaskResultOutputs(aampTaskId, taskState, disposition.outputs)
         nextStatus = 'completed'
         nextState = 'COMPLETED'
-      } else if (disposition.kind === 'help_needed') {
-        await this.commentHelpNeededOnce(aampTaskId, taskState, disposition.message)
-        nextStatus = 'help_needed'
-        nextState = 'BLOCKED'
       } else {
         await this.commentTaskResultOnce(aampTaskId, taskState, disposition)
         nextStatus = 'failed'
@@ -3489,7 +3533,9 @@ export class FeishuTaskBridgeRuntime {
       await this.enqueueStreamStepFlush(result.taskId)
       const flushedTaskState = this.state.tasks[result.taskId] ?? taskState
 
-      if ((flushedTaskState.resultHandledTaskIds ?? []).includes(result.taskId)) {
+      const unhandledCancellation = flushedTaskState.executionId && result.status === 'cancelled'
+        && flushedTaskState.status === 'help_needed' && flushedTaskState.reportedExecutionState !== 'STOPPED'
+      if ((flushedTaskState.resultHandledTaskIds ?? []).includes(result.taskId) && !unhandledCancellation) {
         this.logger.log(`[aamp result ${result.taskId}] result already handled`, { taskId: result.taskId })
         return
       }
@@ -3884,10 +3930,11 @@ export class FeishuTaskBridgeRuntime {
     this.debugLog(`[aamp result ${aampTaskId}] commenting help-needed on Feishu task ${latestTaskState.taskGuid}`, { taskId: aampTaskId })
     await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-result', taskWriteContext(latestTaskState))
 
-    const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
+    const currentTaskState = this.state.tasks[aampTaskId] ?? latestTaskState
+    const resultCommentedTaskIds = new Set(currentTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
     this.updateTaskState(aampTaskId, {
-      ...latestTaskState,
+      ...currentTaskState,
       resultCommentedTaskIds: [...resultCommentedTaskIds],
       updatedAt: new Date().toISOString(),
     })

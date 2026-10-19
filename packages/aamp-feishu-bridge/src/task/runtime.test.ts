@@ -1976,6 +1976,211 @@ test('repeated controlled help events write one question and one BLOCKED state',
   }
 })
 
+async function controlledHelpStopFixture() {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-help-stop-race-'))
+  const taskGuid = 'task_help_stop_race'
+  const executionId = 'run_help_stop_race'
+  const taskId = await seedControlledExecution(configDir, taskGuid, executionId)
+  const state = await loadBridgeState(configDir)
+  Object.assign(state.tasks[taskId]!, { status: 'acknowledged', startAccepted: true, reportedExecutionState: 'RUNNING' })
+  await saveBridgeState(state, configDir)
+  const aamp = new FakeAampClient()
+  const feishu = new FakeFeishuTaskClient()
+  const feedback = controlledFeedbackRecords()
+  const errors: string[] = []
+  const logs: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu, controlledFeedbackTransport: feedback.transport,
+    logger: { log: (message) => { logs.push(String(message)) }, error: (message) => { errors.push(String(message)) } },
+  })
+  await runtime.start()
+  const helpResult = { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"need_help","question":"请提供城市"}' }
+  const stopEvent: FeishuTaskEvent = { eventId: 'evt_stop_help_race', taskGuid, eventTypes: ['task_agent_stop'], executionId, action: 'STOP' }
+  return { configDir, taskGuid, executionId, taskId, aamp, feishu, feedback, errors, logs, runtime, helpResult, stopEvent,
+    cleanup: async () => { await runtime.stop(); await rm(configDir, { recursive: true, force: true }) } }
+}
+
+test('a final need_help result closes a STOP received during its comment write without another ACP result', async () => {
+  for (const commentFails of [false, true]) {
+    const f = await controlledHelpStopFixture()
+    let releaseComment!: () => void
+    f.feishu.commentTaskHold = new Promise<void>((resolve) => { releaseComment = resolve })
+    if (commentFails) f.feishu.commentErrors.push(new Error('question comment denied'))
+    try {
+      f.aamp.emitResult(f.taskId, f.helpResult)
+      await waitFor(() => assert.ok(f.feishu.writes.some(({ method }) => method === 'commentTask')))
+      await f.feishu.emit(f.stopEvent)
+      assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.stopRequested, true)
+      releaseComment()
+      await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.status, 'cancelled'))
+      assert.deepEqual(f.feedback.states.map(({ state }) => state), [4])
+      assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.reportedExecutionState, 'STOPPED')
+      assert.ok(f.runtime.getStateSnapshot().tasks[f.taskId]?.resultHandledTaskIds?.includes(f.taskId))
+      if (commentFails) assert.match(f.runtime.getStateSnapshot().tasks[f.taskId]?.lastError ?? '', /question comment denied/)
+    } finally { releaseComment(); await f.cleanup() }
+  }
+})
+
+test('controlled final need_help reports BLOCKED even when the question comment fails', async () => {
+  const f = await controlledHelpStopFixture()
+  f.feishu.commentErrors.push(new Error('question comment denied'))
+  try {
+    f.aamp.emitResult(f.taskId, f.helpResult)
+    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.reportedExecutionState, 'BLOCKED'))
+    assert.deepEqual(f.feedback.states.map(({ state }) => state), [2])
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.status, 'help_needed')
+    assert.match(f.runtime.getStateSnapshot().tasks[f.taskId]?.lastError ?? '', /question comment denied/)
+    assert.ok(f.errors.some((message) => message.includes('help comment failed')))
+  } finally { await f.cleanup() }
+})
+
+test('controlled help reports BLOCKED when uploading an oversized question fails', async () => {
+  for (const source of ['help_event', 'final_result']) {
+    const f = await controlledHelpStopFixture()
+    f.feishu.uploadTaskDelivery = async () => { throw new Error('question attachment denied') }
+    try {
+      const question = '请确认'.repeat(1100)
+      if (source === 'help_event') f.aamp.emitHelp(f.taskId, { question })
+      else f.aamp.emitResult(f.taskId, { output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({ schema: 'feishu_task_result.v2', status: 'need_help', question })}` })
+      await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.reportedExecutionState, 'BLOCKED'))
+      assert.deepEqual(f.feedback.states.map(({ state }) => state), [2])
+      assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.status, 'help_needed')
+      assert.match(f.runtime.getStateSnapshot().tasks[f.taskId]?.lastError ?? '', /question attachment denied/)
+      assert.deepEqual(f.feishu.completedTaskGuids, [])
+    } finally { await f.cleanup() }
+  }
+})
+
+test('final need_help rechecks STOP after BLOCKED feedback finishes', async () => {
+  const f = await controlledHelpStopFixture()
+  let releaseBlocked!: () => void
+  const holdBlocked = new Promise<void>((resolve) => { releaseBlocked = resolve })
+  const reportState = f.feedback.transport.reportExecutionState
+  f.feedback.transport.reportExecutionState = async (body) => {
+    await reportState(body)
+    if (body.state === 2) await holdBlocked
+  }
+  try {
+    f.aamp.emitResult(f.taskId, f.helpResult)
+    await waitFor(() => assert.deepEqual(f.feedback.states.map(({ state }) => state), [2]))
+    await f.feishu.emit(f.stopEvent)
+    releaseBlocked()
+    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.status, 'cancelled'))
+    assert.deepEqual(f.feedback.states.map(({ state }) => state), [2, 4])
+  } finally { releaseBlocked(); await f.cleanup() }
+})
+
+test('a help event reports BLOCKED after a failed comment but does not prove that STOP has completed', async () => {
+  const f = await controlledHelpStopFixture()
+  f.feishu.commentErrors.push(new Error('question comment denied'))
+  try {
+    f.aamp.emitHelp(f.taskId, { question: '请提供城市' })
+    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.reportedExecutionState, 'BLOCKED'))
+    await f.feishu.emit(f.stopEvent)
+    assert.deepEqual(f.feedback.states.map(({ state }) => state), [2])
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.status, 'help_needed')
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.stopRequested, true)
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.resultHandledTaskIds?.includes(f.taskId) ?? false, false)
+    f.aamp.emitResult(f.taskId, { status: 'cancelled' })
+    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.status, 'cancelled'))
+    assert.deepEqual(f.feedback.states.map(({ state }) => state), [2, 4])
+  } finally { await f.cleanup() }
+})
+
+test('a help event interrupted by STOP keeps the STOP marker even when its question write fails', async () => {
+  const f = await controlledHelpStopFixture()
+  let releaseComment!: () => void
+  f.feishu.commentTaskHold = new Promise<void>((resolve) => { releaseComment = resolve })
+  f.feishu.commentErrors.push(new Error('question comment denied'))
+  try {
+    f.aamp.emitHelp(f.taskId, { question: '请提供城市' })
+    await waitFor(() => assert.ok(f.feishu.writes.some(({ method }) => method === 'commentTask')))
+    await f.feishu.emit(f.stopEvent)
+    releaseComment()
+    await waitFor(() => assert.ok(f.errors.some((message) => message.includes('help comment failed'))))
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.stopRequested, true)
+    assert.deepEqual(f.feedback.states, [])
+    f.aamp.emitResult(f.taskId, { status: 'cancelled' })
+    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.status, 'cancelled'))
+    assert.deepEqual(f.feedback.states.map(({ state }) => state), [4])
+  } finally { releaseComment(); await f.cleanup() }
+})
+
+test('a cancelled result arriving while final need_help is being written is queued instead of dropped', async () => {
+  const f = await controlledHelpStopFixture()
+  let releaseComment!: () => void
+  let releaseCancel!: () => void
+  f.feishu.commentTaskHold = new Promise<void>((resolve) => { releaseComment = resolve })
+  f.aamp.sendCancelHold = new Promise<void>((resolve) => { releaseCancel = resolve })
+  try {
+    f.aamp.emitResult(f.taskId, f.helpResult)
+    await waitFor(() => assert.ok(f.feishu.writes.some(({ method }) => method === 'commentTask')))
+    const stop = f.feishu.emit(f.stopEvent)
+    await waitFor(() => assert.equal(f.aamp.cancelRequests.length, 1))
+    f.aamp.emitResult(f.taskId, { status: 'cancelled' })
+    releaseComment()
+    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.status, 'cancelled'))
+    assert.deepEqual(f.feedback.states.map(({ state }) => state), [2, 4])
+    releaseCancel()
+    await stop
+    assert.equal(f.feedback.states.filter(({ state }) => state === 4).length, 1)
+  } finally { releaseComment(); releaseCancel(); await f.cleanup() }
+})
+
+test('a late cancelled result does not repeat STOPPED after a completed need_help turn was stopped', async () => {
+  const f = await controlledHelpStopFixture()
+  try {
+    f.aamp.emitResult(f.taskId, f.helpResult)
+    await waitFor(() => assert.ok(f.runtime.getStateSnapshot().tasks[f.taskId]?.resultHandledTaskIds?.includes(f.taskId)))
+    await f.feishu.emit(f.stopEvent)
+    f.aamp.emitResult(f.taskId, { status: 'cancelled' })
+    await waitFor(() => assert.ok(f.logs.some((message) => message.includes('result already handled'))))
+    assert.deepEqual(f.feedback.states.map(({ state }) => state), [2, 4])
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.status, 'cancelled')
+  } finally { await f.cleanup() }
+})
+
+test('replacing an execution during a failed help comment never reports or logs the old callback failure', async () => {
+  const f = await controlledHelpStopFixture()
+  let releaseComment!: () => void
+  f.feishu.commentTaskHold = new Promise<void>((resolve) => { releaseComment = resolve })
+  f.feishu.commentErrors.push(new Error('old question failed'))
+  try {
+    f.aamp.emitResult(f.taskId, f.helpResult)
+    await waitFor(() => assert.ok(f.feishu.writes.some(({ method }) => method === 'commentTask')))
+    await f.feishu.emit({ eventId: 'evt_replace_help', taskGuid: f.taskGuid, eventTypes: ['task_agent_start'], executionId: 'run_new_help', action: 'START', timestamp: '200' })
+    releaseComment()
+    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.taskId]?.supersededByExecutionId, 'run_new_help'))
+    await f.runtime.stop()
+    assert.deepEqual(f.feedback.states, [])
+    assert.equal(f.runtime.getStateSnapshot().tasks[`feishu-task-${f.taskGuid}-run_new_help`]?.lastError, undefined)
+    assert.equal(f.errors.some((message) => message.includes('old question failed')), false)
+  } finally { releaseComment(); await f.cleanup() }
+})
+
+test('legacy need_help results still use the legacy task status write without controlled feedback', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-legacy-help-'))
+  const aamp = new FakeAampClient()
+  const feishu = new FakeFeishuTaskClient()
+  const feedback = controlledFeedbackRecords()
+  const taskGuid = 'task_legacy_help'
+  const taskId = `feishu-task-${taskGuid}-evt_legacy_help`
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu, controlledFeedbackTransport: feedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await runtime.start()
+    await feishu.emit({ eventId: 'evt_legacy_help', taskGuid, eventTypes: ['task_create'] })
+    aamp.emitResult(taskId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"need_help","question":"请提供城市"}' })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[taskId]?.status, 'help_needed'))
+    assert.deepEqual(feishu.blockedTaskGuids, [taskGuid])
+    assert.match(feishu.comments[0]?.content ?? '', /请提供城市/)
+    assert.deepEqual(feedback.states, [])
+    assert.deepEqual(feedback.commands, [])
+  } finally { await runtime.stop(); await rm(configDir, { recursive: true, force: true }) }
+})
+
 test('runtime pads info log prefix for scan-friendly terminal output', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
   const logs: string[] = []

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { test, type TestContext } from 'node:test'
@@ -1252,6 +1253,20 @@ function releaseCancellationGates(fakeClient: FakeAampClient, fakeAcpx: FakeAcpx
   fakeClient.helpGate.resolve()
 }
 
+function failTaskOwnerWrite(context: TestContext, ownerFile: string, error: Error, onFailure?: () => void): () => void {
+  const originalWrite = fs.writeFileSync
+  const mocked = context.mock.method(fs, 'writeFileSync', (...args: Parameters<typeof fs.writeFileSync>) => {
+    const [file] = args
+    if (String(file) === ownerFile) {
+      onFailure?.()
+      throw error
+    }
+    return originalWrite(...args)
+  })
+  syncBuiltinESMExports()
+  return () => { mocked.mock.restore(); syncBuiltinESMExports() }
+}
+
 function sessionMutexQueues(bridge: AgentBridge): Map<string, unknown[]> {
   return (bridge as unknown as {
     sessionMutex: { waiters: Map<string, unknown[]> }
@@ -1269,6 +1284,129 @@ function trackedSessionNames(bridge: AgentBridge): Set<string> {
     sessionNames: Set<string>
   }).sessionNames
 }
+
+test('controlled lock preparation failure returns one rejected receipt before stream or ACP startup', async (context) => {
+  const taskId = 'controlled-lock-parent-failure'
+  const { bridge, fakeClient, fakeAcpx, testHome } = await cancellationHarness(context, taskId)
+  fakeClient.resultGate.resolve()
+  const bridgeHome = join(testHome, '.aamp', 'acp-bridge')
+  mkdirSync(bridgeHome, { recursive: true })
+  writeFileSync(join(bridgeHome, 'task-locks'), 'not a directory')
+  await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+  await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+  await fakeClient.emitTaskCancel(cancellationEvent(taskId))
+  assert.deepEqual(fakeClient.results.map(({ status }) => status), ['rejected'])
+  assert.match(fakeClient.results[0]!.errorMsg ?? '', /ACP task preparation failed/)
+  assert.deepEqual(fakeClient.createdStreams, [])
+  assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt' || call.method === 'cancel'), false)
+  assert.equal(activeTaskSessionCount(bridge), 0)
+})
+
+test('failed task-lock owner initialization removes only the newly created lock', async (context) => {
+  const taskId = 'controlled-lock-owner-failure'
+  const { fakeClient, fakeAcpx, testHome } = await cancellationHarness(context, taskId)
+  fakeClient.resultGate.resolve()
+  const lockDir = join(testHome, '.aamp', 'acp-bridge', 'task-locks', `${taskId}.lock`)
+  const originalError = new Error('ORIGINAL_OWNER_WRITE_FAILURE')
+  const restore = failTaskOwnerWrite(context, join(lockDir, 'owner.json'), originalError)
+  try {
+    await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+    assert.equal(existsSync(lockDir), false)
+    assert.deepEqual(fakeClient.results.map(({ status }) => status), ['rejected'])
+    assert.match(fakeClient.results[0]!.errorMsg ?? '', /ORIGINAL_OWNER_WRITE_FAILURE/)
+    assert.deepEqual(fakeClient.createdStreams, [])
+    assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt'), false)
+  } finally { restore() }
+})
+
+test('task-lock cleanup failure is logged without replacing the original preparation error', async (context) => {
+  const taskId = 'controlled-lock-cleanup-failure'
+  const { fakeClient, testHome } = await cancellationHarness(context, taskId)
+  fakeClient.resultGate.resolve()
+  const lockDir = join(testHome, '.aamp', 'acp-bridge', 'task-locks', `${taskId}.lock`)
+  const restoreWrite = failTaskOwnerWrite(context, join(lockDir, 'owner.json'), new Error('ORIGINAL_OWNER_FAILURE'))
+  const originalRm = fs.rmSync
+  const mockedRm = context.mock.method(fs, 'rmSync', (...args: Parameters<typeof fs.rmSync>) => {
+    const [target] = args
+    if (String(target) === lockDir) throw new Error('PARTIAL_LOCK_CLEANUP_FAILURE')
+    return originalRm(...args)
+  })
+  const warnings: string[] = []
+  const mockedWarn = context.mock.method(console, 'warn', (...args: unknown[]) => { warnings.push(args.join(' ')) })
+  syncBuiltinESMExports()
+  try {
+    await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+    assert.equal(existsSync(lockDir), true)
+    assert.deepEqual(fakeClient.results.map(({ status }) => status), ['rejected'])
+    assert.match(fakeClient.results[0]!.errorMsg ?? '', /ORIGINAL_OWNER_FAILURE/)
+    assert.doesNotMatch(fakeClient.results[0]!.errorMsg ?? '', /PARTIAL_LOCK_CLEANUP_FAILURE/)
+    assert.ok(warnings.some((warning) => warning.includes('PARTIAL_LOCK_CLEANUP_FAILURE')))
+  } finally {
+    mockedRm.mock.restore()
+    mockedWarn.mock.restore()
+    restoreWrite()
+    rmSync(lockDir, { recursive: true, force: true })
+  }
+})
+
+test('an existing task lock and its owner are preserved when acquisition reports EEXIST', async (context) => {
+  const taskId = 'controlled-lock-already-owned'
+  const { fakeClient, fakeAcpx, testHome } = await cancellationHarness(context, taskId)
+  const lockDir = join(testHome, '.aamp', 'acp-bridge', 'task-locks', `${taskId}.lock`)
+  mkdirSync(lockDir, { recursive: true })
+  writeFileSync(join(lockDir, 'owner.json'), 'existing owner sentinel')
+  await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+  assert.equal(readFileSync(join(lockDir, 'owner.json'), 'utf8'), 'existing owner sentinel')
+  assert.deepEqual(fakeClient.results, [])
+  assert.deepEqual(fakeClient.createdStreams, [])
+  assert.equal(fakeAcpx.calls.some((call) => call.method === 'prompt'), false)
+})
+
+for (const historical of [false, true]) {
+  test(`${historical ? 'nonterminal historical controlled' : 'legacy'} preparation failures ${historical ? 'return rejection' : 'retain no-rejection behavior'}`, async (context) => {
+    const taskId = historical ? 'historical-lock-failure' : 'legacy-lock-failure'
+    const { bridge, fakeClient, testHome } = await cancellationHarness(context, taskId)
+    fakeClient.resultGate.resolve()
+    const ownerFile = join(testHome, '.aamp', 'acp-bridge', 'task-locks', `${taskId}.lock`, 'owner.json')
+    const restore = failTaskOwnerWrite(context, ownerFile, new Error('LOCAL_PREPARATION_FAILURE'))
+    bridge['isHistoricalReconcile'] = historical
+    try {
+      await fakeClient.emitTaskDispatch(historical ? controlledCancellationTask(taskId) : cancellationTask(taskId))
+      assert.deepEqual(fakeClient.results.map(({ status }) => status), historical ? ['rejected'] : [])
+      assert.equal(activeTaskSessionCount(bridge), 0)
+    } finally { restore() }
+  })
+}
+
+test('a trusted cancellation winning during failed lock preparation returns cancellation instead of rejection', async (context) => {
+  const taskId = 'controlled-lock-cancel-wins'
+  const { fakeClient, testHome } = await cancellationHarness(context, taskId)
+  fakeClient.resultGate.resolve()
+  const ownerFile = join(testHome, '.aamp', 'acp-bridge', 'task-locks', `${taskId}.lock`, 'owner.json')
+  let cancel: Promise<void> | undefined
+  const restore = failTaskOwnerWrite(context, ownerFile, new Error('LOCAL_PREPARATION_FAILURE'), () => {
+    cancel = fakeClient.emitTaskCancel(cancellationEvent(taskId))
+  })
+  try {
+    await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+    await cancel
+    assert.deepEqual(fakeClient.results.map(({ status }) => status), ['cancelled'])
+  } finally { restore() }
+})
+
+test('an uncertain preparation-rejection delivery is not followed by a different terminal result', async (context) => {
+  const taskId = 'controlled-lock-rejected-delivery-failure'
+  const { fakeClient, testHome } = await cancellationHarness(context, taskId)
+  fakeClient.resultGate.resolve()
+  fakeClient.resultFailure = new Error('uncertain rejected result delivery')
+  const ownerFile = join(testHome, '.aamp', 'acp-bridge', 'task-locks', `${taskId}.lock`, 'owner.json')
+  const restore = failTaskOwnerWrite(context, ownerFile, new Error('LOCAL_PREPARATION_FAILURE'))
+  try {
+    await fakeClient.emitTaskDispatch(controlledCancellationTask(taskId))
+    await fakeClient.emitTaskCancel(cancellationEvent(taskId))
+    assert.deepEqual(fakeClient.results.map(({ status }) => status), ['rejected'])
+  } finally { restore() }
+})
 
 function replacementTask(taskId: string, executionId: string, createdAt = '1792134000000', sessionKey = 'feishu-task:replacement'): TaskDispatch {
   return cancellationTask(taskId, {
