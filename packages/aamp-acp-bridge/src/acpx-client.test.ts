@@ -10,6 +10,7 @@ import { afterEach, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
   AcpxClient,
+  type AcpPromptControl,
   buildAcpxEnvironment,
   selectFinalAssistantOutput,
   selectOwnedWindowsTree,
@@ -396,6 +397,78 @@ test('AcpxClient cancellation waits for pending Windows cleanup before its close
   proc.emit('close', 0)
   await cancelling
   assert.equal(cancelled, true)
+})
+
+function promptProcessHarness() {
+  const client = new AcpxClient(process.cwd())
+  const children: Array<{ args: string[]; proc: ChildProcessWithoutNullStreams }> = []
+  const kills: Array<{ proc: ChildProcessWithoutNullStreams; signal: NodeJS.Signals | undefined }> = []
+  client['spawnAcpx'] = (args) => {
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 10_000 + children.length,
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+    }) as unknown as ChildProcessWithoutNullStreams
+    children.push({ args, proc })
+    return proc
+  }
+  client['terminateProcessTree'] = (proc, signal) => {
+    kills.push({ proc, signal })
+    proc.emit('close', 137)
+  }
+  return { client, children, kills }
+}
+
+test('prompt control waits for both the exact prompt and its normal cancel command', async () => {
+  const { client, children, kills } = promptProcessHarness()
+  let control!: AcpPromptControl
+  const prompt = client.prompt('codex', 'session-a', 'first', { onControl: (value) => { control = value } })
+  const other = client.prompt('codex', 'session-b', 'other')
+  let finished = false
+  const cancellation = control.cancelAndWait().then((result) => { finished = true; return result })
+  assert.ok(children[2]!.args.includes('cancel'))
+  assert.equal(children[2]!.args.at(-1), 'session-a')
+  children[0]!.proc.emit('close', 0)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(finished, false, 'a late session cancel cannot outlive replacement startup')
+  children[2]!.proc.emit('close', 0)
+  assert.deepEqual(await cancellation, { forced: false })
+  assert.deepEqual(kills, [])
+  assert.equal(client['activeProcesses'].has(children[1]!.proc), true)
+  children[1]!.proc.emit('close', 0)
+  await Promise.all([prompt, other])
+})
+
+test('prompt control escalates after two seconds and kills only its prompt and cancel process', async () => {
+  const { client, children, kills } = promptProcessHarness()
+  const wait = client['waitForExit'].bind(client)
+  let waits = 0
+  client['waitForExit'] = async (exited, timeoutMs) => {
+    assert.equal(timeoutMs, 2_000)
+    if (waits++ === 0) return false
+    return await wait(exited, timeoutMs)
+  }
+  let control!: AcpPromptControl
+  const prompt = client.prompt('codex', 'session-a', 'first', { onControl: (value) => { control = value } })
+  const other = client.prompt('codex', 'session-b', 'other')
+  const result = await control.cancelAndWait()
+  assert.deepEqual(result, { forced: true })
+  assert.deepEqual(kills.map((kill) => children.findIndex((child) => child.proc === kill.proc)), [0, 2])
+  assert.ok(kills.every((kill) => kill.signal === 'SIGKILL'))
+  assert.equal(client['activeProcesses'].has(children[1]!.proc), true)
+  children[1]!.proc.emit('close', 0)
+  await Promise.all([prompt.catch(() => {}), other])
+})
+
+test('prompt control fails when targeted processes cannot be confirmed exited', async () => {
+  const { client, children } = promptProcessHarness()
+  client['waitForExit'] = async () => false
+  client['terminateProcessTree'] = () => {}
+  let control!: AcpPromptControl
+  const prompt = client.prompt('codex', 'session-a', 'first', { onControl: (value) => { control = value } })
+  await assert.rejects(control.cancelAndWait(), /did not exit after targeted termination/)
+  assert.equal(client['activeProcesses'].size, 2, 'failure must not pretend the process has exited')
+  children.forEach(({ proc }) => proc.emit('close', 0))
+  await prompt
 })
 
 function createFakeAcpx(mode: 'success' | 'auth-failure' | 'auth-with-output' | 'json-auth-failure' | 'json-aime-auth-failure' | 'json-aime-sources' | 'auth-discussion' | 'timeout' | 'close-retry'): { cwd: string; logFile: string } {

@@ -392,10 +392,16 @@ export interface AcpPlanEntry {
 }
 
 export interface AcpPromptHandlers {
+  onControl?: (control: AcpPromptControl) => void
   onEvent?: (event: AcpEvent) => void
   onTextChunk?: (chunk: AcpTextChunk) => void
   onToolUpdate?: (update: AcpToolUpdate) => void
   onPlanUpdate?: (entries: AcpPlanEntry[]) => void
+}
+
+export interface AcpPromptControl {
+  /** Cancels this prompt only; resolves after both prompt and cancel children exit. */
+  cancelAndWait: () => Promise<{ forced: boolean }>
 }
 
 export interface AcpResult {
@@ -424,6 +430,8 @@ export interface AcpAgentProbeOptions {
 
 interface AcpxProcessControl {
   cancel: () => Promise<void>
+  exited: Promise<void>
+  killAndWait: () => Promise<void>
 }
 
 interface AcpxExecution<T> extends AcpxProcessControl {
@@ -965,6 +973,20 @@ export class AcpxClient {
       }
     }
     return {
+      exited,
+      killAndWait: async () => {
+        cancelled = true
+        const cleanups: Promise<void>[] = []
+        for (const proc of [...ownedProcesses]) {
+          const cleanup = this.terminateProcessTree(proc, 'SIGKILL')
+          if (cleanup) cleanups.push(cleanup)
+        }
+        if (cleanups.length) await Promise.all(cleanups)
+        resolveExitedIfComplete()
+        if (!await this.waitForExit(exited, 2_000)) {
+          throw new Error('ACP prompt process did not exit after targeted termination')
+        }
+      },
       cancel: async () => {
         if (!cancelled) {
           cancelled = true
@@ -1169,14 +1191,61 @@ export class AcpxClient {
     text: string,
     handlers?: AcpPromptHandlers,
   ): Promise<AcpResult> {
-    try {
-      return await this.promptJsonMode(agent, sessionName, text, handlers)
-    } catch (err) {
-      if (supportsJsonStreamingFallback((err as Error).message)) {
-        return await this.promptTextMode(agent, sessionName, text)
+    let currentProcess: AcpxProcessControl | undefined
+    let cancelled = false
+    let cancellation: Promise<{ forced: boolean }> | undefined
+    const captureProcess = (control: AcpxProcessControl) => { currentProcess = control }
+    const result = (async () => {
+      try {
+        return await this.promptJsonMode(agent, sessionName, text, handlers, captureProcess)
+      } catch (err) {
+        // A cancelled JSON prompt must never start a new text-mode process.
+        if (!cancelled && supportsJsonStreamingFallback((err as Error).message)) {
+          return await this.promptTextMode(agent, sessionName, text, captureProcess)
+        }
+        throw err
       }
-      throw err
+    })()
+    handlers?.onControl?.({
+      cancelAndWait: () => {
+        cancelled = true
+        cancellation ??= currentProcess
+          ? this.cancelPromptAndWait(agent, sessionName, currentProcess)
+          : Promise.resolve({ forced: false })
+        return cancellation
+      },
+    })
+    return await result
+  }
+
+  private async waitForExit(exited: Promise<void>, timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        exited.then(() => true),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs) }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
     }
+  }
+
+  private async cancelPromptAndWait(
+    agent: string,
+    sessionName: string,
+    prompt: AcpxProcessControl,
+  ): Promise<{ forced: boolean }> {
+    const cancel = this.startExec(agent, ['cancel', '-s', sessionName])
+    // The command can fail after the prompt already exited. Process exit, rather
+    // than its exit code, decides when this session is safe to reuse.
+    void cancel.promise.catch(() => {})
+    const exited = Promise.all([prompt.exited, cancel.exited]).then(() => {})
+    if (await this.waitForExit(exited, 2_000)) return { forced: false }
+
+    // Never use stop(): another Task may be running in this same bridge.
+    await Promise.all([prompt.killAndWait(), cancel.killAndWait()])
+    await exited
+    return { forced: true }
   }
 
   private async promptJsonMode(
@@ -1184,6 +1253,7 @@ export class AcpxClient {
     sessionName: string,
     text: string,
     handlers?: AcpPromptHandlers,
+    captureProcess?: (control: AcpxProcessControl) => void,
   ): Promise<AcpResult> {
     const events: AcpEvent[] = []
     let stopReason: string | undefined
@@ -1313,7 +1383,7 @@ export class AcpxClient {
         }
       }
 
-      this.runAcpx(acpxArgs, {
+      const processControl = this.runAcpx(acpxArgs, {
         onStdout: processStdoutChunk,
         onStderr: (chunk: Buffer) => { stderr += chunk.toString() },
         onClose: (code) => {
@@ -1364,10 +1434,14 @@ export class AcpxClient {
           reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}. Is Node/npm available?`))
         },
       }, this.platform === 'win32' ? windowsPromptInput(text) : undefined)
+      captureProcess?.(processControl)
     })
   }
 
-  private async promptTextMode(agent: string, sessionName: string, text: string): Promise<AcpResult> {
+  private async promptTextMode(
+    agent: string, sessionName: string, text: string,
+    captureProcess?: (control: AcpxProcessControl) => void,
+  ): Promise<AcpResult> {
     const events: AcpEvent[] = []
 
     return await new Promise<AcpResult>((resolve, reject) => {
@@ -1377,7 +1451,7 @@ export class AcpxClient {
       let stdout = ''
       let stderr = ''
 
-      this.runAcpx(acpxArgs, {
+      const processControl = this.runAcpx(acpxArgs, {
         onStdout: (chunk: Buffer) => { stdout += chunk.toString() },
         onStderr: (chunk: Buffer) => { stderr += chunk.toString() },
         onClose: (code) => {
@@ -1410,6 +1484,7 @@ export class AcpxClient {
           reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}. Is Node/npm available?`))
         },
       }, this.platform === 'win32' ? windowsPromptInput(text) : undefined)
+      captureProcess?.(processControl)
     })
   }
 
@@ -1458,6 +1533,8 @@ export class AcpxClient {
     return {
       promise,
       cancel: async () => { await processControl?.cancel() },
+      exited: processControl?.exited ?? Promise.resolve(),
+      killAndWait: async () => { await processControl?.killAndWait() },
     }
   }
 
