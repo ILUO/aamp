@@ -18,7 +18,7 @@ import {
   sanitizeTaskVisibleFailureReason,
 } from './runtime.js'
 import type { ControlledTaskFeedbackTransport, ReportAgentTaskCommandResultBody, ReportAgentTaskExecutionStateBody } from './controlled-feedback.js'
-import { OapiFeishuTaskClient } from './feishu.js'
+import { normalizeFeishuTaskEvent, OapiFeishuTaskClient } from './feishu.js'
 import { createDefaultBridgeState, loadBridgeState, saveBridgeState } from './config.js'
 import type {
   BridgeConfig,
@@ -179,6 +179,7 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   eventHandler?: (event: FeishuTaskEvent) => Promise<void>
   registerAgentCalls = 0
   registerAgentError?: Error
+  subscribeTaskEventsCalls = 0
   comments: Array<{ taskGuid: string; content: string }> = []
   steps: Array<{ taskGuid: string; step: FeishuTaskStepInput }> = []
   uploadedDeliveries: Array<{ taskGuid: string; filePath: string }> = []
@@ -208,7 +209,7 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     if (this.registerAgentError) throw this.registerAgentError
   }
 
-  async subscribeTaskEvents(): Promise<void> {}
+  async subscribeTaskEvents(): Promise<void> { this.subscribeTaskEventsCalls += 1 }
 
   registerEventHandlers(
     register: (handlers: Record<string, (data: unknown) => void>) => void,
@@ -385,14 +386,64 @@ test('every bridge startup refreshes registration even after a cached registrati
   try {
     await firstRuntime.start()
     assert.equal(firstFeishu.registerAgentCalls, 1)
+    assert.equal(firstFeishu.subscribeTaskEventsCalls, 1)
     assert.equal((await loadBridgeState(configDir)).agentRegistration?.appId, 'cli_xxx')
     await firstRuntime.stop()
 
     await secondRuntime.start()
     assert.equal(secondFeishu.registerAgentCalls, 1)
+    assert.equal(secondFeishu.subscribeTaskEventsCalls, 0)
   } finally {
     await firstRuntime.stop()
     await secondRuntime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('Task subscription business failures block startup without persisting success and allow a later retry', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-subscription-failure-'))
+  const config = buildConfig()
+  const logs: string[] = []
+  const logger = { log: (message?: unknown) => { logs.push(String(message)) }, error: (message?: unknown) => { logs.push(String(message)) } }
+  const feishu = new OapiFeishuTaskClient(config.feishu, { logger })
+  let subscriptionResponse: unknown = { code: 1254301, msg: 'private subscription-test-secret' }
+  let subscriptionRequests = 0
+  let listenerStarted = false
+  feishu.start = async () => { listenerStarted = true }
+  feishu.stop = async () => {}
+  ;(feishu as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu.cn',
+    formatPayload: async (payload: { params: unknown; data: unknown }) => ({ ...payload, headers: { Authorization: 'Bearer subscription-test-token' } }),
+    httpInstance: { request: async (request: { url: string }) => {
+      if (!request.url.endsWith('/task_subscription')) return { code: 0 }
+      subscriptionRequests += 1
+      return subscriptionResponse
+    } },
+  }
+  const runtime = new FeishuTaskBridgeRuntime(config, {
+    configDir, aampClient: new FakeAampClient(), feishuClient: feishu, logger,
+  })
+  try {
+    for (const [response, expected] of [
+      [{ code: 1254301, msg: 'private subscription-test-secret' }, /API code 1254301/],
+      [{ data: {} }, /missing API code/],
+    ] as const) {
+      subscriptionResponse = response
+      await assert.rejects(runtime.start(), expected)
+      assert.equal(runtime.getStateSnapshot().taskSubscription, undefined)
+      assert.equal((await loadBridgeState(configDir)).taskSubscription, undefined)
+      assert.equal(listenerStarted, false)
+      assert.equal(logs.some((message) => message.startsWith('[feishu task subscription] subscribed ')), false)
+      assert.doesNotMatch(logs.join('\n'), /private|subscription-test-secret|subscription-test-token/)
+    }
+    assert.equal(subscriptionRequests, 2)
+    subscriptionResponse = { code: 0 }
+    await runtime.start()
+    assert.equal(subscriptionRequests, 3)
+    assert.equal(listenerStarted, true)
+    assert.equal((await loadBridgeState(configDir)).taskSubscription?.appId, 'cli_xxx')
+  } finally {
+    await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
   }
 })
@@ -588,20 +639,48 @@ test('controlled STOP after a reply cancels the latest child and ignores late ro
     assert.deepEqual(f.feishu.comments, [])
     assert.equal(f.feedback.states.length, 0)
     assert.equal(f.aamp.streamHandlers.stale_root_stream, undefined)
+    f.feishu.getComment = async () => ({ ...f.humanComment, id: 'comment_after_stop' })
+    await f.feishu.emit({ ...f.event, eventId: 'evt_comment_after_stop', commentId: 'comment_after_stop', action: 'START', executionId: f.executionId })
+    assert.equal(f.aamp.sentTasks.length, 1)
+    assert.equal(f.runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'controlled_task_uses_commands')
     f.aamp.emitResult(f.childId, { status: 'cancelled' })
     await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.rootId]?.status, 'cancelled'))
     assert.deepEqual(f.feedback.states.map(({ state }) => state), [4])
     assert.equal(f.feedback.states[0]?.execution_id, f.executionId)
+    f.feishu.getComment = async () => ({ ...f.humanComment, id: 'comment_after_cancel' })
+    await f.feishu.emit({ ...f.event, eventId: 'evt_comment_after_cancel', commentId: 'comment_after_cancel', action: 'START', executionId: f.executionId })
+    assert.equal(f.aamp.sentTasks.length, 1)
   } finally { await f.cleanup() }
 })
 
 test('controlled reply deduplicates comments and ignores its own comments, other humans and create events', async () => {
   const f = await controlledReplyFixture()
   try {
-    await f.feishu.emit({ ...f.event, eventId: 'evt_first_comment' })
-    // The first valid reply is dispatched once; duplicate semantic comment IDs must not dispatch again.
-    await f.feishu.emit({ ...f.event, eventId: 'evt_duplicate_comment' })
+    let getCommentCalls = 0
+    let listCommentCalls = 0
+    const listComments = f.feishu.listComments.bind(f.feishu)
+    f.feishu.getComment = async () => {
+      getCommentCalls += 1
+      throw new Error('a comment event without comment_id must use listComments')
+    }
+    f.feishu.listComments = async (taskGuid) => {
+      listCommentCalls += 1
+      return listComments(taskGuid)
+    }
+    for (const [eventName, eventId] of [
+      ['task.task.update_user_access_v2', 'evt_user_comment'],
+      ['task.task.updated_v1', 'evt_app_comment_copy'],
+    ]) {
+      const event = normalizeFeishuTaskEvent({ event_id: eventId, task_guid: f.taskGuid,
+        event_types: ['task_comment_create'] }, eventName)
+      assert.ok(event)
+      await f.feishu.emit(event)
+    }
+    assert.equal(getCommentCalls, 0)
+    assert.equal(listCommentCalls, 2)
     assert.equal(f.aamp.sentTasks.length, 1)
+    assert.match(f.aamp.sentTasks[0]?.bodyText ?? '', /成都/)
+    assert.equal(f.runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'duplicate_task_event')
     f.feishu.getComment = async () => ({ ...f.humanComment, id: 'self_comment', authorType: 'app', authorId: 'cli_xxx' })
     await f.feishu.emit({ ...f.event, eventId: 'evt_app_comment', commentId: 'self_comment' })
     assert.equal(f.runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'comment_authored_by_current_app')
@@ -865,7 +944,7 @@ test('a finished newest controlled execution never resumes an older root or fall
     const dispatched = f.aamp.sentTasks.length
     // Stale Task read must not resurrect the older waiting root or dispatch an uncontrolled comment turn.
     f.feishu.tasks[f.taskGuid]!.agentTaskStatus = 3
-    await f.feishu.emit(f.event)
+    await f.feishu.emit({ ...f.event, executionId: 'execution_newer', action: 'START' })
     assert.equal(f.aamp.sentTasks.length, dispatched)
     assert.equal(f.runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'controlled_task_uses_commands')
     assert.equal(f.runtime.getStateSnapshot().tasks[f.rootId]?.activeContinuationTaskId, undefined)

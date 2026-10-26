@@ -877,13 +877,16 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       params: payload.params,
       data: payload.data,
     })
-    await withRetry(() => rawClient.httpInstance.request({
+    const response = await withRetry(() => rawClient.httpInstance.request({
       method: 'POST',
       url: `${rawClient.domain}/open-apis/task/v2/task_v2/task_subscription`,
       params: formatted.params,
       data: formatted.data,
       headers: formatted.headers,
     }), this.retry, this.logger, 'task_subscription')
+    const code = getNumber(asRecord(response)?.code)
+    if (code === undefined) throw new Error('Task subscription response is missing API code')
+    if (code !== 0) throw new Error(`Task subscription failed with API code ${code}`)
   }
 
   private async completeV2AgentTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {

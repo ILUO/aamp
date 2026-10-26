@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -9,6 +10,78 @@ const feedbackPaths = {
   commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
   executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
 }
+
+async function taskSubscriptionHttpFixture(responses: Array<{ status?: number; body: unknown }>) {
+  const requests: Array<{ method?: string; url?: string; authorization?: string; env?: string; body: string }> = []
+  const server = createServer(async (request, response) => {
+    if (request.url === '/open-apis/auth/v3/tenant_access_token/internal') {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ code: 0, tenant_access_token: 'subscription-test-token', expire: 7200 }))
+      return
+    }
+    let body = ''
+    for await (const chunk of request) body += chunk
+    requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization,
+      env: request.headers['x-tt-env'] as string | undefined, body })
+    const next = responses.shift() ?? { status: 500, body: { code: 1 } }
+    response.writeHead(next.status ?? 200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify(next.body))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  assert.ok(address && typeof address !== 'string')
+  const logs: string[] = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_subscription_test', appSecret: 'subscription-test-secret',
+    domain: `http://127.0.0.1:${address.port}`, headers: { 'x-tt-env': 'ppe_subscription_test' }, eventNames: [],
+  }, { logger: { log: (message) => logs.push(message), error: (message) => logs.push(message) },
+    retryBaseDelayMs: 0, retryMaxAttempts: 2 })
+  return { client, requests, logs, close: async () => {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  } }
+}
+
+test('Task subscription rejects HTTP 200 business failure without exposing the response payload', async () => {
+  const f = await taskSubscriptionHttpFixture([{ body: {
+    code: 1254301, msg: 'private response subscription-test-secret', data: { token: 'private-response-token' },
+  } }])
+  try {
+    await assert.rejects(f.client.subscribeTaskEvents(), (error: unknown) => {
+      assert.ok(error instanceof Error)
+      assert.match(error.message, /subscription.*API code 1254301/i)
+      assert.doesNotMatch(error.message, /private|subscription-test-secret|subscription-test-token/)
+      return true
+    })
+    assert.equal(f.requests.length, 1)
+    assert.doesNotMatch(f.logs.join('\n'), /private|subscription-test-secret|subscription-test-token/)
+  } finally { await f.close() }
+})
+
+test('Task subscription rejects HTTP 200 responses without an API code', async () => {
+  const f = await taskSubscriptionHttpFixture([{ body: { data: {} } }])
+  try {
+    await assert.rejects(f.client.subscribeTaskEvents(), /subscription.*missing API code/i)
+    assert.equal(f.requests.length, 1)
+  } finally { await f.close() }
+})
+
+test('Task subscription retries HTTP 503 then accepts code zero using the existing app identity and environment', async () => {
+  const f = await taskSubscriptionHttpFixture([
+    { status: 503, body: { code: 1 } },
+    { body: { code: 0, msg: 'success' } },
+  ])
+  try {
+    await f.client.subscribeTaskEvents()
+    assert.equal(f.requests.length, 2)
+    for (const request of f.requests) {
+      assert.deepEqual(request, {
+        method: 'POST', url: '/open-apis/task/v2/task_v2/task_subscription?user_id_type=open_id',
+        authorization: 'Bearer subscription-test-token', env: 'ppe_subscription_test', body: '{}',
+      })
+    }
+  } finally { await f.close() }
+})
 
 test('Task detail preserves current app assignees separately from followers and missing members', async () => {
   const client = new OapiFeishuTaskClient({ appId: 'cli_test', appSecret: 'secret', eventNames: [] }, {
