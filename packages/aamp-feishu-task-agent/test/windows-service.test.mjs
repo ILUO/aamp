@@ -238,3 +238,43 @@ test('cooperative stop reserves time for verified forced cleanup',async t=>{
  await manager.stop()
  assert.equal(polls,0)
 })
+
+test('stop accepts cleanup already completed by startup recovery',async t=>{
+ const {manager,identities}=await fixture(t)
+ const controller=identities.get(102)
+ const directory=path.join(path.dirname(manager.paths.serviceHome),'windows-process-journals-v1')
+ const {createWindowsProcessJournal,recoverWindowsProcessJournals}=await import('../bin/windows-process-journal.mjs')
+ const journal=await createWindowsProcessJournal(directory,controller,{ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),atomicReplace:fs.rename})
+ await journal.record([identities.get(101)])
+ await fs.rm(path.join(manager.paths.serviceHome,'cleanup-result.json'))
+ identities.clear()
+ await recoverWindowsProcessJournals(directory,{readIdentity:async()=>undefined,stopTree:async()=>{}})
+ await manager.stop()
+ await manager.stop()
+ const result=JSON.parse(await fs.readFile(path.join(manager.paths.serviceHome,'cleanup-result.json')))
+ assert.deepEqual(result,{generation:'g1',pid:102,ok:true})
+})
+
+test('stale owner cannot use a different restart controller recovery receipt',async t=>{
+ const {manager,identities}=await fixture(t)
+ const unrelated={...identities.get(102),pid:38812,startedAt:'2026-10-23T07:20:40.614Z'}
+ const directory=path.join(path.dirname(manager.paths.serviceHome),'windows-process-journals-v1')
+ const {createWindowsProcessJournal,recoverWindowsProcessJournals}=await import('../bin/windows-process-journal.mjs')
+ await createWindowsProcessJournal(directory,unrelated,{ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),atomicReplace:fs.rename})
+ await fs.rm(path.join(manager.paths.serviceHome,'cleanup-result.json'))
+ identities.clear()
+ await recoverWindowsProcessJournals(directory,{readIdentity:async()=>undefined,stopTree:async()=>{}})
+ await assert.rejects(manager.stop(),/缺少控制器清理确认/)
+ await assert.rejects(manager.stop(),/缺少控制器清理确认/)
+})
+
+test('recovery receipt does not override explicit service cleanup failure',async t=>{
+ const {manager,identities}=await fixture(t)
+ const directory=path.join(path.dirname(manager.paths.serviceHome),'windows-process-journals-v1')
+ const {createWindowsProcessJournal,recoverWindowsProcessJournals}=await import('../bin/windows-process-journal.mjs')
+ await createWindowsProcessJournal(directory,identities.get(102),{ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),atomicReplace:fs.rename})
+ identities.clear()
+ await recoverWindowsProcessJournals(directory,{readIdentity:async()=>undefined,stopTree:async()=>{}})
+ await fs.writeFile(path.join(manager.paths.serviceHome,'cleanup-result.json'),JSON.stringify({generation:'g1',pid:102,ok:false}))
+ await assert.rejects(manager.stop(),/控制器未能清理全部进程/)
+})

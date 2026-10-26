@@ -1,4 +1,4 @@
-import {recoverWindowsProcessJournals} from './windows-process-journal.mjs'
+import {recoverWindowsProcessJournals, confirmWindowsProcessRecovery} from './windows-process-journal.mjs'
 import {withWindowsCleanupDeadline} from './windows-process-cleanup.mjs'
 import {taskCommand, globalInstallHint} from './platform-hints.mjs'
 import { withWindowsOperationLock } from './windows-operation-lock.mjs'
@@ -378,14 +378,15 @@ export function createWindowsServiceManager({
     const acknowledgedCleanup=cleanup?.generation===selected.generation && cleanup?.pid===owner?.controller?.pid
     if(acknowledgedCleanup && cleanup.ok===false) throw new Error('后台停止未完成：控制器未能清理全部进程，请查看日志。')
     if(owner?.generation===selected.generation && owner.controller && !(acknowledgedCleanup && cleanup.ok===true)) {
-      const recovered=await recoverWindowsProcessJournals(path.join(runtimeHome,'windows-process-journals-v1'),{
+      await recoverWindowsProcessJournals(path.join(runtimeHome,'windows-process-journals-v1'),{
         controllerIdentity:owner.controller,signal:budget.signal,
         readIdentity:(pid,options)=>readIdentity(pid,{...options,...budget.options()}),
         stopTree:(identity,options)=>stopTree(identity,{...options,...budget.options()}),
       }).catch(error=>{if(error.code==='ENOENT')return 0;throw error})
-      if(!recovered) throw new Error('后台停止未完成：缺少控制器清理确认及可恢复的进程记录。')
-      budget.signal.throwIfAborted()
-      await writeJson(path.join(serviceHome,'cleanup-result.json'),{generation:selected.generation,pid:owner.controller.pid,ok:true})
+      const confirmed=await confirmWindowsProcessRecovery(path.join(runtimeHome,'windows-process-journals-v1'),owner.controller,
+        ()=>writeJson(path.join(serviceHome,'cleanup-result.json'),{generation:selected.generation,pid:owner.controller.pid,ok:true}),
+        {signal:budget.signal})
+      if(!confirmed) throw new Error('后台停止未完成：缺少控制器清理确认及可恢复的进程记录。')
     }
     budget.signal.throwIfAborted()
     await fs.rm(paths.readinessFile, { force: true })
