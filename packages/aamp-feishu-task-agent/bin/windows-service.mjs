@@ -1,3 +1,4 @@
+import {recoverStaleWindowsProcesses} from './windows-stale-recovery.mjs'
 import {recoverWindowsProcessJournals, confirmWindowsProcessRecovery} from './windows-process-journal.mjs'
 import {withWindowsCleanupDeadline} from './windows-process-cleanup.mjs'
 import {taskCommand, globalInstallHint} from './platform-hints.mjs'
@@ -66,7 +67,7 @@ function Grant-TaskUserControl {
 }
 switch ($c.operation) {
  'status' {
-  if ($t) { @{loaded=($t.State -ne 'Disabled');state=[string]$t.State;ownerSid=$ownerSid} | ConvertTo-Json -Compress }
+  if ($t) { @{loaded=($t.State -ne 'Disabled');state=[string]$t.State;enabled=[bool]$t.Settings.Enabled;ownerSid=$ownerSid} | ConvertTo-Json -Compress }
   else { @{loaded=$false;state='Stopped';ownerSid=$c.sid} | ConvertTo-Json -Compress }
  }
  'disable' { if ($t -and $t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $c.name | Out-Null } }
@@ -212,6 +213,8 @@ export function createWindowsServiceManager({
   stopAttempts = 600,
   stopTimeoutMs = 75000,
   stopGraceMs = 60000,
+  scanProcesses,
+  recoverStale = recoverStaleWindowsProcesses,
 } = {}) {
   if (!runtimeHome) throw new Error('Windows service runtimeHome is required')
   const serviceHome = path.join(runtimeHome, 'windows-service-v1')
@@ -320,6 +323,47 @@ export function createWindowsServiceManager({
     const c = await config()
     const task = await scheduler('status', c)
     await scheduler('disable', c)
+    const snapshot={selection:await readJson(paths.selectionFile),owner:await readJson(paths.ownerFile),worker:await readJson(paths.configFile)}
+    const verifySnapshot=async (budget,requireStopped=false)=>{
+      budget.signal.throwIfAborted()
+      for(const [key,file] of [['selection',paths.selectionFile],['owner',paths.ownerFile],['worker',paths.configFile]]) {
+        if(JSON.stringify(await readJson(file))!==JSON.stringify(snapshot[key]))throw new Error('Windows background state changed during recovery')
+      }
+      const state=await scheduler('status',c,budget.options())
+      if((state.enabled ?? state.loaded) || (requireStopped && String(state.state).toLowerCase()==='running'))throw new Error('Windows background task is still active during recovery')
+    }
+    const recoverMissingState=async(originalError)=>withWindowsCleanupDeadline(async budget=>{
+      onProgress('旧后台状态不完整，正在核查并清理实际残留进程...')
+      const backup=path.join(serviceHome,'recovery-backups',randomUUID(),'state.json')
+      await writeJson(backup,{...snapshot,cleanup:await readJson(path.join(serviceHome,'cleanup-result.json'))})
+      const recorded=[snapshot.owner?.worker,snapshot.owner?.controller].filter(Boolean)
+      const journalDirectory=path.join(runtimeHome,'windows-process-journals-v1')
+      for(const name of await fs.readdir(journalDirectory).catch(error=>{if(error.code==='ENOENT')return [];throw error})) {
+        if(!/^controller-.*\.json$/.test(name))continue
+        const journal=await readJson(path.join(journalDirectory,name))
+        if(journal?.version===1 && snapshot.owner?.controller && sameIdentity(journal.controller,snapshot.owner.controller,c.sid)) {
+          if(!Array.isArray(journal.descendants))throw new Error('Windows recovery journal is incomplete')
+          recorded.push(...journal.descendants)
+        }
+      }
+      const result=await recoverStale({sid:c.sid,runtimeHome,controllerPath,workerPath,recorded,protectedPids:[process.pid],allowPermissionRepair:c.allowPermissionRepair}, {
+        ...(scanProcesses ? {scan:scanProcesses} : {}),
+        stop:(identity,options)=>stopTree(identity,{...options,...budget.options()}),
+        validate:()=>verifySnapshot(budget),onProgress,...budget.options(),
+      })
+      await verifySnapshot(budget,true)
+      // Persist a distinct audit record before discarding any stale state. This
+      // is an observed empty runtime, not a fabricated journal acknowledgement.
+      await writeJson(path.join(serviceHome,'stale-recovery-result.json'),{version:1,generation:snapshot.selection?.generation || '',
+        controller:snapshot.owner?.controller,method:'verified-process-scan',cleaned:result.cleaned,backup,completedAt:new Date().toISOString()})
+      await verifySnapshot(budget,true)
+      await fs.rm(paths.ownerFile,{force:true})
+      await fs.rm(paths.readinessFile,{force:true})
+      await fs.rm(paths.stateFile,{force:true})
+      await fs.rm(path.join(serviceHome,'cleanup-result.json'),{force:true})
+      onProgress('旧后台残留已清理，继续执行当前命令。')
+      return {stopped:true,wasLoaded:Boolean(task.loaded),recovered:true}
+    },{timeoutMs:stopTimeoutMs}).catch(error=>{throw new Error(`${originalError.message} 自动恢复未完成：${error.message}`,{cause:error})})
     return withWindowsCleanupDeadline(async budget => {
     const selected = await selectionSnapshot()
     let owner = await readJson(paths.ownerFile)
@@ -373,6 +417,11 @@ export function createWindowsServiceManager({
         `后台进程尚未确认停止；请执行 ${taskCommand('status', 'win32')} 检查状态后重试。`,
       )
     budget.signal.throwIfAborted()
+    const scannedRecovery=await readJson(path.join(serviceHome,'stale-recovery-result.json'))
+    const alreadyReconciled=!task.loaded && !owner && scannedRecovery?.version===1 && scannedRecovery.method==='verified-process-scan' && scannedRecovery.generation===selected.generation
+    if(!alreadyReconciled && (task.loaded || snapshot.owner || snapshot.selection) && (!owner?.controller || owner.generation!==selected.generation)) {
+      throw new Error('后台停止未完成：旧后台归属记录缺失或已过期。')
+    }
     const cleanup=await readJson(path.join(serviceHome,'cleanup-result.json'))
     budget.signal.throwIfAborted()
     const acknowledgedCleanup=cleanup?.generation===selected.generation && cleanup?.pid===owner?.controller?.pid
@@ -391,7 +440,7 @@ export function createWindowsServiceManager({
     budget.signal.throwIfAborted()
     await fs.rm(paths.readinessFile, { force: true })
     return { stopped: true, wasLoaded: Boolean(task.loaded) }
-    }, {timeoutMs:stopTimeoutMs})
+    }, {timeoutMs:stopTimeoutMs}).catch(recoverMissingState)
   }
   async function startUnlocked(bindingIds = [], options = {}) {
     const finish = startupProgress('正在启动后台服务')

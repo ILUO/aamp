@@ -278,3 +278,54 @@ test('recovery receipt does not override explicit service cleanup failure',async
  await fs.writeFile(path.join(manager.paths.serviceHome,'cleanup-result.json'),JSON.stringify({generation:'g1',pid:102,ok:false}))
  await assert.rejects(manager.stop(),/控制器未能清理全部进程/)
 })
+
+for(const state of ['missing','failed','stale-owner','missing-owner']) {
+ test(`stop automatically reconciles ${state} history when scans prove no residual process`,async t=>{
+  let disabled=false,scans=0
+  const {manager,identities}=await fixture(t,{
+   scheduler:async action=>{if(action==='disable')disabled=true;return {loaded:!disabled,enabled:!disabled,state:disabled?'Disabled':'Ready'}},
+   scanProcesses:async()=>{scans++;return []},
+  })
+  identities.clear()
+  const cleanup=path.join(manager.paths.serviceHome,'cleanup-result.json')
+  await fs.rm(cleanup)
+  if(state==='failed')await fs.writeFile(cleanup,JSON.stringify({generation:'g1',pid:102,ok:false}))
+  if(state==='stale-owner') {
+   const owner=JSON.parse(await fs.readFile(manager.paths.ownerFile));owner.generation='old'
+   await fs.writeFile(manager.paths.ownerFile,JSON.stringify(owner))
+  }
+  if(state==='missing-owner')await fs.rm(manager.paths.ownerFile)
+  assert.equal((await manager.stop()).stopped,true)
+  assert.equal(scans,2)
+  const proof=JSON.parse(await fs.readFile(path.join(manager.paths.serviceHome,'stale-recovery-result.json')))
+  assert.equal(proof.method,'verified-process-scan');assert.equal(proof.generation,'g1')
+  assert.ok(await fs.stat(proof.backup))
+  assert.equal(await fs.stat(manager.paths.ownerFile).then(()=>true,()=>false),false)
+  assert.equal((await manager.stop()).stopped,true)
+ })
+}
+
+test('start continues to readiness in the same command after reconciling missing history',async t=>{
+ let disabled=false,started=false,manager,identities
+ const setup=await fixture(t,{
+  scanProcesses:async()=>[],
+  scheduler:async action=>{
+   if(action==='disable')disabled=true
+   if(action==='start') {
+    started=true;disabled=false
+    const config=JSON.parse(await fs.readFile(manager.paths.configFile))
+    const worker={pid:201,startedAt:'2026-10-26T00:00:00Z',executablePath:process.execPath,ownerSid:'S-1-5-21-1'}
+    const controller={...worker,pid:202}
+    identities.set(201,worker);identities.set(202,controller)
+    await fs.writeFile(manager.paths.ownerFile,JSON.stringify({generation:config.generation,worker,controller}))
+    await fs.writeFile(manager.paths.readinessFile,JSON.stringify({version:1,state:'ready',generation:config.generation,pid:202,binding_ids:['b1']}))
+   }
+   return {loaded:!disabled,enabled:!disabled,state:disabled?'Disabled':started?'Running':'Ready'}
+  },
+ })
+ manager=setup.manager;identities=setup.identities
+ identities.clear();await fs.rm(path.join(manager.paths.serviceHome,'cleanup-result.json'))
+ const result=await manager.start(['b1'])
+ assert.equal(result.ready,true);assert.equal(result.pid,202)
+ assert.deepEqual(await manager.selection(),['b1'])
+})

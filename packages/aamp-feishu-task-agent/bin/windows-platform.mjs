@@ -119,6 +119,69 @@ function Read-VerifiedSnapshot($snapshot) {
 `
 
 const POWERSHELL_SCRIPTS = Object.freeze({
+  'stop-recovery-process': POWERSHELL_PREAMBLE + POWERSHELL_SNAPSHOT_OWNER + String.raw`
+$id=$config.identity
+$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if ($config.sid -ne $sid -or $id.ownerSid -ne $sid) { throw 'Recovery user identity mismatch' }
+$p=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$id.pid)
+if ($null -ne $p) {
+ if ($p.CreationDate.ToUniversalTime() -gt [DateTime]::Parse($id.startedAt).ToUniversalTime()) { @{stopped=$true}|ConvertTo-Json -Compress;return }
+ $v=Read-VerifiedSnapshot $p
+ if ($null -ne $v) {
+  if ($v.owner.Sid -ne $sid -or $v.executablePath -ine $id.executablePath -or
+      $v.process.CreationDate.ToUniversalTime() -ne [DateTime]::Parse($id.startedAt).ToUniversalTime()) { throw 'Recovery process identity changed' }
+  & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID ([string]$id.pid) /T /F | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Recovery taskkill failed' }
+  $after=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$id.pid)
+  if ($null -ne $after -and $after.CreationDate -eq $v.process.CreationDate) { throw 'Recovery process remains alive' }
+ }
+}
+@{stopped=$true}|ConvertTo-Json -Compress
+`,
+  'scan-recovery-processes': POWERSHELL_PREAMBLE + POWERSHELL_SNAPSHOT_OWNER + String.raw`
+if ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $config.sid) { throw 'Recovery user identity mismatch' }
+if (-not ('AampRecoveryArgv' -as [type])) { Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AampRecoveryArgv {
+ [DllImport("shell32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr CommandLineToArgvW(string command,out int count);
+ [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+ public static string[] Parse(string command) {
+  int count;IntPtr memory=CommandLineToArgvW(command,out count);
+  if(memory==IntPtr.Zero)throw new System.ComponentModel.Win32Exception();
+  try {var args=new string[count];for(int i=0;i<count;i++)args[i]=Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory,i*IntPtr.Size));return args;}
+  finally {LocalFree(memory);}
+ }
+}
+'@
+}
+$items=@()
+$all=@(Get-CimInstance -ClassName Win32_Process)
+$selected=[Collections.Generic.HashSet[int]]::new()
+foreach($record in @($config.recorded)) {if($null -ne $record -and $record.ownerSid -eq $config.sid){[void]$selected.Add([int]$record.pid)}}
+foreach($p in $all) {
+ if ($p.Name -match '^(node|cmd|wscript|cscript|powershell|pwsh|codex|codebuddy|cbc|coco|traecli|traex|trae-agent|ta|aime|acpx|cursor|agent)\.exe$' -or
+     [string]$p.CommandLine -match '(feishu-task-agent|windows-service-worker|aamp-(acp|feishu)-bridge)') { [void]$selected.Add([int]$p.ProcessId) }
+}
+do {
+ $changed=$false
+ foreach($p in $all) {if($selected.Contains([int]$p.ParentProcessId) -and $selected.Add([int]$p.ProcessId)){$changed=$true}}
+} while($changed)
+foreach($snapshot in $all) {
+ if(-not $selected.Contains([int]$snapshot.ProcessId)){continue}
+ if ([int]$snapshot.ProcessId -le 4) { continue }
+ $owner=Read-VerifiedSnapshotOwner $snapshot
+ if ($null -eq $owner -or $owner.Sid -ne $config.sid) { continue }
+ $verified=Read-VerifiedSnapshot $snapshot
+ if ($null -eq $verified) { continue }
+ $p=$verified.process
+ if ([string]::IsNullOrWhiteSpace($p.CommandLine)) { throw 'Recovery process command line is unavailable' }
+ $items+=@{pid=[int]$p.ProcessId;parentPid=[int]$p.ParentProcessId;creationDate=$p.CreationDate.ToString('o');
+ commandLine=[string]$p.CommandLine;executablePath=[string]$verified.executablePath;ownerSid=[string]$verified.owner.Sid;
+ argv=@([AampRecoveryArgv]::Parse([string]$p.CommandLine))}
+}
+@{processes=@($items)}|ConvertTo-Json -Depth 5 -Compress
+`,
   'current-user-sid': POWERSHELL_PREAMBLE + String.raw`
 @{ ownerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } | ConvertTo-Json -Compress
 `,
@@ -616,3 +679,17 @@ export async function snapshotOwnedWindowsTrees(roots, {
   }))
   return result
 }
+
+// A complete current-user snapshot for the missing-history recovery path only.
+export async function scanWindowsRecoveryProcesses(sid,{signal,timeoutMs=30000,recorded=[],runPowerShell=runFixedPowerShell}={}) {
+  const value=await runPowerShell('scan-recovery-processes',{sid,recorded},{signal,timeoutMs})
+  if(!Array.isArray(value?.processes))throw new Error('Windows recovery process scan is incomplete')
+  return value.processes.map(p=>({...normalizeListedIdentity(p),argv:p.argv}))
+}
+
+// The elevated helper may execute only these two fixed operations; never a file
+// or an arbitrary command supplied through the recovery pipe.
+export const WINDOWS_RECOVERY_SCRIPTS=Object.freeze({
+  scan:POWERSHELL_SCRIPTS['scan-recovery-processes'],
+  stop:POWERSHELL_SCRIPTS['stop-recovery-process'],
+})
