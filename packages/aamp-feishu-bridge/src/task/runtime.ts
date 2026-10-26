@@ -3052,6 +3052,13 @@ export class FeishuTaskBridgeRuntime {
     if (isStreamExecutionSignal(steps)) {
       if (baseState.executionId) {
         await this.reportControlledExecutionState(aampTaskId, 'RUNNING')
+        try {
+          await this.markFeishuTaskInProgressOnce(aampTaskId, baseState, baseState.taskGuid)
+        } catch (error) {
+          if (error instanceof ControlledCallbackSuperseded) throw error
+          // 默认进度是展示兼容，失败不能中断实际执行；下次流事件仍可重试。
+          this.logger.log(`${formatTaskLogPrefix(baseState.taskGuid)} running progress write failed: ${formatUnknownError(error)}`, { taskId: aampTaskId })
+        }
       } else {
         await this.markFeishuTasksInProgressOnce(aampTaskId, baseState)
       }
@@ -4013,6 +4020,12 @@ export class FeishuTaskBridgeRuntime {
     const inFlightKey = `${aampTaskId}:${taskGuid}`
     if (this.feishuInProgressInFlight.has(inFlightKey)) return false
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
+    const canWriteProgress = (current: BridgeTaskState): boolean => !current.executionId || (
+      this.isCurrentControlledTask(current) && !current.stopRequested && !this.controlledStopInFlight.has(current.taskGuid)
+      && !['help_needed', 'completed', 'failed', 'cancelled'].includes(current.status)
+      && current.reportedExecutionState === 'RUNNING'
+    )
+    if (!canWriteProgress(latestTaskState)) return false
     if ((latestTaskState.feishuInProgressTaskIds ?? []).includes(taskGuid)) {
       return false
     }
@@ -4020,12 +4033,19 @@ export class FeishuTaskBridgeRuntime {
     this.feishuInProgressInFlight.add(inFlightKey)
     try {
       this.debugLog(`[feishu task ${taskGuid}] marking in progress for ${aampTaskId}`, { taskId: aampTaskId })
-      await this.feishu.markTaskInProgress(taskGuid, taskWriteContext(latestTaskState, taskGuid))
+      if (latestTaskState.executionId) {
+        // 受控状态只走反馈接口，这里仅恢复旧卡片依赖的执行进度文案。
+        await this.feishu.updateTaskProgress(taskGuid, '正在执行', taskWriteContext(latestTaskState, taskGuid))
+      } else {
+        await this.feishu.markTaskInProgress(taskGuid, taskWriteContext(latestTaskState, taskGuid))
+      }
 
-      const feishuInProgressTaskIds = new Set(latestTaskState.feishuInProgressTaskIds ?? [])
+      const current = this.state.tasks[aampTaskId]
+      if (!current || current.executionId !== latestTaskState.executionId || !canWriteProgress(current)) return false
+      const feishuInProgressTaskIds = new Set(current.feishuInProgressTaskIds ?? [])
       feishuInProgressTaskIds.add(taskGuid)
       this.updateTaskState(aampTaskId, {
-        ...latestTaskState,
+        ...current,
         feishuInProgressTaskIds: [...feishuInProgressTaskIds],
         updatedAt: new Date().toISOString(),
       })

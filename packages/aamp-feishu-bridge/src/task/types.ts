@@ -282,6 +282,7 @@ export interface FeishuTaskClient {
   appendTextDeliveries(taskGuid: string, urls: string[], context?: FeishuTaskWriteContext): Promise<void>
   uploadTaskDelivery(taskGuid: string, filePath: string, context?: FeishuTaskWriteContext): Promise<void>
   markTaskInProgress(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void>
+  updateTaskProgress(taskGuid: string, progress: string, context?: FeishuTaskWriteContext): Promise<void>
   completeTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void>
   markTaskWaitingForHuman(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void>
 }

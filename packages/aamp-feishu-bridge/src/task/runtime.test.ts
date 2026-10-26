@@ -194,6 +194,9 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   completeTaskErrors: Error[] = []
   blockTaskErrors: Record<string, Error[]> = {}
   blockTaskAttempts: string[] = []
+  progressWrites: Array<{ taskGuid: string; progress: string; executionId?: string }> = []
+  progressErrors: Error[] = []
+  progressHold?: Promise<void>
   getTaskBaseError?: Error
   getCommentError?: Error
   tasks: Record<string, FeishuTaskDetails> = {}
@@ -305,6 +308,14 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
 
   async markTaskInProgress(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.recordWrite('markTaskInProgress', taskGuid, context)
+  }
+
+  async updateTaskProgress(taskGuid: string, progress: string, context?: FeishuTaskWriteContext): Promise<void> {
+    this.recordWrite('updateTaskProgress', taskGuid, context)
+    this.progressWrites.push({ taskGuid, progress, executionId: context?.executionId })
+    await this.progressHold
+    const error = this.progressErrors.shift()
+    if (error) throw error
   }
 
   async completeTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
@@ -582,6 +593,7 @@ test('controlled human reply reuses execution and session with a fresh AAMP task
     f.aamp.emitStreamEvent('reply_progress', { taskId: f.childId, seq: 1, type: 'text.delta', payload: { text: '正在查询成都的天气' } })
     await waitFor(() => assert.deepEqual(f.feedback.states.map(({ state }) => state), [1]))
     await waitFor(() => assert.ok(f.feishu.steps.length > 0))
+    assert.deepEqual(f.feishu.progressWrites, [{ taskGuid: f.taskGuid, progress: '正在执行', executionId: f.executionId }])
     assert.equal(f.runtime.getStateSnapshot().tasks[f.rootId]?.reportedExecutionState, 'RUNNING')
     assert.equal(f.feedback.commands.length, 0)
     assert.ok(f.feishu.writes.every(({ executionId }) => executionId === f.executionId))
@@ -1397,7 +1409,12 @@ test('controlled stream progress reports RUNNING without using the legacy status
     await waitFor(() => assert.ok(aamp.streamHandlers.stream_progress))
     aamp.emitStreamEvent('stream_progress', { id: 'stream_event_1', taskId, seq: 1, type: 'text.delta', payload: { text: '已经开始执行' } })
     await waitFor(() => assert.deepEqual(feedback.states.map(({ state }) => state), [1]))
+    await waitFor(() => assert.deepEqual(feishu.progressWrites, [{ taskGuid: 'task_controlled_progress', progress: '正在执行', executionId: 'execution_1' }]))
+    aamp.emitStreamEvent('stream_progress', { id: 'stream_event_2', taskId, seq: 2, type: 'text.delta', payload: { text: '正在查询资料' } })
+    await waitFor(() => assert.ok(feishu.steps.some(({ step }) => step.content.includes('正在查询资料'))))
+    assert.equal(feishu.progressWrites.length, 1)
     await runtime.stop()
+    assert.equal(feishu.progressWrites.length, 1)
     assert.equal(feishu.writes.some(({ method }) => method === 'markTaskInProgress'), false)
     assert.ok(feishu.writes.filter(({ method }) => method === 'appendTaskSteps').every(({ executionId }) => executionId === 'execution_1'))
   } finally {
@@ -1430,6 +1447,106 @@ test('controlled help reports BLOCKED and keeps Task status changes on the feedb
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
   }
+})
+
+test('controlled running progress failure retries on the next stream without failing execution', async () => {
+  const f = await controlledReplyFixture()
+  try {
+    f.feishu.progressErrors.push(new Error('temporary progress write failure'))
+    await f.feishu.emit(f.event)
+    f.aamp.emitStreamOpened(f.childId, 'retry_progress')
+    await waitFor(() => assert.ok(f.aamp.streamHandlers.retry_progress))
+    f.aamp.emitStreamEvent('retry_progress', { taskId: f.childId, seq: 1, type: 'text.delta', payload: { text: '查询天气' } })
+    await waitFor(() => assert.equal(f.feishu.progressWrites.length, 1))
+    await waitFor(() => assert.ok(f.feishu.steps.length > 0))
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.childId]?.reportedExecutionState, 'RUNNING')
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.childId]?.feishuInProgressTaskIds, undefined)
+    assert.notEqual(f.runtime.getStateSnapshot().tasks[f.childId]?.status, 'failed')
+    f.aamp.emitStreamEvent('retry_progress', { taskId: f.childId, seq: 2, type: 'text.delta', payload: { text: '继续查询天气' } })
+    await waitFor(() => assert.deepEqual(f.runtime.getStateSnapshot().tasks[f.childId]?.feishuInProgressTaskIds, [f.taskGuid]))
+    assert.deepEqual(f.feishu.progressWrites, [
+      { taskGuid: f.taskGuid, progress: '正在执行', executionId: f.executionId },
+      { taskGuid: f.taskGuid, progress: '正在执行', executionId: f.executionId },
+    ])
+    assert.deepEqual(f.feedback.states.map(({ state }) => state), [1])
+    assert.equal(f.feishu.writes.some(({ method }) => method === 'markTaskInProgress'), false)
+  } finally { await f.cleanup() }
+})
+
+for (const change of ['stop', 'replace'] as const) {
+  test(`controlled running progress response cannot overwrite a newer ${change}`, async () => {
+    const f = await controlledReplyFixture()
+    let release!: () => void
+    f.feishu.progressHold = new Promise<void>((resolve) => { release = resolve })
+    try {
+      await f.feishu.emit(f.event)
+      f.aamp.emitStreamOpened(f.childId, 'pending_progress')
+      await waitFor(() => assert.ok(f.aamp.streamHandlers.pending_progress))
+      const lateStream = f.aamp.streamHandlers.pending_progress!.onEvent
+      f.aamp.emitStreamEvent('pending_progress', { taskId: f.childId, seq: 1, type: 'text.delta', payload: { text: '正在执行查询' } })
+      await waitFor(() => assert.equal(f.feishu.progressWrites.length, 1))
+      if (change === 'stop') {
+        await f.feishu.emit({ eventId: 'evt_stop_pending_progress', taskGuid: f.taskGuid,
+          eventTypes: ['task_agent_stop'], executionId: f.executionId, action: 'STOP' })
+      } else {
+        await f.feishu.emit({ eventId: 'evt_replace_pending_progress', taskGuid: f.taskGuid,
+          eventTypes: ['task_agent_start'], executionId: 'execution_new', action: 'START', timestamp: '1792138000000' })
+      }
+      release()
+      lateStream({ streamId: 'pending_progress', timestamp: new Date().toISOString(), taskId: f.childId,
+        seq: 2, type: 'text.delta', payload: { text: '迟到的执行进度' } })
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(f.feishu.progressWrites.length, 1)
+      await f.runtime.stop()
+      const saved = f.runtime.getStateSnapshot().tasks[f.childId]!
+      assert.equal(saved.feishuInProgressTaskIds, undefined)
+      assert.equal(f.feishu.progressWrites.length, 1)
+      if (change === 'stop') assert.equal(saved.stopRequested, true)
+      else assert.equal(saved.supersededByExecutionId, 'execution_new')
+      assert.deepEqual((await loadBridgeState(f.configDir)).tasks[f.childId], saved)
+    } finally { release(); await f.cleanup() }
+  })
+}
+
+test('controlled running progress ignores stream callbacks after completion', async () => {
+  const f = await controlledReplyFixture()
+  try {
+    await f.feishu.emit(f.event)
+    f.aamp.emitStreamOpened(f.childId, 'terminal_progress')
+    await waitFor(() => assert.ok(f.aamp.streamHandlers.terminal_progress))
+    f.aamp.emitResult(f.childId, { output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"完成","reply_written":false}' })
+    await waitFor(() => assert.equal(f.runtime.getStateSnapshot().tasks[f.childId]?.status, 'completed'))
+    f.aamp.emitStreamEvent('terminal_progress', { taskId: f.childId, seq: 1, type: 'text.delta', payload: { text: '迟到执行进度' } })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(f.feishu.progressWrites, [])
+    assert.equal(f.runtime.getStateSnapshot().tasks[f.childId]?.status, 'completed')
+  } finally { await f.cleanup() }
+})
+
+test('legacy stream progress still uses the legacy status patch once', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-legacy-progress-'))
+  const aamp = new FakeAampClient()
+  const feishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu,
+    logger: { log: () => {}, error: () => {} }, streamStepFlushIntervalMs: 1,
+  })
+  const taskId = 'feishu-task-legacy_progress-evt_legacy_progress'
+  try {
+    await runtime.start()
+    await feishu.emit({ eventId: 'evt_legacy_progress', taskGuid: 'legacy_progress', eventTypes: ['task_create'] })
+    aamp.emitStreamOpened(taskId, 'legacy_progress')
+    await waitFor(() => assert.ok(aamp.streamHandlers.legacy_progress))
+    for (const seq of [1, 2]) aamp.emitStreamEvent('legacy_progress', {
+      taskId, seq, type: 'text.delta', payload: { text: `执行进度 ${seq}` },
+    })
+    await waitFor(() => assert.ok(feishu.steps.some(({ step }) => step.content.includes('执行进度 2'))))
+    await runtime.stop()
+    assert.deepEqual(feishu.writes.filter(({ method }) => method === 'markTaskInProgress'), [
+      { method: 'markTaskInProgress', taskGuid: 'legacy_progress', executionId: undefined },
+    ])
+    assert.deepEqual(feishu.progressWrites, [])
+  } finally { await runtime.stop(); await rm(configDir, { recursive: true, force: true }) }
 })
 
 test('controlled completed and cancelled results report terminal state without legacy status completion', async () => {

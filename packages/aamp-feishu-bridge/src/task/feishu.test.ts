@@ -31,11 +31,17 @@ async function taskSubscriptionHttpFixture(responses: Array<{ status?: number; b
   const address = server.address()
   assert.ok(address && typeof address !== 'string')
   const logs: string[] = []
+  const origin = `http://127.0.0.1:${address.port}`
   const client = new OapiFeishuTaskClient({
-    appId: 'cli_subscription_test', appSecret: 'subscription-test-secret',
-    domain: `http://127.0.0.1:${address.port}`, headers: { 'x-tt-env': 'ppe_subscription_test' }, eventNames: [],
+    appId: 'cli_subscription_test', appSecret: 'subscription-test-secret', userIdType: 'open_id',
+    domain: origin, headers: { 'x-tt-env': 'ppe_subscription_test' }, eventNames: [],
   }, { logger: { log: (message) => logs.push(message), error: (message) => logs.push(message) },
     retryBaseDelayMs: 0, retryMaxAttempts: 2 })
+  // SDK 将域名里的端口也当作路径占位符；仅在传输层转到本地端口，保留真实请求编码。
+  const raw = (client as unknown as { client: { domain: string; httpInstance: { request: (request: { url: string }) => Promise<unknown> } } }).client
+  const http = raw.httpInstance
+  raw.domain = 'http://127.0.0.1'
+  raw.httpInstance = { ...http, request: (payload) => http.request({ ...payload, url: payload.url.replace('http://127.0.0.1', origin) }) }
   return { client, requests, logs, close: async () => {
     server.closeAllConnections()
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
@@ -80,6 +86,33 @@ test('Task subscription retries HTTP 503 then accepts code zero using the existi
         authorization: 'Bearer subscription-test-token', env: 'ppe_subscription_test', body: '{}',
       })
     }
+  } finally { await f.close() }
+})
+
+test('controlled running progress patches only progress with the current execution ID over HTTP', async () => {
+  const f = await taskSubscriptionHttpFixture([{ body: { code: 0, data: {} } }])
+  try {
+    await f.client.updateTaskProgress('task_progress', '正在执行', { executionId: 'execution_progress' })
+    assert.equal(f.requests.length, 1)
+    const request = f.requests[0]!
+    assert.equal(request.method, 'PATCH')
+    assert.equal(request.url, '/open-apis/task/v2/tasks/task_progress?user_id_type=open_id')
+    assert.equal(request.authorization, 'Bearer subscription-test-token')
+    assert.equal(request.env, 'ppe_subscription_test')
+    assert.deepEqual(JSON.parse(request.body), {
+      task: { agent_task_progress: '正在执行' },
+      update_fields: ['agent_task_progress'],
+      execution_id: 'execution_progress',
+    })
+  } finally { await f.close() }
+})
+
+test('controlled running progress rejects business failure instead of recording a successful write', async () => {
+  const f = await taskSubscriptionHttpFixture([{ body: { code: 1254301, msg: 'private progress response' } }])
+  try {
+    await assert.rejects(f.client.updateTaskProgress('task_progress', '正在执行', { executionId: 'execution_progress' }), /API code 1254301/)
+    assert.equal(f.requests.length, 1)
+    assert.doesNotMatch(f.logs.join('\n'), /private progress response/)
   } finally { await f.close() }
 })
 

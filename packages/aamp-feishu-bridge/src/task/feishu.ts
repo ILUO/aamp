@@ -707,6 +707,21 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     await this.patchV2AgentTaskStatus(taskGuid, 2, '正在执行', context)
   }
 
+  async updateTaskProgress(taskGuid: string, progress: string, context?: FeishuTaskWriteContext): Promise<void> {
+    const response = await withRetry(() => this.client.task.v2.task.patch({
+      path: { task_guid: taskGuid },
+      params: { user_id_type: this.config.userIdType },
+      data: {
+        task: { agent_task_progress: progress },
+        update_fields: ['agent_task_progress'],
+        ...executionIdData(context),
+      } as never,
+    }), this.retry, this.logger, `task.patch agent_task_progress task=${taskGuid}`)
+    const code = getNumber(asRecord(response)?.code)
+    if (code === undefined) throw new Error('Task progress response is missing API code')
+    if (code !== 0) throw new Error(`Task progress failed with API code ${code}`)
+  }
+
   async markTaskWaitingForHuman(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] block via v2 agent_task_status`)
     await this.patchV2AgentTaskStatus(taskGuid, 3, '待确认', context)
