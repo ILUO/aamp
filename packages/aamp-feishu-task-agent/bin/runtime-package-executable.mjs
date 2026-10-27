@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
+import {recoverPackageCache} from './runtime-recovery-cache.mjs'
 
 export async function withExecutableProbeDeadline(promise, {timeoutMs, label, onTimeout}) {
   if (!timeoutMs) return promise
@@ -279,6 +279,7 @@ export function createPackageExecutableLauncher({
   platform = process.platform,
   cacheDir,
   onCacheRecovery = () => {},
+  checkCancelled = () => {},
   validate = async () => {},
 } = {}) {
   if (typeof materialize !== 'function') throw new Error('materialize must be a function')
@@ -298,20 +299,21 @@ export function createPackageExecutableLauncher({
         return descriptor
       }
       let value
+      const isDamaged = (error, directory) => {
+        const missingEntry = String(error.stderr || '').split(/\r?\n/)
+          .includes(`unable to resolve npm executable shim: ${executable}`)
+        return (error.code === 78 && missingEntry) || isMissingCachedModule(error, directory, platform)
+      }
       try {
         value = await prepare(context)
       } catch (error) {
         // Only our resolver's explicit missing-entry result permits recovery.
         // Do not retry npm download/auth failures, cancellation, or business code.
-        const missingEntry = String(error.stderr || '').split(/\r?\n/)
-          .includes(`unable to resolve npm executable shim: ${executable}`)
-        if (!cacheDir || !((error.code === 78 && missingEntry) || isMissingCachedModule(error, cacheDir, platform))) throw error
-        // Keep the old tree intact: another running bridge may still use it.
-        // A stable per-spec recovery cache is reused across subsequent starts.
-        const key = createHash('sha256').update(packageSpec).digest('hex')
-        const npmCacheDir = path.join(cacheDir, '_aamp-recovery-v1', key)
-        await onCacheRecovery({ packageSpec, executable, npmCacheDir })
-        value = await prepare({ ...context, npmCacheDir })
+        if (!cacheDir || !isDamaged(error, cacheDir)) throw error
+        value = await recoverPackageCache({cacheDir,packageSpec,signal:context.signal,isDamaged,checkCancelled,
+          prepare:npmCacheDir=>prepare({...context,npmCacheDir}),
+          onRecovery:npmCacheDir=>onCacheRecovery({packageSpec,executable,npmCacheDir}),
+        })
       }
       return validatePreparedExecutable(value, executable)
     })

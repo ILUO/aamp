@@ -1671,6 +1671,7 @@ async function runNpmExecCapture(packageSpec, executable, args, options = {}) {
 
 const packageExecutableLauncher = createPackageExecutableLauncher({
   cacheDir: NPM_CACHE_DIR,
+  checkCancelled: throwIfStopping,
   onCacheRecovery: ({ packageSpec }) => {
     throwIfStopping();
     console.log(`[aamp-one-click] ${packageSpec}：执行入口或依赖文件缺失，正在使用独立缓存重新准备（仅重试一次）...`);

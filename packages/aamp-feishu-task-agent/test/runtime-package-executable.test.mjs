@@ -6,6 +6,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { promisify } from 'node:util'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   createPackageExecutableLauncher,
   npmExecutableResolverArgs,
@@ -16,6 +17,48 @@ import {
 } from '../bin/runtime-package-executable.mjs'
 
 const execFileAsync = promisify(execFile)
+
+test('damaged default and legacy recovery caches rebuild once in a fresh directory', async()=>{
+ const root=await fsp.mkdtemp(path.join(os.tmpdir(),'aamp-double-cache-'))
+ const cacheDir=path.join(root,'cache')
+ try {
+  const pkg=path.join(root,'package')
+  await writePackage(pkg,{name:'fixture-double-bridge',version:'1.0.0',bin:{'fixture-double-bridge':'bin/run.mjs'}},
+   {'run.mjs':'#!/usr/bin/env node\nconsole.log("healthy")\n'})
+  const packed=JSON.parse((await npmRun(['pack','--json','--pack-destination',root,pkg],{timeout:15000})).stdout)
+  const spec=path.join(root,packed[0].filename)
+  const legacy=path.join(cacheDir,'_aamp-recovery-v1',createHash('sha256').update(spec).digest('hex'))
+  const broken=new Map()
+  for(const dir of [cacheDir,legacy]) {
+   const descriptor=await npmMaterialize(spec,'fixture-double-bridge',dir)
+   const binDir=path.dirname(descriptor.command)
+   await fsp.unlink(path.join(binDir,'..','fixture-double-bridge','bin','run.mjs'))
+   broken.set(dir,descriptor)
+  }
+  let builds=0
+  const launcher=createPackageExecutableLauncher({cacheDir,
+   materialize:async(s,e,context)=>{
+    const dir=context.npmCacheDir||cacheDir
+    if(broken.has(dir)) {
+     const env={...process.env}
+     for(const key of Object.keys(env))if(key.toLowerCase()==='path')delete env[key]
+     env[process.platform==='win32'?'Path':'PATH']=path.dirname(broken.get(dir).command)
+     const {stdout}=await execFileAsync(process.execPath,npmExecutableResolverArgs(e),{env,timeout:10000})
+     return parseResolvedPackageExecutable(stdout,e)
+    }
+    builds++;return npmMaterialize(s,e,dir)
+   },
+   validate:async descriptor=>{
+    const entry=path.join(path.dirname(descriptor.command),'..','fixture-double-bridge','bin','run.mjs')
+    assert.equal((await execFileAsync(process.execPath,[entry],{timeout:10000})).stdout.trim(),'healthy')
+   },
+  })
+  const result=await launcher.resolve(spec,'fixture-double-bridge')
+  assert.equal(builds,1)
+  for(const descriptor of broken.values())assert.notEqual(result.command,descriptor.command)
+  for(const descriptor of broken.values())assert.ok(await fsp.stat(path.join(path.dirname(descriptor.command),'..','fixture-double-bridge','package.json')))
+ } finally {await fsp.rm(root,{recursive:true,force:true})}
+})
 
 test('missing dependency in a real-path cache is recognized through a directory alias', async () => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aamp-cache-alias-'))
@@ -103,7 +146,7 @@ test('damaged npm cache is recovered once without deleting old files, and recove
     const launcher = makeLauncher()
     const descriptor = await launcher.resolve(spec, 'fixture-recovery-bridge')
     const result = await collectOutput(launcher.launchPrepared({ preparedExecutable: descriptor, spawnOptions: { stdio: ['ignore', 'pipe', 'pipe'] } }))()
-    assert.equal(result.code, 0)
+    assert.equal(result.code, 0, result.stderr)
     assert.equal(result.stdout.trim(), 'recovered')
     assert.notEqual(path.dirname(descriptor.command), binDir)
     assert.equal(await fsp.readFile(path.join(binDir, '..', 'fixture-recovery-bridge', 'package.json'), 'utf8').then(() => true), true)
