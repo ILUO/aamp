@@ -75,6 +75,12 @@ export async function confirmWindowsProcessRecovery(directory, controller, persi
   })
 }
 
+// A missing receipt is not permission to discard a still-pending registered journal.
+export async function hasPendingWindowsProcessJournal(directory, controller, {signal} = {}) {
+  const file=journalPath(directory,controller)
+  return withRecoveryLock(file,signal,()=>fsp.stat(file).then(()=>true,error=>{if(error.code==='ENOENT')return false;throw error}))
+}
+
 export async function createWindowsProcessJournal(directory, controller, {
   ensurePrivateDirectory = async (target) => (await platform()).ensurePrivateWindowsDirectory(target),
   atomicReplace = async (source, destination) => (await platform()).atomicReplaceWindows(source, destination),

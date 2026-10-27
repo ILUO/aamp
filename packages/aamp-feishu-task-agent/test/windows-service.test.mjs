@@ -85,8 +85,8 @@ async function fixture(t, overrides={}) {
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-service-'));
   t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const identities=new Map([[101,{pid:101,startedAt:'2026-09-07T00:00:00.000Z',ownerSid:'S-1-5-21-1',executablePath:process.execPath,command:'node worker'}],[102,{pid:102,startedAt:'2026-09-07T00:00:01.000Z',ownerSid:'S-1-5-21-1',executablePath:process.execPath,command:'node controller'}]]);
-  const calls=[];
-  const manager=mod.createWindowsServiceManager({runtimeHome:root,controllerPath:'controller',workerPath:'worker',currentSid:async()=>'S-1-5-21-1',readIdentity:async pid=>identities.get(pid),ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),scheduler:async action=>{calls.push(action);return {loaded:true,state:identities.size ? 'Running' : 'Ready',ownerSid:'S-1-5-21-1'};},stopTree:async identity=>{identities.delete(identity.pid);},wait:async()=>{},stopAttempts:1,startupAttempts:1,...overrides});
+  const calls=[];let disabled=false;
+  const manager=mod.createWindowsServiceManager({runtimeHome:root,controllerPath:'controller',workerPath:'worker',currentSid:async()=>'S-1-5-21-1',readIdentity:async pid=>identities.get(pid),ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),scheduler:async action=>{calls.push(action);if(action==='disable')disabled=true;return {loaded:!disabled,enabled:!disabled,state:identities.size ? 'Running' : 'Ready',ownerSid:'S-1-5-21-1'};},stopTree:async identity=>{identities.delete(identity.pid);},wait:async()=>{},stopAttempts:1,startupAttempts:1,...overrides});
   await fs.mkdir(manager.paths.serviceHome,{recursive:true});
   await fs.writeFile(manager.paths.selectionFile,JSON.stringify({version:1,generation:'g1',binding_ids:['b1']}));
   await fs.writeFile(manager.paths.ownerFile,JSON.stringify({generation:'g1',worker:identities.get(101),controller:identities.get(102)}));
@@ -198,9 +198,10 @@ test('background config preserves explicit preparation policies and proxies but 
   assert.ok(progress.some(message=>message.includes('等待智能体')))
 })
 
-test('stop refuses success when controller reports incomplete cleanup',async t=>{
- const {manager}=await fixture(t)
- await fs.writeFile(path.join(manager.paths.serviceHome,'cleanup-result.json'),JSON.stringify({generation:'g1',pid:102,ok:false}))
+test('stop preserves a newly reported controller cleanup failure',async t=>{
+ let manager,identities
+ const setup=await fixture(t,{stopTree:async identity=>{identities.delete(identity.pid);await fs.writeFile(path.join(manager.paths.serviceHome,'cleanup-result.json'),JSON.stringify({generation:'g1',pid:102,ok:false}))}})
+ manager=setup.manager;identities=setup.identities
  await assert.rejects(manager.stop(),/停止未完成/)
 })
 
@@ -216,10 +217,10 @@ test('outer stop deadline cancels a stuck identity query',async t=>{
  await assert.rejects(manager.stop(),/停止未完成/);assert.equal(cancelled,true)
 })
 
-test('stop refuses success without acknowledgement or recoverable journal',async t=>{
+test('stop clears missing historical confirmation after checking registered processes',async t=>{
  const {manager}=await fixture(t)
  await fs.rm(path.join(manager.paths.serviceHome,'cleanup-result.json'))
- await assert.rejects(manager.stop(),/缺少控制器清理确认/)
+ assert.equal((await manager.stop()).stopped,true)
 })
 
 test('legacy journal recovery remains stoppable on a second call',async t=>{
@@ -264,11 +265,11 @@ test('stale owner cannot use a different restart controller recovery receipt',as
  await fs.rm(path.join(manager.paths.serviceHome,'cleanup-result.json'))
  identities.clear()
  await recoverWindowsProcessJournals(directory,{readIdentity:async()=>undefined,stopTree:async()=>{}})
- await assert.rejects(manager.stop(),/缺少控制器清理确认/)
- await assert.rejects(manager.stop(),/缺少控制器清理确认/)
+ assert.equal((await manager.stop()).stopped,true)
+ assert.equal((await manager.stop()).stopped,true)
 })
 
-test('recovery receipt does not override explicit service cleanup failure',async t=>{
+test('historical cleanup failure is retired after registered cleanup',async t=>{
  const {manager,identities}=await fixture(t)
  const directory=path.join(path.dirname(manager.paths.serviceHome),'windows-process-journals-v1')
  const {createWindowsProcessJournal,recoverWindowsProcessJournals}=await import('../bin/windows-process-journal.mjs')
@@ -276,15 +277,14 @@ test('recovery receipt does not override explicit service cleanup failure',async
  identities.clear()
  await recoverWindowsProcessJournals(directory,{readIdentity:async()=>undefined,stopTree:async()=>{}})
  await fs.writeFile(path.join(manager.paths.serviceHome,'cleanup-result.json'),JSON.stringify({generation:'g1',pid:102,ok:false}))
- await assert.rejects(manager.stop(),/控制器未能清理全部进程/)
+ assert.equal((await manager.stop()).stopped,true)
 })
 
 for(const state of ['missing','failed','stale-owner','missing-owner']) {
- test(`stop automatically reconciles ${state} history when scans prove no residual process`,async t=>{
-  let disabled=false,scans=0
+ test(`stop automatically reconciles ${state} history without scanning unregistered processes`,async t=>{
+  let disabled=false
   const {manager,identities}=await fixture(t,{
    scheduler:async action=>{if(action==='disable')disabled=true;return {loaded:!disabled,enabled:!disabled,state:disabled?'Disabled':'Ready'}},
-   scanProcesses:async()=>{scans++;return []},
   })
   identities.clear()
   const cleanup=path.join(manager.paths.serviceHome,'cleanup-result.json')
@@ -296,9 +296,8 @@ for(const state of ['missing','failed','stale-owner','missing-owner']) {
   }
   if(state==='missing-owner')await fs.rm(manager.paths.ownerFile)
   assert.equal((await manager.stop()).stopped,true)
-  assert.equal(scans,2)
   const proof=JSON.parse(await fs.readFile(path.join(manager.paths.serviceHome,'stale-recovery-result.json')))
-  assert.equal(proof.method,'verified-process-scan');assert.equal(proof.generation,'g1')
+  assert.equal(proof.method,'registered-processes-only');assert.equal(proof.unregisteredProcessesChecked,false);assert.equal(proof.generation,'g1')
   assert.ok(await fs.stat(proof.backup))
   assert.equal(await fs.stat(manager.paths.ownerFile).then(()=>true,()=>false),false)
   assert.equal((await manager.stop()).stopped,true)
@@ -308,7 +307,6 @@ for(const state of ['missing','failed','stale-owner','missing-owner']) {
 test('start continues to readiness in the same command after reconciling missing history',async t=>{
  let disabled=false,started=false,manager,identities
  const setup=await fixture(t,{
-  scanProcesses:async()=>[],
   scheduler:async action=>{
    if(action==='disable')disabled=true
    if(action==='start') {
@@ -329,3 +327,48 @@ test('start continues to readiness in the same command after reconciling missing
  assert.equal(result.ready,true);assert.equal(result.pid,202)
  assert.deepEqual(await manager.selection(),['b1'])
 })
+
+for(const failure of ['query denied','query timeout','identity conflict','stop failed','write failed']) {
+ test(`registered cleanup preserves ${failure} and old state`,async t=>{
+  const setup=await fixture(t,{
+   ...(failure.startsWith('query')?{readIdentity:async()=>{throw new Error(failure)}}:{}),
+   ...(failure==='stop failed'?{stopTree:async()=>{throw new Error(failure)}}:{}),
+  })
+  const {manager,identities}=setup
+  if(failure==='identity conflict')identities.set(102,{...identities.get(102),startedAt:'2026-10-27T00:00:00Z'})
+  if(failure==='write failed')await fs.mkdir(manager.paths.stopFile)
+  await assert.rejects(manager.stop())
+  assert.ok(await fs.stat(manager.paths.ownerFile))
+  assert.equal(await fs.stat(path.join(manager.paths.serviceHome,'stale-recovery-result.json')).then(()=>true,()=>false),false)
+ })
+}
+
+ test('stale generation still cleans registered live processes',async t=>{
+  const {manager,identities}=await fixture(t)
+  const owner=JSON.parse(await fs.readFile(manager.paths.ownerFile));owner.generation='old'
+  await fs.writeFile(manager.paths.ownerFile,JSON.stringify(owner))
+  assert.equal((await manager.stop()).stopped,true)
+  assert.equal(identities.size,0)
+ })
+
+ test('failed registered descendant cleanup cannot retire old state',async t=>{
+  const {manager,identities}=await fixture(t,{stopTree:async()=>{throw new Error('registered descendant denied')}})
+  const controller=identities.get(102),child={...controller,pid:301}
+  const {createWindowsProcessJournal}=await import('../bin/windows-process-journal.mjs')
+  const journal=await createWindowsProcessJournal(path.join(path.dirname(manager.paths.serviceHome),'windows-process-journals-v1'),controller,{ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),atomicReplace:fs.rename})
+  await journal.record([child]);identities.clear()
+  await fs.rm(path.join(manager.paths.serviceHome,'cleanup-result.json'))
+  await assert.rejects(manager.stop(),/registered descendant denied/)
+  assert.ok(await fs.stat(journal.file));assert.ok(await fs.stat(manager.paths.ownerFile))
+ })
+
+ test('pending registered journal cannot be discarded when recovery finds a live controller',async t=>{
+  let controller,queries=0
+  const {manager,identities}=await fixture(t,{readIdentity:async pid=>pid===102 && ++queries>2?controller:undefined})
+  controller=identities.get(102)
+  const {createWindowsProcessJournal}=await import('../bin/windows-process-journal.mjs')
+  const journal=await createWindowsProcessJournal(path.join(path.dirname(manager.paths.serviceHome),'windows-process-journals-v1'),controller,{ensurePrivateDirectory:dir=>fs.mkdir(dir,{recursive:true}),atomicReplace:fs.rename})
+  identities.clear();await fs.rm(path.join(manager.paths.serviceHome,'cleanup-result.json'))
+  await assert.rejects(manager.stop(),/已登记的进程记录尚未完成清理/)
+  assert.ok(await fs.stat(journal.file));assert.ok(await fs.stat(manager.paths.ownerFile))
+ })

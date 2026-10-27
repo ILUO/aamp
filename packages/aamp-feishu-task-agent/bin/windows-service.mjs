@@ -1,5 +1,4 @@
-import {recoverStaleWindowsProcesses} from './windows-stale-recovery.mjs'
-import {recoverWindowsProcessJournals, confirmWindowsProcessRecovery} from './windows-process-journal.mjs'
+import {recoverWindowsProcessJournals, confirmWindowsProcessRecovery, hasPendingWindowsProcessJournal} from './windows-process-journal.mjs'
 import {withWindowsCleanupDeadline} from './windows-process-cleanup.mjs'
 import {taskCommand, globalInstallHint} from './platform-hints.mjs'
 import { withWindowsOperationLock } from './windows-operation-lock.mjs'
@@ -213,8 +212,6 @@ export function createWindowsServiceManager({
   stopAttempts = 600,
   stopTimeoutMs = 75000,
   stopGraceMs = 60000,
-  scanProcesses,
-  recoverStale = recoverStaleWindowsProcesses,
 } = {}) {
   if (!runtimeHome) throw new Error('Windows service runtimeHome is required')
   const serviceHome = path.join(runtimeHome, 'windows-service-v1')
@@ -320,6 +317,9 @@ export function createWindowsServiceManager({
     })
   }
   async function stopUnlocked() {
+    const cleanupFile=path.join(serviceHome,'cleanup-result.json')
+    const cleanupStamp=async()=>fs.stat(cleanupFile,{bigint:true}).then(stat=>`${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`,error=>{if(error.code==='ENOENT')return '';throw error})
+    const initialCleanupStamp=await cleanupStamp()
     const c = await config()
     const task = await scheduler('status', c)
     await scheduler('disable', c)
@@ -332,47 +332,28 @@ export function createWindowsServiceManager({
       const state=await scheduler('status',c,budget.options())
       if((state.enabled ?? state.loaded) || (requireStopped && String(state.state).toLowerCase()==='running'))throw new Error('Windows background task is still active during recovery')
     }
-    const recoverMissingState=async(originalError)=>withWindowsCleanupDeadline(async budget=>{
-      onProgress('旧后台状态不完整，正在核查并清理实际残留进程...')
+    const clearHistoricalState=async(budget)=>{
+      await verifySnapshot(budget,true)
       const backup=path.join(serviceHome,'recovery-backups',randomUUID(),'state.json')
-      await writeJson(backup,{...snapshot,cleanup:await readJson(path.join(serviceHome,'cleanup-result.json'))})
-      const recorded=[snapshot.owner?.worker,snapshot.owner?.controller].filter(Boolean)
-      const journalDirectory=path.join(runtimeHome,'windows-process-journals-v1')
-      for(const name of await fs.readdir(journalDirectory).catch(error=>{if(error.code==='ENOENT')return [];throw error})) {
-        if(!/^controller-.*\.json$/.test(name))continue
-        const journal=await readJson(path.join(journalDirectory,name))
-        if(journal?.version===1 && snapshot.owner?.controller && sameIdentity(journal.controller,snapshot.owner.controller,c.sid)) {
-          if(!Array.isArray(journal.descendants))throw new Error('Windows recovery journal is incomplete')
-          recorded.push(...journal.descendants)
-        }
-      }
-      const result=await recoverStale({sid:c.sid,runtimeHome,controllerPath,workerPath,recorded,protectedPids:[process.pid],allowPermissionRepair:c.allowPermissionRepair}, {
-        ...(scanProcesses ? {scan:scanProcesses} : {}),
-        stop:(identity,options)=>stopTree(identity,{...options,...budget.options()}),
-        validate:()=>verifySnapshot(budget),onProgress,...budget.options(),
-      })
+      await writeJson(backup,{...snapshot,cleanup:await readJson(cleanupFile),readiness:await readJson(paths.readinessFile),workerState:await readJson(paths.stateFile)})
       await verifySnapshot(budget,true)
-      // Persist a distinct audit record before discarding any stale state. This
-      // is an observed empty runtime, not a fabricated journal acknowledgement.
       await writeJson(path.join(serviceHome,'stale-recovery-result.json'),{version:1,generation:snapshot.selection?.generation || '',
-        controller:snapshot.owner?.controller,method:'verified-process-scan',cleaned:result.cleaned,backup,completedAt:new Date().toISOString()})
-      await verifySnapshot(budget,true)
-      await fs.rm(paths.ownerFile,{force:true})
-      await fs.rm(paths.readinessFile,{force:true})
-      await fs.rm(paths.stateFile,{force:true})
-      await fs.rm(path.join(serviceHome,'cleanup-result.json'),{force:true})
-      onProgress('旧后台残留已清理，继续执行当前命令。')
+        controller:snapshot.owner?.controller,method:'registered-processes-only',unregisteredProcessesChecked:false,backup,completedAt:new Date().toISOString()})
+      for(const file of [paths.ownerFile,paths.readinessFile,paths.stateFile,cleanupFile]) {
+        budget.signal.throwIfAborted()
+        await fs.rm(file,{force:true})
+      }
+      onProgress('已清除旧后台状态；未检查未登记的残留进程，继续执行当前命令。')
       return {stopped:true,wasLoaded:Boolean(task.loaded),recovered:true}
-    },{timeoutMs:stopTimeoutMs}).catch(error=>{throw new Error(`${originalError.message} 自动恢复未完成：${error.message}`,{cause:error})})
+    }
     return withWindowsCleanupDeadline(async budget => {
     const selected = await selectionSnapshot()
     let owner = await readJson(paths.ownerFile)
     budget.signal.throwIfAborted()
-    await writeJson(paths.stopFile, { generation: selected.generation })
+    await writeJson(paths.stopFile, { generation: owner?.generation || selected.generation })
     // A scheduled worker may not have published owner.json yet. Do not report a successful stop during that gap.
     const acknowledged = async () =>
-      owner?.generation === selected.generation &&
-      owner.worker &&
+      owner?.worker &&
       sameIdentity(await readIdentity(owner.worker.pid, budget.options()), owner.worker, c.sid)
     for (let i = 0; !(await acknowledged()) && i < stopAttempts; i++) {
       const state = await scheduler('status', c, budget.options())
@@ -387,7 +368,7 @@ export function createWindowsServiceManager({
           `后台进程尚未确认停止；请执行 ${taskCommand('status', 'win32')} 检查状态后重试。`,
         )
     }
-    if (owner?.generation === selected.generation) {
+    if (owner) {
       const graceDeadline=Date.now()+Math.min(stopGraceMs,Math.max(0,stopTimeoutMs-15000))
       for (let i = 0; i < stopAttempts && Date.now()<graceDeadline; i++) {
         if (!owner.controller || !(await readIdentity(owner.controller.pid, budget.options())))
@@ -417,30 +398,31 @@ export function createWindowsServiceManager({
         `后台进程尚未确认停止；请执行 ${taskCommand('status', 'win32')} 检查状态后重试。`,
       )
     budget.signal.throwIfAborted()
-    const scannedRecovery=await readJson(path.join(serviceHome,'stale-recovery-result.json'))
-    const alreadyReconciled=!task.loaded && !owner && scannedRecovery?.version===1 && scannedRecovery.method==='verified-process-scan' && scannedRecovery.generation===selected.generation
-    if(!alreadyReconciled && (task.loaded || snapshot.owner || snapshot.selection) && (!owner?.controller || owner.generation!==selected.generation)) {
-      throw new Error('后台停止未完成：旧后台归属记录缺失或已过期。')
-    }
-    const cleanup=await readJson(path.join(serviceHome,'cleanup-result.json'))
-    budget.signal.throwIfAborted()
-    const acknowledgedCleanup=cleanup?.generation===selected.generation && cleanup?.pid===owner?.controller?.pid
-    if(acknowledgedCleanup && cleanup.ok===false) throw new Error('后台停止未完成：控制器未能清理全部进程，请查看日志。')
-    if(owner?.generation===selected.generation && owner.controller && !(acknowledgedCleanup && cleanup.ok===true)) {
-      await recoverWindowsProcessJournals(path.join(runtimeHome,'windows-process-journals-v1'),{
+    const cleanup=await readJson(cleanupFile)
+    const acknowledgedCleanup=Boolean(cleanup && owner?.controller && cleanup.generation===owner.generation && cleanup.pid===owner.controller.pid)
+    if(acknowledgedCleanup && cleanup.ok===false && await cleanupStamp()!==initialCleanupStamp)
+      throw new Error('后台停止未完成：控制器未能清理全部进程，请查看日志。')
+    const staleOwner=Boolean((task.loaded || snapshot.owner || snapshot.selection) && (!owner?.controller || owner.generation!==selected.generation))
+    if(owner?.controller && !(acknowledgedCleanup && cleanup.ok===true)) {
+      const directory=path.join(runtimeHome,'windows-process-journals-v1')
+      await recoverWindowsProcessJournals(directory,{
         controllerIdentity:owner.controller,signal:budget.signal,
         readIdentity:(pid,options)=>readIdentity(pid,{...options,...budget.options()}),
         stopTree:(identity,options)=>stopTree(identity,{...options,...budget.options()}),
-      }).catch(error=>{if(error.code==='ENOENT')return 0;throw error})
-      const confirmed=await confirmWindowsProcessRecovery(path.join(runtimeHome,'windows-process-journals-v1'),owner.controller,
-        ()=>writeJson(path.join(serviceHome,'cleanup-result.json'),{generation:selected.generation,pid:owner.controller.pid,ok:true}),
-        {signal:budget.signal})
-      if(!confirmed) throw new Error('后台停止未完成：缺少控制器清理确认及可恢复的进程记录。')
+      })
+      const confirmed=await confirmWindowsProcessRecovery(directory,owner.controller,
+        ()=>writeJson(cleanupFile,{generation:owner.generation,pid:owner.controller.pid,ok:true}),{signal:budget.signal})
+      if(!confirmed) {
+        if(await hasPendingWindowsProcessJournal(directory,owner.controller,{signal:budget.signal}))
+          throw new Error('后台停止未完成：已登记的进程记录尚未完成清理。')
+        return clearHistoricalState(budget)
+      }
     }
+    if(staleOwner)return clearHistoricalState(budget)
     budget.signal.throwIfAborted()
     await fs.rm(paths.readinessFile, { force: true })
     return { stopped: true, wasLoaded: Boolean(task.loaded) }
-    }, {timeoutMs:stopTimeoutMs}).catch(recoverMissingState)
+    }, {timeoutMs:stopTimeoutMs})
   }
   async function startUnlocked(bindingIds = [], options = {}) {
     const finish = startupProgress('正在启动后台服务')
