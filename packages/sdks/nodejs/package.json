@@ -4,7 +4,7 @@
     "dist"
   ],
   "license": "MIT",
-  "version": "0.1.24-dev.1",
+  "version": "0.1.24",
   "description": "AAMP SDK — Node.js client for Agent-to-Agent task collaboration over email",
   "type": "module",
   "main": "dist/index.js",
@@ -12,7 +12,6 @@
   "exports": {
     ".": {
       "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
       "types": "./dist/index.d.ts"
     }
   },

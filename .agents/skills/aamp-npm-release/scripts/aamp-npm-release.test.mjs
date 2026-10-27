@@ -118,6 +118,8 @@ function createFakeNpm(t, options = {}) {
   const publicWhoami = options.publicWhoami ?? 'luckyterry'
   const bnpmWhoami = options.bnpmWhoami ?? publicWhoami
   const defaultView = options.defaultView ?? '["0.1.0-dev.0"]'
+  const orgMembers = options.orgMembers ?? { [publicWhoami]: 'owner' }
+  const packageAccess = Object.fromEntries(['aamp-acp-bridge', 'aamp-feishu-bridge', 'aamp-feishu-task-agent'].map((name) => [`@larktask/${name}`, 'read-write']))
   fs.writeFileSync(fakeNpm, [
     '#!/usr/bin/env bash',
     'case "$1" in',
@@ -132,6 +134,8 @@ function createFakeNpm(t, options = {}) {
     '      shift',
     '    done',
     `    if [ "$registry" = "https://bnpm.byted.org" ]; then printf "${bnpmWhoami}\\n"; else printf "${publicWhoami}\\n"; fi ;;`,
+    `  org) printf '%s\\n' '${JSON.stringify(orgMembers)}' ;;`,
+    `  access) printf '%s\\n' '${JSON.stringify(packageAccess)}' ;;`,
     `  view) printf '${defaultView}\\n' ;;`,
     '  *) exit 0 ;;',
     'esac',
@@ -291,7 +295,11 @@ function createStatefulFakeNpm(t, registryVersions = {}, options = {}) {
     "const registry = args[args.indexOf('--registry') + 1] || 'https://registry.npmjs.org/'",
     "const state = JSON.parse(fs.readFileSync(process.env.AAMP_FAKE_NPM_REGISTRY, 'utf8'))",
     'const registryKey = `${registry}|${args[1]}`',
+    `if (args[0] === 'org') { ${options.orgFailure ? "console.error('organization query denied'); process.exit(1)" : `console.log(${JSON.stringify(options.orgOutput ?? JSON.stringify(options.orgMembers ?? (publicWhoami === 'larktask' ? { larktask: 'owner' } : {})))}); process.exit(0)`} }`,
+    `if (args[0] === 'access') { ${options.accessFailure ? "console.error('package access query denied'); process.exit(1)" : `console.log(${JSON.stringify(options.accessOutput ?? JSON.stringify(options.packageAccess ?? Object.fromEntries(['aamp-acp-bridge', 'aamp-feishu-bridge', 'aamp-feishu-task-agent'].map((name) => ['@larktask/' + name, 'read-write']))))}); process.exit(0)`} }`,
     "if (args[0] === 'view') {",
+    "  if (state.lookupErrors?.[args[1]]) { console.error(state.lookupErrors[args[1]]); process.exit(1) }",
+    "  if ((state.missingPackages || []).includes(args[1])) { console.error('npm error code E404'); process.exit(1) }",
     "  const exact = /^(.*)@(\\d+\\.\\d+\\.\\d+(?:-dev\\.\\d+)?)$/.exec(args[1])",
     "  if (exact) {",
     "    const key = `${registry}|${exact[1]}|${exact[2]}`",
@@ -311,6 +319,7 @@ function createStatefulFakeNpm(t, registryVersions = {}, options = {}) {
     "    version: pkg.version,",
     "    bootstrap: fs.existsSync(path.join(process.cwd(), 'bootstrap/aamp-feishu-task-agent-bootstrap.sh')) ? fs.readFileSync(path.join(process.cwd(), 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'), 'utf8') : null,",
     "    controller: fs.existsSync(path.join(process.cwd(), 'bin/feishu-task-agent-controller.mjs')) ? fs.readFileSync(path.join(process.cwd(), 'bin/feishu-task-agent-controller.mjs'), 'utf8') : null,",
+    "    defaults: fs.existsSync(path.join(process.cwd(), 'bootstrap/task-agent-defaults.json')) ? fs.readFileSync(path.join(process.cwd(), 'bootstrap/task-agent-defaults.json'), 'utf8') : null,",
     "  }",
     "  fs.writeFileSync(path.join(destination, archive), `${JSON.stringify(payload, null, 2)}\\n`)",
     '  console.log(archive)',
@@ -351,6 +360,30 @@ function createStatefulFakeNpm(t, registryVersions = {}, options = {}) {
       AAMP_FAKE_NPM_REGISTRY: registryFile,
     },
   }
+}
+
+function useJsonTaskAgentLayout(repo) {
+  const taskDir = path.join(repo, 'packages/aamp-feishu-task-agent')
+  const realTaskDir = path.resolve(scriptDir, '../../../../packages/aamp-feishu-task-agent')
+  for (const relative of [
+    'bootstrap/task-agent-defaults.json',
+    'bootstrap/aamp-feishu-task-agent-bootstrap.sh',
+    'bootstrap/register-feishu-app.mjs',
+    'bin/feishu-task-agent-controller.mjs',
+    'scripts/sync-bootstrap-defaults.mjs',
+    'README.md',
+  ]) {
+    fs.mkdirSync(path.dirname(path.join(taskDir, relative)), { recursive: true })
+    fs.copyFileSync(path.join(realTaskDir, relative), path.join(taskDir, relative))
+  }
+  const bootstrapFile = path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh')
+  fs.writeFileSync(bootstrapFile, fs.readFileSync(bootstrapFile, 'utf8').replace(
+    /^AAMP_TASK_AGENT_VERSION="[^"]*"$/m,
+    `AAMP_TASK_AGENT_VERSION="${readJson(path.join(taskDir, 'package.json')).version}"`,
+  ))
+  execFileSync('git', ['add', '.'], { cwd: repo })
+  execFileSync('git', ['commit', '-qm', 'use JSON Task Agent defaults'], { cwd: repo })
+  return taskDir
 }
 
 function fakeNpmCalls(log) {
@@ -1382,16 +1415,19 @@ test('final --prepare-source requires --bump and rejects --version overrides', (
   const acpBefore = fs.readFileSync(path.join(repo, 'packages/aamp-acp-bridge/package.json'), 'utf8')
   const taskBefore = fs.readFileSync(path.join(repo, 'packages/aamp-feishu-task-agent/package.json'), 'utf8')
 
-  const invalid = runRelease(repo, fakeNpm, env, [
-    '--mode', 'final',
-    '--prepare-source',
-    '--scope', '@larktask',
-    '--package', 'acpBridge',
-    '--version', 'acpBridge=2.0.0',
+  for (const bumpArgs of [['--bump', 'patch'], []]) {
+    const invalid = runRelease(repo, fakeNpm, env, [
+      '--mode', 'final', '--prepare-source', '--scope', '@larktask',
+      '--package', 'acpBridge', '--version', 'acpBridge=2.0.0', ...bumpArgs,
+    ])
+    assert.equal(invalid.status, 1)
+    assert.match(invalid.stderr, /--version.*no longer supported/i)
+  }
+  const missingBump = runRelease(repo, fakeNpm, env, [
+    '--mode', 'final', '--prepare-source', '--package', 'acpBridge',
   ])
-
-  assert.equal(invalid.status, 1)
-  assert.match(invalid.stderr, /--version.*no longer supported/i)
+  assert.equal(missingBump.status, 1)
+  assert.match(missingBump.stderr, /requires --bump patch, minor, or major/)
   assert.equal(fs.readFileSync(path.join(repo, 'packages/aamp-acp-bridge/package.json'), 'utf8'), acpBefore)
   assert.equal(fs.readFileSync(path.join(repo, 'packages/aamp-feishu-task-agent/package.json'), 'utf8'), taskBefore)
   assert.equal(fakeNpmCalls(log).some(({ args }) => ['run', 'pack', 'publish'].includes(args[0])), false)
@@ -1665,19 +1701,19 @@ test('release helper fixes trial packages to the authenticated personal scope', 
   assert.equal(fakeNpmCalls(log).some(({ args }) => args.includes('@someone-else/aamp-acp-bridge')), false)
 })
 
-test('release helper requires the public npm identity to be larktask for final releases', (t) => {
+test('release helper rejects final releases by nonmembers of the larktask organization', (t) => {
   const repo = createReleaseRepo(t)
   const { fakeNpm, log, env } = createStatefulFakeNpm(t)
   const result = runRelease(repo, fakeNpm, env, [
     '--mode', 'final',
     '--prepare-source',
-    '--scope', '@release-test',
+    '--scope', '@larktask',
     '--package', 'taskAgent',
     '--bump', 'patch',
   ])
 
   assert.equal(result.status, 1)
-  assert.match(result.stderr, /public npm identity must be exactly larktask/i)
+  assert.match(result.stderr, /larktask organization membership/i)
   assert.equal(fakeNpmCalls(log).some(({ args }) => ['view', 'pack', 'publish'].includes(args[0])), false)
 })
 
@@ -1929,4 +1965,196 @@ test('official stable wizard emits only the source preparation phase', (t) => {
   assert.doesNotMatch(result.stdout, /--publish/)
   assert.doesNotMatch(result.stdout, /--confirm-publish/)
   assert.match(result.stdout, /review.*commit.*publish/is)
+})
+
+
+test('final preparation accepts a real organization member only with write access to each existing public package', async (t) => {
+  for (const role of ['owner', 'admin', 'developer']) {
+    await t.test(role, (t) => {
+      const repo = createReleaseRepo(t, { taskAgent: '2.4.6-dev.9' })
+      const { fakeNpm, log, env } = createStatefulFakeNpm(t, {
+        'https://registry.npmjs.org/|@larktask/aamp-feishu-task-agent': ['2.4.5'],
+      }, { publicWhoami: 'iluolyx', orgMembers: { iluolyx: role } })
+      const result = runRelease(repo, fakeNpm, env, [
+        '--mode', 'final', '--prepare-source', '--bump', 'patch', '--package', 'taskAgent',
+      ])
+      assert.equal(result.status, 0, result.stderr)
+      assert.match(result.stdout, /npm identity: iluolyx/)
+      assert.match(result.stdout, /target scope: @larktask/)
+      assert.match(result.stdout, /dist-tag: latest/)
+      assert.match(result.stdout, new RegExp(`organization.*larktask.*iluolyx.*${role}`, 'i'))
+      assert.equal(readJson(path.join(repo, 'packages/aamp-feishu-task-agent/package.json')).version, '2.4.6')
+      assert.ok(fakeNpmCalls(log).some(({ args }) => args.slice(0, 3).join(' ') === 'org ls larktask'))
+      assert.ok(fakeNpmCalls(log).some(({ args }) => args.slice(0, 4).join(' ') === 'access list packages iluolyx'))
+      assert.equal(fakeNpmCalls(log).some(({ args }) => ['pack', 'publish'].includes(args[0])), false)
+    })
+  }
+})
+
+test('final preparation permits owner and admin to create confirmed missing packages but rejects developer', async (t) => {
+  for (const role of ['owner', 'admin', 'developer']) {
+    await t.test(role, (t) => {
+      const repo = createReleaseRepo(t)
+      const { fakeNpm, env } = createStatefulFakeNpm(t, {
+        missingPackages: ['@larktask/aamp-acp-bridge'],
+        'https://registry.npmjs.org/|@larktask/aamp-feishu-task-agent': ['2.4.5'],
+      }, {
+        publicWhoami: 'iluolyx', orgMembers: { iluolyx: role },
+        packageAccess: { '@larktask/aamp-feishu-task-agent': 'read-write' },
+      })
+      const result = runRelease(repo, fakeNpm, env, [
+        '--mode', 'final', '--prepare-source', '--bump', 'patch', '--package', 'acpBridge',
+      ])
+      if (role === 'developer') {
+        assert.equal(result.status, 1)
+        assert.match(result.stderr, /owner or admin.*new package/i)
+        assert.equal(readJson(path.join(repo, 'packages/aamp-acp-bridge/package.json')).version, '1.2.3')
+      } else assert.equal(result.status, 0, result.stderr)
+    })
+  }
+})
+
+test('final authorization fails closed for unknown membership, inaccessible ACLs, read-only packages, and unconfirmed absence', async (t) => {
+  const cases = [
+    { name: 'unknown role', orgMembers: { iluolyx: 'maintainer' }, error: /organization membership/i },
+    { name: 'membership query failure', orgFailure: true, error: /organization membership/i },
+    { name: 'malformed membership', orgOutput: 'not json', error: /organization membership/i },
+    { name: 'missing member', orgMembers: { another: 'admin' }, error: /organization membership/i },
+    { name: 'ACL query failure', accessFailure: true, error: /package access/i },
+    { name: 'malformed ACL', accessOutput: '[]', error: /package access/i },
+    { name: 'read-only package', packageAccess: { '@larktask/aamp-feishu-task-agent': 'read-only' }, error: /read-write/i },
+    { name: 'missing ACL', packageAccess: {}, error: /read-write/i },
+    { name: 'empty versions do not prove absence', packageAccess: {}, registryVersions: {}, error: /read-write/i },
+  ]
+  for (const fixture of cases) {
+    await t.test(fixture.name, (t) => {
+      const repo = createReleaseRepo(t)
+      const before = execFileSync('git', ['diff', '--binary'], { cwd: repo })
+      const { fakeNpm, log, env } = createStatefulFakeNpm(t, fixture.registryVersions ?? {
+        'https://registry.npmjs.org/|@larktask/aamp-feishu-task-agent': ['2.4.5'],
+      }, { publicWhoami: 'iluolyx', orgMembers: { iluolyx: 'admin' }, ...fixture })
+      const result = runRelease(repo, fakeNpm, env, [
+        '--mode', 'final', '--prepare-source', '--bump', 'patch', '--package', 'taskAgent',
+      ])
+      assert.equal(result.status, 1, result.stdout)
+      assert.match(result.stderr, fixture.error)
+      assert.deepEqual(execFileSync('git', ['diff', '--binary'], { cwd: repo }), before)
+      assert.equal(fakeNpmCalls(log).some(({ args }) => ['run', 'pack', 'publish'].includes(args[0])), false)
+    })
+  }
+})
+
+test('JSON defaults preparation synchronizes selected pins and preserves every unselected default through staging', (t) => {
+  const repo = createReleaseRepo(t)
+  const taskDir = useJsonTaskAgentLayout(repo)
+  const defaultsFile = path.join(taskDir, 'bootstrap/task-agent-defaults.json')
+  const before = readJson(defaultsFile)
+  const feishu = before.packages.feishuBridge
+  const at = feishu.lastIndexOf('@')
+  const { fakeNpm, env } = createStatefulFakeNpm(t, {
+    [`https://registry.npmjs.org/|${feishu.slice(0, at)}`]: [feishu.slice(at + 1)],
+  }, { publicWhoami: 'public-owner', bnpmWhoami: 'bnpm-owner' })
+  const args = ['--mode', 'trial', '--package', 'aimeAcp', '--package', 'acpBridge']
+  const prepared = runRelease(repo, fakeNpm, env, [...args, '--prepare-source'])
+  assert.equal(prepared.status, 0, prepared.stderr)
+  const defaults = readJson(defaultsFile)
+  assert.equal(defaults.packages.acpBridge, '@public-owner/aamp-acp-bridge@1.2.4-dev.0')
+  assert.equal(defaults.packages.aimeAcp, '@bnpm-owner/aime-acp@0.1.1-dev.0')
+  const expected = structuredClone(before)
+  expected.packages.acpBridge = defaults.packages.acpBridge
+  expected.packages.aimeAcp = defaults.packages.aimeAcp
+  assert.deepEqual(defaults, expected)
+  execFileSync(process.execPath, ['scripts/sync-bootstrap-defaults.mjs', '--check'], { cwd: taskDir })
+  execFileSync('git', ['add', '.'], { cwd: repo })
+  execFileSync('git', ['commit', '-qm', 'prepare JSON defaults'], { cwd: repo })
+  const packed = runRelease(repo, fakeNpm, env, [...args, '--pack', '--skip-build', '--out-dir', '.json-output'])
+  assert.equal(packed.status, 0, packed.stderr)
+  const artifacts = path.join(repo, '.json-output/artifacts')
+  const tgz = fs.readdirSync(artifacts).find((name) => name.includes('aamp-feishu-task-agent-'))
+  const payload = readJson(path.join(artifacts, tgz))
+  assert.equal(payload.defaults, fs.readFileSync(defaultsFile, 'utf8'))
+  assert.equal(payload.bootstrap, fs.readFileSync(path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'), 'utf8'))
+})
+
+test('Task Agent-only JSON preparation preserves dependency defaults and refuses JSON/bootstrap drift before pack', (t) => {
+  const repo = createReleaseRepo(t)
+  const taskDir = useJsonTaskAgentLayout(repo)
+  const defaultsFile = path.join(taskDir, 'bootstrap/task-agent-defaults.json')
+  const before = fs.readFileSync(defaultsFile, 'utf8')
+  const { fakeNpm, log, env } = createStatefulFakeNpm(t)
+  const args = ['--mode', 'trial', '--package', 'taskAgent']
+  const prepared = runRelease(repo, fakeNpm, env, [...args, '--prepare-source'])
+  assert.equal(prepared.status, 0, prepared.stderr)
+  assert.equal(fs.readFileSync(defaultsFile, 'utf8'), before)
+  const drift = readJson(defaultsFile)
+  drift.packages.acpBridge = '@other/aamp-acp-bridge@1.0.0'
+  writeJson(defaultsFile, drift)
+  const packed = runRelease(repo, fakeNpm, env, [...args, '--pack', '--skip-build'])
+  assert.equal(packed.status, 1)
+  assert.match(packed.stderr, /ACP bridge.*pin validation failed/i)
+  assert.equal(fakeNpmCalls(log).some(({ args }) => ['run', 'pack', 'publish'].includes(args[0])), false)
+})
+
+test('failed JSON defaults generation restores JSON, package metadata, and all pin files byte-for-byte', (t) => {
+  const repo = createReleaseRepo(t)
+  const taskDir = useJsonTaskAgentLayout(repo)
+  const bootstrapFile = path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh')
+  fs.writeFileSync(bootstrapFile, fs.readFileSync(bootstrapFile, 'utf8').replace('# BEGIN GENERATED TASK AGENT BRIDGE DEFAULTS', '# missing generated block'))
+  const files = [
+    'packages/aamp-acp-bridge/package.json', 'packages/aamp-acp-bridge/package-lock.json',
+    'packages/aamp-feishu-task-agent/package.json', 'packages/aamp-feishu-task-agent/package-lock.json',
+    'packages/aamp-feishu-task-agent/bootstrap/task-agent-defaults.json',
+    'packages/aamp-feishu-task-agent/bootstrap/aamp-feishu-task-agent-bootstrap.sh',
+    'packages/aamp-feishu-task-agent/bin/feishu-task-agent-controller.mjs',
+    'packages/aamp-feishu-task-agent/README.md',
+  ].map((file) => path.join(repo, file))
+  const before = snapshotFiles(files)
+  const { fakeNpm, env } = createStatefulFakeNpm(t)
+  const result = runRelease(repo, fakeNpm, env, ['--mode', 'trial', '--package', 'acpBridge', '--prepare-source'])
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /missing generated block/)
+  assertFilesMatchSnapshot(before)
+})
+
+test('JSON defaults reject trailing package text before staging even when bootstrap contains the same version', (t) => {
+  const repo = createReleaseRepo(t)
+  const taskDir = useJsonTaskAgentLayout(repo)
+  const initialDefaults = readJson(path.join(taskDir, 'bootstrap/task-agent-defaults.json'))
+  const registryVersions = Object.fromEntries(['feishuBridge', 'aimeAcp'].map((key) => {
+    const pin = initialDefaults.packages[key]
+    const at = pin.lastIndexOf('@')
+    const registry = key === 'aimeAcp' ? 'https://bnpm.byted.org' : 'https://registry.npmjs.org/'
+    return [`${registry}|${pin.slice(0, at)}`, [pin.slice(at + 1)]]
+  }))
+  const { fakeNpm, log, env } = createStatefulFakeNpm(t, registryVersions)
+  const args = ['--mode', 'trial', '--package', 'acpBridge']
+  const prepared = runRelease(repo, fakeNpm, env, [...args, '--prepare-source'])
+  assert.equal(prepared.status, 0, prepared.stderr)
+  const defaultsFile = path.join(taskDir, 'bootstrap/task-agent-defaults.json')
+  const defaults = readJson(defaultsFile)
+  defaults.packages.acpBridge += ' trailing-invalid-text'
+  writeJson(defaultsFile, defaults)
+  const packed = runRelease(repo, fakeNpm, env, [...args, '--pack', '--skip-build'])
+  assert.equal(packed.status, 1)
+  assert.match(packed.stderr, /ACP bridge.*JSON defaults pin validation failed/i)
+  assert.equal(fakeNpmCalls(log).some(({ args }) => ['pack', 'publish'].includes(args[0])), false)
+})
+
+
+test('final preparation refuses non-404 lookup errors instead of authorizing package creation', async (t) => {
+  for (const detail of ['No match found', 'is not in this registry']) {
+    await t.test(detail, (t) => {
+      const repo = createReleaseRepo(t)
+      const { fakeNpm, log, env } = createStatefulFakeNpm(t, {
+        lookupErrors: { '@larktask/aamp-feishu-task-agent': `npm error code ETARGET\nnpm error ${detail}` },
+      }, { publicWhoami: 'iluolyx', orgMembers: { iluolyx: 'admin' }, packageAccess: {} })
+      const result = runRelease(repo, fakeNpm, env, [
+        '--mode', 'final', '--prepare-source', '--bump', 'patch', '--package', 'taskAgent',
+      ])
+      assert.equal(result.status, 1)
+      assert.match(result.stderr, /Failed to inspect.*aamp-feishu-task-agent/)
+      assert.equal(readJson(path.join(repo, 'packages/aamp-feishu-task-agent/package.json')).version, '2.4.6')
+      assert.equal(fakeNpmCalls(log).some(({ args }) => ['pack', 'publish'].includes(args[0])), false)
+    })
+  }
 })

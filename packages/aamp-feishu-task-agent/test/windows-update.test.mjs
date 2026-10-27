@@ -20,6 +20,22 @@ test('npm environment preserves explicit mappings and proxy',()=>{
 test('version ordering matches stable and dev bootstrap rules',()=>{
   for(const [a,b,want] of [['1.0.0','1.0.1',true],['1.0.1','1.0.0',false],['1.0.1','1.0.1',false],['1.0.0-dev.9','1.0.0',true],['1.0.0','1.0.0-dev.10',false],['custom','next',false]])assert.equal(taskAgentVersionIsNewer(a,b),want);
 });
+test('Windows updates stable packages from latest and prereleases from dev while honoring explicit channels',async()=>{
+ const temp=await mkdtemp(path.join(os.tmpdir(),'aamp-update-channel-'));
+ try {
+  for(const [version,override,channel] of [
+   ['0.1.1',undefined,'latest'],
+   ['0.1.1+release-build',undefined,'latest'],
+   ['0.1.1-dev.15',undefined,'dev'],
+   ['0.1.1','task-control-test','task-control-test'],
+  ]) {
+   const calls=[];
+   const result=await runWindowsUpdate({command:'update',metadata:{name:'@larktask/aamp-feishu-task-agent',version},env:{AAMP_TASK_UPDATE_CACHE_FILE:path.join(temp,'cache'),AAMP_TASK_AGENT_CHANNEL:override}},{capture:async args=>{calls.push(args);return version;}});
+   assert.deepEqual(calls,[['view',`@larktask/aamp-feishu-task-agent@${channel}`,'version']]);
+   assert.equal(result.handled,true);
+  }
+ }finally{await rm(temp,{recursive:true,force:true});}
+});
 for(const running of [false,true])for(const fails of [false,true])test(`update restores only background selection running=${running} failure=${fails}`,async()=>{
  const calls=[];
  const operation=installPreservingService({stage:async()=>{calls.push('stage');return 'archive'},snapshot:async()=>({running,bindingIds:['chosen'],controllerPath:'old'}),stop:async()=>calls.push('stop'),install:async()=>{calls.push('install');if(fails)throw Error('install failed')},resume:async(p,success)=>{assert.deepEqual(p.bindingIds,['chosen']);assert.equal(success,!fails);calls.push('resume')}});
