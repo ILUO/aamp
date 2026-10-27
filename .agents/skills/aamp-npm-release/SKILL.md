@@ -45,8 +45,9 @@ accepted.
   already-published dependency version as a Task Agent pin while publishing
   only the missing packages.
 - Final keeps the existing mode name `final`. Final preparation requires
-  `npm whoami` on the public npm registry to be exactly `larktask`, plus
-  `--bump patch|minor|major`. From `x.y.z-dev.N`, `patch` becomes `x.y.z`,
+  an authenticated public npm user with verified `larktask` organization
+  membership and package publish access, plus `--bump patch|minor|major`. From
+  `x.y.z-dev.N`, `patch` becomes `x.y.z`,
   `minor` becomes `x.(y+1).0`, and `major` becomes `(x+1).0.0`. From a stable
   source version, final preparation applies a normal semver bump.
 - Personal local trial: after source preparation and commit, create local
@@ -101,13 +102,13 @@ and BNPM identities are independent:
   authenticated user's public npm scope, `https://registry.npmjs.org/`, tag
   `dev`.
 - Public final packages always publish to `@larktask` on
-  `https://registry.npmjs.org/`, tag `latest`, and require `npm whoami` to be
-  `larktask`.
+  `https://registry.npmjs.org/`, tag `latest`, and require the real `npm whoami`
+  user to be a verified member of the `larktask` organization with package publish access.
 
 Never publish AIME ACP to the public npm registry or public AAMP packages to
 BNPM. `--scope` is assertion-only and, when present, must equal
-`@<public npm whoami>`. `--aime-scope` is assertion-only and, when present,
-must equal `@<bnpm whoami>`. `--aime-registry https://bnpm.byted.org` remains
+`@<public npm whoami>` in trial mode or `@larktask` in final mode.
+`--aime-scope` is assertion-only and, when present, must equal `@<bnpm whoami>`. `--aime-registry https://bnpm.byted.org` remains
 accepted only as the canonical compatibility flag. Selecting `aimeAcp`
 automatically includes `taskAgent`, because the Task Agent bootstrap must pin
 the same AIME ACP target version and registry.
@@ -155,7 +156,17 @@ only when you intentionally want to inspect all package versions.
    personal trial or official stable release. Recommend personal remote trial
    for validation and official stable only after validation passes.
 4. For official stable releases, confirm the intended bump (`patch`, `minor`,
-   or `major`) and verify the public npm identity is `larktask`.
+   or `major`) and verify the real public npm user belongs to the `larktask`
+   organization. Run `npm org ls larktask --json` against public npm; accept only
+   an explicit `owner`, `admin`, or `developer` role for the current `whoami`.
+   For existing selected public packages, require `read-write` from
+   `npm access list packages <whoami> --json`. Only `owner` or `admin` may
+   prepare a new package whose public registry lookup explicitly returns 404;
+   conservatively reject developers for new packages. Failed or malformed
+   membership/access queries, unknown roles, and missing existing-package write
+   access stop the release. The actual npm publish still enforces registry
+   permissions and browser authentication; never substitute the organization
+   name for the authenticated user.
 5. Run the helper with non-interactive flags. The helper computes remote
    versions, builds package `dist` output where needed, stages rewritten
    packages, packs tgz artifacts, publishes if requested, and verifies npm
@@ -262,14 +273,21 @@ node .agents/skills/aamp-npm-release/scripts/aamp-npm-release.mjs \
 ```
 
 For audited releases, `--scope` and `--aime-scope` may assert the expected
-identities. Each assertion must equal the corresponding registry's current
-`whoami`; omit both flags in normal operation.
+identities. Trial `--scope` and `--aime-scope` must equal the corresponding registry's
+current `whoami`; final `--scope` must equal `@larktask`. Omit both flags in
+normal operation.
 
 Use additional `--package` flags when multiple packages changed. The helper
 accepts `aimeAcp`, `acpBridge`, `feishuBridge`, `taskAgent`, and `all`, plus package-name
 aliases such as `aamp-feishu-bridge`.
 
 Source preparation writes actual Task Agent source pins:
+- When `bootstrap/task-agent-defaults.json` exists, its package pins are the
+  authority. Update only selected dependency pins, then run
+  `scripts/sync-bootstrap-defaults.mjs` to regenerate bootstrap defaults. The
+  helper snapshots and rolls back the JSON with other preparation files, and
+  staging preserves the prepared JSON byte-for-byte. Legacy source layouts
+  without this JSON retain bootstrap/controller literal-pin validation.
 - Selected public packages are pinned with the actual public target scope and
   version.
 - Selected AIME is pinned with the actual BNPM target scope, version, and

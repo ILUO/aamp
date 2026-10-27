@@ -281,6 +281,9 @@ function parseArgs(argv) {
   if (options.versions.size > 0 && !options.prepareSource) {
     throw new Error('--version is only supported with --prepare-source; pack and publish always reuse committed source versions.')
   }
+  if (options.mode === 'final' && options.prepareSource && options.versions.size > 0) {
+    throw new Error('Final --prepare-source --version overrides are no longer supported; use --bump patch, minor, or major.')
+  }
   if (options.mode === 'final' && options.prepareSource && !options.bumpExplicit) {
     throw new Error('Final --prepare-source requires --bump patch, minor, or major')
   }
@@ -502,23 +505,65 @@ function npmWhoami(packageManager, registry) {
   return result.stdout.trim()
 }
 
-function remoteVersions(packageManager, registry, name) {
+function npmJsonObject(packageManager, args, label) {
+  const result = optionalRun(packageManager.command, args)
+  if (!result.ok) throw new Error(`${label} query failed; refusing final release`)
+  try {
+    const value = JSON.parse(result.stdout)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('expected object')
+    return value
+  } catch {
+    throw new Error(`${label} query returned invalid JSON; refusing final release`)
+  }
+}
+
+function assertFinalOrganizationMember(packageManager, registry, whoami) {
+  const members = npmJsonObject(packageManager, ['org', 'ls', 'larktask', '--json', '--registry', registry], 'larktask organization membership')
+  const role = Object.hasOwn(members, whoami) ? members[whoami] : null
+  if (!['owner', 'admin', 'developer'].includes(role)) {
+    throw new Error(`Cannot verify larktask organization membership for public npm identity ${whoami}; expected owner, admin, or developer`)
+  }
+  console.log(`npm organization: @larktask (identity: ${whoami}, role: ${role})`)
+  return role
+}
+
+function assertFinalPackageAccess(packageManager, registry, whoami, role, targets) {
+  const access = npmJsonObject(packageManager, ['access', 'list', 'packages', whoami, '--json', '--registry', registry], 'Public npm package access')
+  for (const target of Object.values(targets)) {
+    if (!target.selected || normalizeRegistry(target.registry) !== PUBLIC_NPM_REGISTRY) continue
+    if (target.registryMissing) {
+      if (!['owner', 'admin'].includes(role)) {
+        throw new Error(`Final release requires organization owner or admin to create new package ${target.name}`)
+      }
+      continue
+    }
+    if (!Object.hasOwn(access, target.name) || access[target.name] !== 'read-write') {
+      throw new Error(`Final release requires public npm identity ${whoami} to have read-write package access to ${target.name}`)
+    }
+  }
+}
+
+function inspectRemoteVersions(packageManager, registry, name) {
   const result = optionalRun(packageManager.command, ['view', name, 'versions', '--json', '--registry', registry])
   if (!result.ok) {
     const detail = [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
-    if (/\bE404\b|404 Not Found|is not in this registry|No match found/i.test(detail)) return []
+    if (/\bE404\b|\b404 Not Found\b|\bHTTP(?:\/[0-9.]+)?\s+404\b/i.test(detail)) return { versions: [], missing: true }
     throw new Error(`Failed to inspect ${name} on ${registry}:${detail ? `\n${detail}` : ''}`)
   }
   const raw = result.stdout.trim()
-  if (!raw) return []
+  if (!raw) return { versions: [], missing: false }
   try {
     const parsed = JSON.parse(raw)
-    if (Array.isArray(parsed)) return parsed
-    if (typeof parsed === 'string') return [parsed]
+    if (Array.isArray(parsed)) return { versions: parsed, missing: false }
+    if (typeof parsed === 'string') return { versions: [parsed], missing: false }
     throw new Error('expected a version string or array')
   } catch {
     throw new Error(`Failed to parse version metadata for ${name} on ${registry}`)
   }
+}
+
+function remoteVersions(packageManager, registry, name) {
+  return inspectRemoteVersions(packageManager, registry, name).versions
 }
 
 function remotePackageMetadata(packageManager, registry, name, version) {
@@ -627,7 +672,8 @@ function buildReleasePlan(repoRoot, packageManager, options, scopes, selectedKey
     const sourcePackage = readJson(path.join(sourceDir, 'package.json'))
     const registry = packageRegistry(spec, options)
     const targetName = targetPackageName(spec, scopes, sourcePackage.name)
-    const versions = resolveRemote(spec.key) ? remoteVersions(packageManager, registry, targetName) : []
+    const remote = resolveRemote(spec.key) ? inspectRemoteVersions(packageManager, registry, targetName) : { versions: [], missing: false }
+    const versions = remote.versions
     const remoteLatest = versions.at(-1) || null
     const selected = selectedKeys.has(spec.key)
     const targetVersion = selected
@@ -655,6 +701,7 @@ function buildReleasePlan(repoRoot, packageManager, options, scopes, selectedKey
       selected,
       remoteLatest,
       remoteCount: versions.length,
+      registryMissing: remote.missing,
       alreadyPublished: selected && versions.includes(targetVersion),
       resolved: resolveRemote(spec.key),
       registry,
@@ -746,6 +793,19 @@ function patchPreparedSourceTaskAgentPins(taskDir, targets, taskAgentChannel) {
   replaceInFile(path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'), replacements)
   replaceInFile(path.join(taskDir, 'bin/feishu-task-agent-controller.mjs'), replacements)
   replaceInFile(path.join(taskDir, 'README.md'), replacements)
+
+  const defaultsFile = path.join(taskDir, 'bootstrap/task-agent-defaults.json')
+  if (fs.existsSync(defaultsFile)) {
+    const defaults = readJson(defaultsFile)
+    let changed = false
+    for (const key of ['acpBridge', 'feishuBridge', 'aimeAcp']) {
+      if (!targets[key]?.selected) continue
+      defaults.packages[key] = `${targets[key].name}@${targets[key].version}`
+      changed = true
+    }
+    if (changed) writeJson(defaultsFile, defaults)
+    run(process.execPath, [path.join(taskDir, 'scripts/sync-bootstrap-defaults.mjs')], { cwd: taskDir })
+  }
 }
 
 function preparedSourceFiles(sources, releaseSpecs, includesTaskAgent) {
@@ -760,6 +820,7 @@ function preparedSourceFiles(sources, releaseSpecs, includesTaskAgent) {
       path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'),
       path.join(taskDir, 'bin/feishu-task-agent-controller.mjs'),
       path.join(taskDir, 'README.md'),
+      path.join(taskDir, 'bootstrap/task-agent-defaults.json'),
     )
   }
   return [...new Set(files)]
@@ -799,6 +860,7 @@ function exactMatches(content, pattern) {
 }
 
 function readTaskAgentPinFiles(taskDir) {
+  const defaultsFile = path.join(taskDir, 'bootstrap/task-agent-defaults.json')
   return {
     bootstrapFile: path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'),
     controllerFile: path.join(taskDir, 'bin/feishu-task-agent-controller.mjs'),
@@ -806,6 +868,7 @@ function readTaskAgentPinFiles(taskDir) {
     bootstrap: fs.readFileSync(path.join(taskDir, 'bootstrap/aamp-feishu-task-agent-bootstrap.sh'), 'utf8'),
     controller: fs.readFileSync(path.join(taskDir, 'bin/feishu-task-agent-controller.mjs'), 'utf8'),
     readme: fs.readFileSync(path.join(taskDir, 'README.md'), 'utf8'),
+    defaults: fs.existsSync(defaultsFile) ? fs.readFileSync(defaultsFile, 'utf8') : null,
   }
 }
 
@@ -858,23 +921,65 @@ function readAimeRegistry(bootstrap) {
   return matches[0]
 }
 
+function readTaskAgentDependencyPins({ bootstrap, controller, defaults }) {
+  const acpPattern = /@[^/\s"']+\/aamp-acp-bridge@[0-9A-Za-z.-]+/g
+  const feishuPattern = /@[^/\s"']+\/aamp-feishu-bridge@[0-9A-Za-z.-]+/g
+  const aimePattern = /@[^/\s"']+\/aime-acp@[0-9A-Za-z.-]+/g
+  const aimePin = readPinnedPackageGroup(bootstrap, aimePattern, 'AIME ACP')
+  let acpContent = `${bootstrap}\n${controller}`
+  let feishuContent = acpContent
+  if (defaults !== null) {
+    const config = JSON.parse(defaults)
+    if (config.schemaVersion !== 1 || !config.packages || typeof config.packages !== 'object') {
+      throw new Error('Task Agent JSON defaults pin validation failed: unsupported schema')
+    }
+    for (const [key, pattern, label] of [['acpBridge', acpPattern, 'ACP bridge'], ['feishuBridge', feishuPattern, 'Feishu bridge']]) {
+      const jsonPin = config.packages[key]
+      if (typeof jsonPin !== 'string' || exactMatches(jsonPin, pattern)[0] !== jsonPin || exactMatches(controller, pattern).length !== 0
+        || !controller.includes('task-agent-defaults.json') || !controller.includes(`TASK_DEFAULTS.packages.${key}`)) {
+        throw new Error(`${label} JSON defaults pin validation failed: controller must read the authoritative JSON pin`)
+      }
+    }
+    acpContent = `${bootstrap}\n${config.packages.acpBridge}`
+    feishuContent = `${bootstrap}\n${config.packages.feishuBridge}`
+    if (config.packages.aimeAcp !== `${aimePin.name}@${aimePin.version}`) {
+      throw new Error('AIME ACP JSON defaults pin validation failed: bootstrap must match the authoritative JSON pin')
+    }
+  }
+  return {
+    acpPin: readPinnedPackageGroup(acpContent, acpPattern, 'ACP bridge'),
+    feishuPin: readPinnedPackageGroup(feishuContent, feishuPattern, 'Feishu bridge'),
+    aimePin,
+    aimeRegistry: readAimeRegistry(bootstrap),
+  }
+}
+
 function assertPreparedTaskAgentPins(taskDir, sources, targets, taskAgentChannel) {
   assertTaskAgentBootstrapVersion(taskDir, targets.taskAgent.version)
-  const { bootstrap, controller, readme } = readTaskAgentPinFiles(taskDir)
+  const files = readTaskAgentPinFiles(taskDir)
+  const { bootstrap, controller, readme, defaults } = files
   assertTaskAgentNamePin(bootstrap, targets.taskAgent.name)
   assertTaskAgentChannelPin(bootstrap, taskAgentChannel)
   const taskAgentScopePins = exactMatches(`${controller}\n${readme}`, /@[^/\s"']+\/aamp-feishu-task-agent@(dev|latest)/g)
   if (taskAgentScopePins.length !== 2 || taskAgentScopePins.some((pin) => pin !== `${targets.taskAgent.name}@${taskAgentChannel}`)) {
     throw new Error(`Task Agent prepared source pin validation failed: expected 2 occurrences of ${targets.taskAgent.name}@${taskAgentChannel}`)
   }
-  if (targets.acpBridge?.selected) {
+  if (defaults !== null) {
+    const pins = readTaskAgentDependencyPins(files)
+    for (const [key, pin] of [['acpBridge', pins.acpPin], ['feishuBridge', pins.feishuPin], ['aimeAcp', pins.aimePin]]) {
+      if (targets[key]?.selected && (pin.name !== targets[key].name || pin.version !== targets[key].version)) {
+        throw new Error(`${key} prepared source pin validation failed: expected ${targets[key].name}@${targets[key].version}`)
+      }
+    }
+  }
+  if (defaults === null && targets.acpBridge?.selected) {
     const expected = `${targets.acpBridge.name}@${targets.acpBridge.version}`
     const pins = exactMatches(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-acp-bridge@[0-9A-Za-z.-]+/g)
     if (pins.length !== 2 || pins.some((pin) => pin !== expected)) {
       throw new Error(`ACP bridge prepared source pin validation failed: expected 2 occurrences of ${expected}`)
     }
   }
-  if (targets.feishuBridge?.selected) {
+  if (defaults === null && targets.feishuBridge?.selected) {
     const expected = `${targets.feishuBridge.name}@${targets.feishuBridge.version}`
     const pins = exactMatches(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-feishu-bridge@[0-9A-Za-z.-]+/g)
     if (pins.length !== 2 || pins.some((pin) => pin !== expected)) {
@@ -905,6 +1010,9 @@ function assertStagedTaskAgentPins(taskDir, sourceTaskDir) {
   }
   if (staged.readme !== source.readme) {
     throw new Error('Staged Task Agent README pins must match prepared source pins exactly')
+  }
+  if (staged.defaults !== source.defaults) {
+    throw new Error('Staged Task Agent JSON defaults must match prepared source pins exactly')
   }
 }
 
@@ -971,11 +1079,7 @@ function validatePinnedDependency(packageManager, pin, registry, spec, selected,
 }
 
 function assertAllTaskAgentDefaultPinsValid(taskDir, packageManager, targets) {
-  const { bootstrap, controller } = readTaskAgentPinFiles(taskDir)
-  const acpPin = readPinnedPackageGroup(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-acp-bridge@[0-9A-Za-z.-]+/g, 'ACP bridge')
-  const feishuPin = readPinnedPackageGroup(`${bootstrap}\n${controller}`, /@[^/\s"']+\/aamp-feishu-bridge@[0-9A-Za-z.-]+/g, 'Feishu bridge')
-  const aimePin = readPinnedPackageGroup(bootstrap, /@[^/\s"']+\/aime-acp@[0-9A-Za-z.-]+/g, 'AIME ACP')
-  const aimeRegistry = readAimeRegistry(bootstrap)
+  const { acpPin, feishuPin, aimePin, aimeRegistry } = readTaskAgentDependencyPins(readTaskAgentPinFiles(taskDir))
 
   validatePinnedDependency(packageManager, acpPin, targets.acpBridge.registry, PACKAGE_SPECS.find((spec) => spec.key === 'acpBridge'), targets.acpBridge.selected, targets.acpBridge)
   validatePinnedDependency(packageManager, feishuPin, targets.feishuBridge.registry, PACKAGE_SPECS.find((spec) => spec.key === 'feishuBridge'), targets.feishuBridge.selected, targets.feishuBridge)
@@ -1227,6 +1331,7 @@ async function runWizard(baseOptions) {
     let scopes = { publicScope: '', aimeScope: '' }
     let publish = false
     let releaseLabel = ''
+    let organizationRole
 
     if (choice === '1') {
       releaseLabel = '个人试用本地包'
@@ -1241,9 +1346,7 @@ async function runWizard(baseOptions) {
       scopes.publicScope = normalizeScope(`@${publicWhoami}`)
       publish = true
     } else if (choice === '3') {
-      if (publicWhoami !== 'larktask') {
-        throw new Error(`Final release requires public npm identity must be exactly larktask, got ${publicWhoami}`)
-      }
+      organizationRole = assertFinalOrganizationMember(packageManager, baseOptions.registry, publicWhoami)
       releaseLabel = '@larktask 官方稳定包源码准备'
       options.mode = 'final'
       options.tag = baseOptions.tag || 'latest'
@@ -1282,6 +1385,7 @@ async function runWizard(baseOptions) {
       console.log(`npm identity (${options.aimeRegistry}): ${bnpmWhoami}`)
     }
     const { sources, targets, tag } = buildReleasePlan(repoRoot, packageManager, options, scopes, selectedKeys)
+    if (options.mode === 'final') assertFinalPackageAccess(packageManager, options.registry, publicWhoami, organizationRole, targets)
     const outDir = path.resolve(repoRoot, options.outDir)
     const artifactsDir = path.join(outDir, 'artifacts')
     const remoteOneClickUrl = tarballUrl(options.registry, targets.taskAgent.name, targets.taskAgent.version)
@@ -1362,9 +1466,9 @@ async function main() {
       options.registry,
       options.publish,
     )
-    if (options.mode === 'final' && publicWhoami !== 'larktask') {
-      throw new Error(`Final release requires public npm identity must be exactly larktask, got ${publicWhoami}`)
-    }
+    const organizationRole = options.mode === 'final'
+      ? assertFinalOrganizationMember(packageManager, options.registry, publicWhoami)
+      : null
     const canonicalScope = options.mode === 'trial' ? normalizeScope(`@${publicWhoami}`) : '@larktask'
     const requestedScope = normalizeScope(options.scope)
     if (options.mode === 'trial' && requestedScope && requestedScope !== canonicalScope) {
@@ -1398,6 +1502,7 @@ async function main() {
       console.log(`npm identity (${registry}): ${identity}`)
     }
     const { sources, targets, tag } = buildReleasePlan(repoRoot, packageManager, options, scopes, selectedKeys)
+    if (options.mode === 'final') assertFinalPackageAccess(packageManager, options.registry, publicWhoami, organizationRole, targets)
     const hasPublicRegistryTarget = releaseSpecs.some((spec) => {
       const target = targets[spec.key]
       return normalizeRegistry(target.registry) === PUBLIC_NPM_REGISTRY
