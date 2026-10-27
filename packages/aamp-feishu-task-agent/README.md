@@ -140,7 +140,7 @@ links to the official Node.js LTS download page; it does not install or modify
 the user's package managers automatically:
 
 ```bash
-npx -y --package @larktask/aamp-feishu-task-agent@dev \
+npx -y --package @larktask/aamp-feishu-task-agent@latest \
   feishu-task-agent install
 ```
 

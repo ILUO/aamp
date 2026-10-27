@@ -68,7 +68,8 @@ export async function runWindowsUpdate(context, injected = {}) {
     try {await mkdir(path.dirname(cacheFile),{recursive:true});await writeFile(cacheFile,JSON.stringify({version:1,checked_at:now,current_version:metadata.version,latest_version:latest}));}catch {}
   };
   let latest;
-  try { latest=await capture(['view',`${metadata.name}@${env.AAMP_TASK_AGENT_CHANNEL || 'dev'}`,'version']); }
+  const defaultChannel=String(metadata.version).split('+')[0].includes('-')?'dev':'latest';
+  try { latest=await capture(['view',`${metadata.name}@${env.AAMP_TASK_AGENT_CHANNEL || defaultChannel}`,'version']); }
   catch(error) {console.error(`Task Agent 更新检查失败，继续当前版本：${error.message}`);return noUpdate();}
   if(!taskAgentVersionIsNewer(metadata.version,latest)) {await remember(latest);return noUpdate();}
   let installedDir;

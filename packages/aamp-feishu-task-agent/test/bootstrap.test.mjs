@@ -33,6 +33,7 @@ test('global Task Agent installation requires the TraeCode readiness helper', ()
 test('task agent source keeps canonical package metadata and keeps release versions consistent with defaults', () => {
   const canonicalPackage = '@larktask/aamp-feishu-task-agent'
   const releasedTaskAgent = '@larktask/aamp-feishu-task-agent'
+  const releaseChannel = packageJson.version.split('+')[0].includes('-') ? 'dev' : 'latest'
   const source = readFileSync(bootstrap, 'utf8')
   const controller = readFileSync(path.resolve(__dirname, '../bin/feishu-task-agent-controller.mjs'), 'utf8')
   const readme = readFileSync(path.resolve(__dirname, '../README.md'), 'utf8')
@@ -50,8 +51,8 @@ test('task agent source keeps canonical package metadata and keeps release versi
   assert.equal(packageLock.packages[''].version, packageJson.version)
   assert.match(controller, /process\.env\.AAMP_TASK_ACP_BRIDGE_PKG \|\| TASK_DEFAULTS\.packages\.acpBridge/)
   assert.match(source, new RegExp(`AAMP_TASK_AGENT_NAME=\"\\$\\{AAMP_TASK_AGENT_NAME:-${releasedTaskAgent.replace('/', '\\/')}\\}\"`))
-  assert.match(controller, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@dev feishu-task-agent install`))
-  assert.match(readme, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@dev`))
+  assert.match(controller, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@${releaseChannel} feishu-task-agent install`))
+  assert.match(readme, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@${releaseChannel}`))
 })
 
 test('bootstrap embedded version matches the published package version', () => {

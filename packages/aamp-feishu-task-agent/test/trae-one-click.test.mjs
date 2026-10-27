@@ -385,10 +385,11 @@ test('Trae one-click source records the released ACP identity at the source pack
   assert.equal(acpLock.packages[''].version, acpPackage.version)
   assert.equal(taskLock.version, packageJson.version)
   assert.equal(taskLock.packages[''].version, packageJson.version)
-  const pinnedAcp = `@zhengqilin/aamp-acp-bridge@${acpPackage.version}`
-  assert.equal(bootstrapSource.includes(`ACP_BRIDGE_PKG="\${ACP_BRIDGE_PKG:-${pinnedAcp}}"`), true)
   const defaults = JSON.parse(readFileSync(path.resolve(__dirname, '../bootstrap/task-agent-defaults.json'), 'utf8'))
-  assert.equal(defaults.packages.acpBridge, pinnedAcp)
+  const pinnedAcp = defaults.packages.acpBridge
+  assert.match(pinnedAcp, /^@[^/]+\/aamp-acp-bridge@[^@]+$/)
+  assert.equal(pinnedAcp.slice(pinnedAcp.lastIndexOf('@') + 1), acpPackage.version)
+  assert.equal(bootstrapSource.includes(`ACP_BRIDGE_PKG="\${ACP_BRIDGE_PKG:-${pinnedAcp}}"`), true)
   assert.match(controllerSource, /process\.env\.AAMP_TASK_ACP_BRIDGE_PKG \|\| TASK_DEFAULTS\.packages\.acpBridge/)
 })
 

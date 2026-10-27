@@ -93,7 +93,7 @@ const TASK_DEFAULTS = JSON.parse(fs.readFileSync(new URL('../bootstrap/task-agen
 const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || TASK_DEFAULTS.packages.acpBridge;
 const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || TASK_DEFAULTS.packages.feishuBridge;
 const INSTALL_COMMAND = process.env.AAMP_TASK_INSTALL_COMMAND
-  || (process.platform === 'win32' ? taskCommand('install') : 'npx -y --package @larktask/aamp-feishu-task-agent@dev feishu-task-agent install');
+  || (process.platform === 'win32' ? taskCommand('install') : 'npx -y --package @larktask/aamp-feishu-task-agent@latest feishu-task-agent install');
 const DEFAULT_AGENT = process.env.AAMP_TASK_DEFAULT_AGENT || '';
 const DEFAULT_AAMP_HOST = process.env.AAMP_TASK_AAMP_HOST || 'https://meshmail.ai';
 const DEBUG_MODE = process.env.AAMP_TASK_DEBUG_MODE === 'true';
