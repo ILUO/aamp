@@ -8,20 +8,13 @@ on:
       - 'packages/sdks/nodejs/**'
       - '.github/workflows/feishu-task-windows.yml'
   workflow_dispatch:
-    inputs:
-      feishu_candidate_only:
-        description: Build an unpublished Feishu-only candidate with published SDK 0.1.24
-        type: boolean
-        required: false
-        default: false
 permissions:
   contents: read
 concurrency:
-  group: feishu-task-native-${{ github.workflow }}-${{ github.ref }}-${{ inputs.feishu_candidate_only && 'candidate' || 'native' }}
+  group: feishu-task-native-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   native:
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.feishu_candidate_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -112,98 +105,3 @@ jobs:
         with:
           name: feishu-task-${{ matrix.os }}-node${{ matrix.node }}
           path: artifacts/*.tgz
-  feishu-candidate:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.feishu_candidate_only }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    defaults:
-      run:
-        shell: bash
-        working-directory: packages/aamp-feishu-bridge
-    env:
-      CANDIDATE_SDK_SPEC: npm:@larktask/aamp-sdk@0.1.24
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: packages/aamp-feishu-bridge/package-lock.json
-      - name: Install Feishu dependencies with the published candidate SDK
-        run: |
-          npm ci
-          npm install --no-save --package-lock=false --ignore-scripts --registry https://registry.npmjs.org "aamp-sdk@$CANDIDATE_SDK_SPEC"
-          npm view '@larktask/aamp-sdk@0.1.24' --registry https://registry.npmjs.org --json > "$RUNNER_TEMP/feishu-candidate-sdk.json"
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import { readFileSync } from 'node:fs';
-          const installed = JSON.parse(readFileSync('node_modules/aamp-sdk/package.json', 'utf8'));
-          const published = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/feishu-candidate-sdk.json`, 'utf8'));
-          const sdk = await import('aamp-sdk');
-          assert.equal(installed.name, '@larktask/aamp-sdk');
-          assert.equal(installed.version, '0.1.24');
-          assert.equal(published.dist.integrity, 'sha512-Sq7H+jX3ylgp4a0s62nUwQLq0oxr96/FNTH4i9tbP46w5g792BuXRSEl3B2vBtwDxab4HJFQmYA5XM/BiHP/Tg==');
-          assert.equal(sdk.AAMP_CANCEL_RESULT_CONTEXT_KEY, 'aamp_cancel_result');
-          NODE
-          git diff --exit-code -- package.json package-lock.json
-      - name: Feishu candidate tests
-        run: node --import tsx --test 'src/**/*.test.ts'
-      - name: Feishu candidate types
-        run: node node_modules/typescript/bin/tsc --noEmit
-      - name: Build Feishu candidate
-        run: npm run build
-      - name: Stage and pack unpublished Feishu candidate
-        env:
-          CANDIDATE_DIR: ${{ runner.temp }}/feishu-candidate
-          CANDIDATE_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/feishu-candidate
-        run: |
-          node --input-type=module <<'NODE'
-          import { createHash } from 'node:crypto';
-          import { execFileSync } from 'node:child_process';
-          import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-          import path from 'node:path';
-          const source = JSON.parse(readFileSync('package.json', 'utf8'));
-          const dependencies = Object.entries(source.dependencies).map(([name, sourceSpec]) => {
-            const installed = JSON.parse(readFileSync(path.join('node_modules', name, 'package.json'), 'utf8'));
-            const packedSpec = name === 'aamp-sdk' ? process.env.CANDIDATE_SDK_SPEC : installed.version;
-            return { name, sourceSpec, installedName: installed.name, installedVersion: installed.version, packedSpec };
-          });
-          const staged = {
-            ...source,
-            version: `${source.version}.ui01.${process.env.GITHUB_SHA.slice(0, 12)}`,
-            files: ['dist', 'candidate-manifest.json'],
-            dependencies: Object.fromEntries(dependencies.map(({ name, packedSpec }) => [name, packedSpec])),
-          };
-          const publishedSdk = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/feishu-candidate-sdk.json`, 'utf8'));
-          const manifest = {
-            candidateOnly: true,
-            sourceRepository: process.env.GITHUB_REPOSITORY,
-            sourceSHA: process.env.GITHUB_SHA,
-            sourceRef: process.env.GITHUB_REF,
-            sourcePackage: { name: source.name, version: source.version },
-            candidatePackage: { name: staged.name, version: staged.version },
-            workflowRun: `https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-            nodeVersion: process.version,
-            npmVersion: execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim(),
-            sourceLockSHA256: createHash('sha256').update(readFileSync('package-lock.json')).digest('hex'),
-            dependencies,
-            publishedSDK: { name: publishedSdk.name, version: publishedSdk.version, dist: publishedSdk.dist },
-            validation: ['Feishu tests', 'TypeScript noEmit', 'npm run build'],
-          };
-          mkdirSync(process.env.CANDIDATE_DIR, { recursive: true });
-          mkdirSync(process.env.CANDIDATE_ARTIFACT_DIR, { recursive: true });
-          cpSync('dist', path.join(process.env.CANDIDATE_DIR, 'dist'), { recursive: true });
-          writeFileSync(path.join(process.env.CANDIDATE_DIR, 'package.json'), `${JSON.stringify(staged, null, 2)}\n`);
-          for (const directory of [process.env.CANDIDATE_DIR, process.env.CANDIDATE_ARTIFACT_DIR]) {
-            writeFileSync(path.join(directory, 'candidate-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-          }
-          NODE
-          npm pack "$CANDIDATE_DIR" --ignore-scripts --json --pack-destination "$CANDIDATE_ARTIFACT_DIR" > "$CANDIDATE_ARTIFACT_DIR/pack-result.json"
-          git diff --exit-code -- package.json package-lock.json
-          cd "$CANDIDATE_ARTIFACT_DIR"
-          sha256sum ./*.tgz > SHA256SUMS
-      - uses: actions/upload-artifact@v4
-        with:
-          name: feishu-candidate-${{ github.sha }}-node22
-          path: artifacts/feishu-candidate/*
-          if-no-files-found: error
