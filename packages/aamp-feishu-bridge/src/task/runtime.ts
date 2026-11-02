@@ -2333,6 +2333,11 @@ export class FeishuTaskBridgeRuntime {
       }
       return
     }
+    // User subscriptions can deliver controlled legacy events before this bridge receives START.
+    if (event.eventTypes.includes('task_agent_controlled')) {
+      await this.ignoreFeishuTaskEvent(event, 'controlled_task_uses_commands')
+      return
+    }
     this.logger.log(`${formatTaskLogPrefix(event.taskGuid, event.eventId)} received kind=${eventKind} types=${event.eventTypes.join(',') || '(unknown)'}`)
 
     const aampTaskId = buildFeishuTaskId(event)

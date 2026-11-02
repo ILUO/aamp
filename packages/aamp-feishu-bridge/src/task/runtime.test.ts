@@ -530,6 +530,53 @@ function controlledFeedbackRecords(): {
   }
 }
 
+test('controlled legacy events do not execute before an explicit START', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-controlled-create-'))
+  const aamp = new FakeAampClient()
+  const feishu = new FakeFeishuTaskClient()
+  const taskGuid = 'task_controlled_create_only'
+  feishu.tasks[taskGuid] = { guid: taskGuid, summary: '仅创建', status: 'todo', agentTaskStatus: 1 }
+  feishu.getComment = async () => ({ id: 'comment_before_start', authorType: 'user', authorId: 'ou_human', content: '补充说明' })
+  const feedback = controlledFeedbackRecords()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir, aampClient: aamp, feishuClient: feishu, controlledFeedbackTransport: feedback.transport,
+    logger: { log: () => {}, error: () => {} },
+  })
+  try {
+    await runtime.start()
+    const eventTypes = [
+      ['task_create', 'task_summary_update', 'task_desc_update', 'task_assignees_update', 'task_followers_update'],
+      ['task_comment_create'],
+      ['task_comment_reply'],
+      ['task_reminder_fire'],
+      ['task_create', 'task_comment_create'],
+    ]
+    for (const [index, types] of eventTypes.entries()) {
+      await feishu.emit({ eventId: `evt_before_start_${index}`, taskGuid,
+        eventTypes: [...types, 'task_agent_controlled'], commentId: 'comment_before_start' })
+      assert.equal(runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'controlled_task_uses_commands')
+      assert.equal(aamp.sentTasks.length, 0)
+      assert.deepEqual(feishu.writes, [])
+      assert.deepEqual(feishu.downloadedAttachmentGuids, [])
+      assert.deepEqual(runtime.getStateSnapshot().tasks, {})
+    }
+    assert.deepEqual(feedback.commands, [])
+    assert.deepEqual(feedback.states, [])
+
+    await feishu.emit({ eventId: 'evt_explicit_start', taskGuid,
+      eventTypes: ['task_agent_start'], executionId: 'execution_explicit_start', action: 'START' })
+    assert.equal(aamp.sentTasks.length, 1)
+    assert.equal(aamp.sentTasks[0]?.dispatchContext?.execution_id, 'execution_explicit_start')
+
+    await feishu.emit({ eventId: 'evt_legacy_create', taskGuid: 'task_legacy_create', eventTypes: ['task_create'] })
+    assert.equal(aamp.sentTasks.length, 2)
+    assert.equal(aamp.sentTasks[1]?.taskId, 'feishu-task-task_legacy_create-evt_legacy_create')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 async function seedControlledExecution(configDir: string, taskGuid: string, executionId: string): Promise<string> {
   const aampTaskId = `feishu-task-${taskGuid}-${executionId}`
   const now = new Date().toISOString()
@@ -577,7 +624,8 @@ async function controlledReplyFixture() {
 test('controlled human reply reuses execution and session with a fresh AAMP task and reports progress', async () => {
   const f = await controlledReplyFixture()
   try {
-    await f.feishu.emit(f.event)
+    await f.feishu.emit({ ...f.event, eventTypes: ['task_comment_create', 'task_agent_controlled'] })
+    await f.feishu.emit({ ...f.event, eventId: 'evt_reply_user_copy' })
     assert.equal(f.aamp.sentTasks.length, 1)
     const sent = f.aamp.sentTasks[0]!
     assert.equal(sent.taskId, f.childId)
